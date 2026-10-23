@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A development server whose Vite dependency cache is empty or out of date no longer reloads every open page right after it starts. Vite's dependency scan skips the modules the Vite plugin generates, so it met `svelte-realtime/client`, which every generated `$live` client module imports, and `svelte-realtime/devtools` only once those modules loaded. It then optimized its dependencies again, which could reload every open page. The plugin now adds both entry points to dependency optimization up front, `svelte-realtime/devtools` only while devtools is enabled. It leaves the configuration alone when Vite resolves svelte-realtime outside node_modules, as for a linked copy, when svelte-realtime is excluded from optimization, or when dependency discovery is off.
+- On Windows, `npx svelte-realtime` installs the newest compatible svelte-adapter-uws and svelte-realtime. The command shell removed the `^` from both version ranges, so new projects got exactly svelte-adapter-uws 0.5.11 and svelte-realtime 0.5.14. The scaffolder also no longer triggers Node's DEP0190 deprecation warning there. The README's manual install command quotes both ranges, so it works the same way in cmd.exe.
 
 ## [0.5.14] - 2026-10-20
 

@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve, join } from 'path';
 import * as p from '@clack/prompts';
-import { detectAgent, parseArgs, supportsScaffoldNode, VALID_NAME_RE } from './cli-utils.js';
+import { cmdLine, detectAgent, parseArgs, supportsScaffoldNode, VALID_NAME_RE } from './cli-utils.js';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -234,20 +234,20 @@ p.outro(`Done. cd ${name} && ${agent} run dev`);
 // ---------------------------------------------------------------------------
 
 /**
- * Run an external binary. Args are passed as an explicit array so they reach
- * the OS exec call without shell tokenization - no template-string injection
- * possible from this entrypoint regardless of how the caller assembles args.
+ * Run an external binary. On Linux / Mac args are passed as an explicit array
+ * straight to the OS exec call, with no shell to tokenize them.
  *
  * On Windows, package-manager shims (npm.cmd / pnpm.cmd / yarn.cmd / bun.cmd
  * / npx.cmd) must run under a shell because Node >=22 EINVALs `.cmd` files
- * under `shell: false`. The `shell: IS_WIN` toggle is scoped per-call to that
- * platform-specific need; on Linux / Mac the no-shell path is the default.
- * Even on Windows, the shell:true escaping caveat (DEP0190) is bounded here
- * because every arg fed to run() in this file is either a hardcoded literal,
- * the cli-utils VALID_NAME_RE-validated project name, or the hardcoded demo
- * repo URL - none of which carry shell metacharacters. Adding an arg from an
- * unvalidated source reintroduces the shell-injection class this refactor
- * was designed to remove; new args must keep that invariant.
+ * under `shell: false`. Node would only concatenate separate args for the
+ * shell (DEP0190), so run() hands cmd.exe one command line built by cmdLine,
+ * which quotes what cmd.exe would rewrite (it strips the ^ from the version
+ * ranges installed below) and refuses what quoting cannot protect. Every arg
+ * fed to run() in this file is a hardcoded literal, the cli-utils
+ * VALID_NAME_RE-validated project name, or the hardcoded demo repo URL.
+ * Adding an arg from an unvalidated source reintroduces the shell-injection
+ * class this refactor was designed to remove; new args must keep that
+ * invariant.
  *
  * @param {string} file
  * @param {string[]} args
@@ -269,12 +269,8 @@ function run(file, args, cwd) {
 		if (/^npm_config_(package|call)$/i.test(key)) delete env[key];
 	}
 	try {
-		execFileSync(file, args, {
-			cwd,
-			stdio: 'inherit',
-			env,
-			shell: IS_WIN
-		});
+		if (IS_WIN) execFileSync(cmdLine(file, args), { cwd, stdio: 'inherit', env, shell: true });
+		else execFileSync(file, args, { cwd, stdio: 'inherit', env });
 	} catch (e) {
 		const line = `${file} ${args.join(' ')}`;
 		p.cancel(`Command failed: ${line}\n${/** @type {any} */ (e).stderr || /** @type {any} */ (e).message}`);

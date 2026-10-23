@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve, dirname } from 'node:path';
-import { parseArgs, detectAgent, supportsScaffoldNode } from '../cli-utils.js';
+import { resolve, dirname, join } from 'node:path';
+import { parseArgs, detectAgent, supportsScaffoldNode, cmdLine } from '../cli-utils.js';
 
 const _here = dirname(fileURLToPath(import.meta.url));
 const _cliSrc = readFileSync(resolve(_here, '..', 'cli.js'), 'utf8');
@@ -255,6 +257,54 @@ describe('run() helper', () => {
 	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {
 		expect(_cliSrc).toMatch(/function\s+bin\s*\(/);
 		expect(_cliSrc).toMatch(/IS_WIN\s*&&\s*name\s*!==\s*'git'/);
+	});
+});
+
+describe('command lines on Windows', () => {
+	const install = ['install', 'svelte-adapter-uws@^0.5.11', 'svelte-realtime@^0.5.14'];
+
+	it('quotes arguments that cmd.exe would rewrite and leaves the rest alone', () => {
+		expect(cmdLine('npm.cmd', install)).toBe('npm.cmd install "svelte-adapter-uws@^0.5.11" "svelte-realtime@^0.5.14"');
+		expect(cmdLine('npx.cmd', ['-y', 'sv@1.1.1', 'create', 'my-app', 'a b', 'x&y', 'x|y', 'x<y', 'x>y', 'f(x)']))
+			.toBe('npx.cmd -y sv@1.1.1 create my-app "a b" "x&y" "x|y" "x<y" "x>y" "f(x)"');
+		expect(cmdLine('npm.cmd', ['run', ''])).toBe('npm.cmd run ""');
+	});
+
+	it.each(['say "hi"', '%PATH%', 'wow!', 'a\nb', 'a\rb', 'C:\\dir\\'])('refuses %j, which quoting cannot protect', arg => {
+		expect(() => cmdLine('npm.cmd', [arg])).toThrow(/cannot be passed through cmd.exe/);
+	});
+
+	it('accepts every literal argument run() is given in cli.js', () => {
+		const calls = _cliSrc.split('\n').filter(line => /\brun\(/.test(line) && !/function\s+run\s*\(/.test(line));
+		const literals = calls.flatMap(line => [...line.matchAll(/'([^']*)'/g)].map(m => m[1]));
+		const constants = ['SV_SPEC', 'DEMO_REPO'].map(name => new RegExp(`const ${name} = '([^']+)'`).exec(_cliSrc)[1]);
+		expect(literals).toContain('svelte-realtime@^0.5.14');
+		expect(() => cmdLine('npm.cmd', [...literals, ...constants])).not.toThrow();
+	});
+
+	it('runs Windows commands as one quoted command line, without an args array', () => {
+		expect(_cliSrc).toMatch(/if \(IS_WIN\) execFileSync\(cmdLine\(file, args\), \{[^}]*shell: true \}\);/);
+		expect(_cliSrc).toMatch(/else execFileSync\(file, args, \{ cwd, stdio: 'inherit', env \}\);/);
+	});
+
+	it.runIf(process.platform === 'win32')('keeps version ranges intact through .cmd shims', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'realtime-cmd-'));
+		try {
+			const node = '"' + process.execPath + '" "%~dp0args.js" %*';
+			writeFileSync(join(dir, 'args.js'), 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+			// One shim in the shape npm.cmd has, one with %* inside a block as in the corepack shims.
+			writeFileSync(join(dir, 'plain.cmd'), '@' + node + '\r\n');
+			writeFileSync(join(dir, 'block.cmd'), '@IF EXIST "%~dp0args.js" (\r\n  ' + node + '\r\n) ELSE (\r\n  exit /b 1\r\n)\r\n');
+			const received = command => JSON.parse(execFileSync(command, { cwd: dir, shell: true, encoding: 'utf8' }));
+			// An explicit relative path: cmd.exe may be set not to search the working directory.
+			for (const shim of ['.\\plain.cmd', '.\\block.cmd']) {
+				expect(received(cmdLine(shim, install))).toEqual(install);
+				// Unquoted, cmd.exe consumes the caret and the ranges become exact versions.
+				expect(received([shim, ...install].join(' '))).toEqual(['install', 'svelte-adapter-uws@0.5.11', 'svelte-realtime@0.5.14']);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

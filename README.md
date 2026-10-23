@@ -56,7 +56,7 @@ In SvelteKit 3 development, live modules share the server environment used by Sv
 ### Step 1: Install everything
 
 ```bash
-npm install svelte-adapter-uws@^0.5.11 svelte-realtime@^0.5.14
+npm install "svelte-adapter-uws@^0.5.11" "svelte-realtime@^0.5.14"
 npm install uNetworking/uWebSockets.js#v20.69.0
 npm install -D ws
 ```

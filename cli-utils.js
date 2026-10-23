@@ -77,6 +77,24 @@ export function parseArgs(argv, opts) {
 }
 
 /**
+ * The command line that runs file with args through cmd.exe, which the
+ * package-manager shims need on Windows. cmd.exe and a .cmd shim each read ^
+ * as an escape character, so an unquoted `svelte-realtime@^0.5.14` reaches npm
+ * as `svelte-realtime@0.5.14` and installs exactly that version. Quoting keeps
+ * ^, &, |, <, >, parentheses and spaces literal. What quoting cannot protect is
+ * refused: a double quote, %, !, a line break, or a trailing backslash.
+ * @param {string} file
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function cmdLine(file, args) {
+	return [file, ...args].map((arg) => {
+		if (/["%!\r\n]|\\$/.test(arg)) throw new Error(`Argument cannot be passed through cmd.exe: ${arg}`);
+		return arg === '' || /[\s^&|<>()]/.test(arg) ? `"${arg}"` : arg;
+	}).join(' ');
+}
+
+/**
  * Whether Node meets the requirements of the generated SvelteKit 3 project.
  * @param {string} version
  */
