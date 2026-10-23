@@ -853,6 +853,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * @type {Array<{ change: any, optimisticKey: any, touched: Set<any> | null | undefined, serverConfirmed: boolean, superseded: boolean }>}
 	 */
 	const _optimisticQueue = [];
+	/** How many queue entries a replay has hidden; see `_replayQueue`. */
+	let _hiddenCount = 0;
 
 	/**
 	 * Un-overlaid server-side state when queue mode is active; null
@@ -1461,7 +1463,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * event that changed the data nor another mutate. Only `own`, the entry a
 	 * mutate is adding, throws out of here: that mutate rejects with no call
 	 * made. A function change throws on its draft, before the index is
-	 * rebuilt, so the value and index replayed so far stay intact.
+	 * rebuilt, so the value and index replayed so far stay intact; rows it
+	 * edited in place before throwing are shared with the server state and
+	 * stay changed.
 	 *
 	 * @param {any} [own]
 	 * @returns {{ value: any, index: Map<any, number> }}
@@ -1478,6 +1482,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			} catch (err) {
 				if (entry === own) throw err;
 				entry.hidden = true;
+				_hiddenCount++;
 				_reportMutateError('an optimistic change threw when replayed, so it is not shown', err);
 				continue;
 			}
@@ -2644,8 +2649,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 * changes (push, pop, filter, splice) participate in replay
 		 * cleanly; in-place mutations of individual items
 		 * (e.g. `draft[0].name = 'x'`) are NOT isolated - the draft and
-		 * the prior items share references. To mutate an item field,
-		 * replace the whole item:
+		 * the prior items share references. Replace rows rather than edit
+		 * them in place: an in-place edit also changes the server state the
+		 * change replays over, and is not undone when the call fails or the
+		 * change throws. To change an item field, replace the whole item:
 		 * `draft[i] = { ...draft[i], name: 'x' }`.
 		 *
 		 * @template T
@@ -2719,11 +2726,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			// puts its frame on the wire after the frame that caused it.
 			let replayed;
 			let op;
+			const hiddenBefore = _hiddenCount;
 			try {
 				replayed = _replayQueue(entry);
 				op = asyncOp();
 			} catch (err) {
 				_discard();
+				// An entry this replay hid still shows what it last produced.
+				if (_hiddenCount !== hiddenBefore && _optimisticQueue.length > 0) _recomputeDisplay();
 				throw err;
 			}
 			currentValue = replayed.value;

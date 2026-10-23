@@ -850,6 +850,59 @@ describe('__stream() mutate', () => {
 		}
 	});
 
+	it('a resubscribe answer that removes the row a queued change needs hides that change', async () => {
+		const ctx = await setupCrudStream('mut/replay-refetch', 'mut-replay-refetch', [{ id: 1, n: 0 }]);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		try {
+			let resolveB;
+			// Not an RPC, so the reconnect does not settle it.
+			const b = ctx.store.mutate(() => new Promise((r) => { resolveB = r; }), (draft) => {
+				const i = draft.findIndex((row) => row.id === 1);
+				draft[i] = { ...draft[i], n: draft[i].n + 1 };
+			});
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, n: 1 }]);
+			simulateStatus('disconnected');
+			simulateStatus('open');
+			await new Promise((r) => setTimeout(r, 250));
+			const resubscribe = sendQueuedFn.mock.calls.map((c) => c[0]).filter((f) => f && f.rpc === 'mut/replay-refetch').at(-1);
+			expect(() => simulateRpcResponse(resubscribe.id, { ok: true, data: [{ id: 2, n: 0 }], topic: 'mut-replay-refetch', merge: 'crud', key: 'id' })).not.toThrow();
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 2, n: 0 }]);
+			resolveB('b');
+			await expect(b).resolves.toBe('b');
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 2, n: 0 }]);
+		} finally {
+			vi.unstubAllGlobals();
+			ctx.unsub();
+		}
+	});
+
+	it('a mutate whose call throws synchronously drops the output of a change its replay hid', async () => {
+		const ctx = await setupCrudStream('mut/replay-sync-throw', 'mut-replay-sync-throw', [{ id: 1, n: 0 }]);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		let runs = 0;
+		try {
+			const b = ctx.store.mutate(() => __rpc('mut/counter-b')(), (draft) => {
+				if (++runs > 1) throw new Error('counted twice');
+				draft[0] = { ...draft[0], n: draft[0].n + 1 };
+			});
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, n: 1 }]);
+			await expect(ctx.store.mutate(() => { throw new Error('sync throw'); }, { event: 'created', data: { id: 'a' } })).rejects.toThrow('sync throw');
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, n: 0 }]);
+			const frame = sendQueuedFn.mock.calls.map((c) => c[0]).filter((f) => f && f.rpc === 'mut/counter-b').at(-1);
+			simulateRpcResponse(frame.id, { ok: true, data: 'b' });
+			await expect(b).resolves.toBe('b');
+			expect(runs).toBe(2);
+		} finally {
+			vi.unstubAllGlobals();
+			ctx.unsub();
+		}
+	});
+
 	it('a change that throws when applied to the server state is left out and reported', async () => {
 		const ctx = await setupCrudStream('mut/graduate-throws', 'mut-graduate-throws', [{ id: 1 }]);
 		const save = __rpc('mut/save-graduate-throws');

@@ -1120,8 +1120,8 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/connection.js:263</code>
 - <code>src/client/internal-state.js:140</code>
 - <code>src/client/offline.js:315</code>
-- <code>src/client/stream.js:2105</code>
-- <code>src/client/stream.js:2893</code>
+- <code>src/client/stream.js:2110</code>
+- <code>src/client/stream.js:2903</code>
 - <code>src/client/upload.js:632</code>
 - <code>src/client/upload.js:744</code>
 - <code>src/client/upload.js:808</code>
