@@ -4,7 +4,7 @@
 // gate, and hand the snapshot to a caller that may not subscribe.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { live, LiveError, guard } from '../src/server.js';
+import { live, LiveError, guard, pipe } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 import { handleRpc } from '../src/server/dispatch.js';
 
@@ -225,5 +225,21 @@ describe('plain RPC frames to stream paths', () => {
 		await settle();
 		expect(a.value).toEqual(['a']);
 		expect(b.value).toEqual(['b']);
+	});
+
+	it('a piped rate-limited stream loader keeps a bucket per stream path', async () => {
+		env.register('plimits', {
+			a: pipe(live.stream('plimits:a', live.rateLimit({ points: 1, window: 60000 }, async () => ['a']))),
+			b: pipe(live.stream('plimits:b', live.rateLimit({ points: 1, window: 60000 }, async () => ['b'])))
+		});
+		const c = env.connect(alice);
+		const a = c.subscribe('plimits/a');
+		const b = c.subscribe('plimits/b');
+		await settle();
+		expect(a.error).toBeNull();
+		expect(b.error).toBeNull();
+		const again = c.subscribe('plimits/a');
+		await settle();
+		expect(again.error).toMatchObject({ code: 'RATE_LIMITED' });
 	});
 });
