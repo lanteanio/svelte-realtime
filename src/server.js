@@ -2150,7 +2150,7 @@ live.public = function publicMarker(fn) {
  * heartbeats. The handler-level marker is intent + documentation; the wire
  * shape (no `id` field) is the actual contract, so calling
  * `.fireAndForget()` on a non-volatile handler also works (server processes
- * it, just skips the reply). The marker exists so reviewers can see at a
+ * it, just skips the reply). The marker exists so readers can see at a
  * glance that a handler is intentionally one-way and that errors will not
  * surface to the caller.
  *
@@ -3626,13 +3626,12 @@ installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBou
 export function _activateDerived(platform) {
 	state.derivedPlatform = platform;
 	state.activateDerivedCalled = true;
-	// Install the framework's publish wrap unconditionally. Pre-0.5.7 this
-	// was gated on "any reactive primitives registered?" to avoid wrap
-	// overhead on apps that didn't use derived/effect/aggregate. With the
-	// wrap now also responsible for bus routing (every publish surface
-	// consults `_getBus()` via `derivedPublish`), gating would create a
-	// window where a publish escapes routing - the late-activation race
-	// from the 0.5.6 audit. The per-publish overhead of an empty wrap is
+	// Install the framework's publish wrap unconditionally, even when no
+	// derived, effect or aggregate is registered. The wrap also routes every
+	// publish through the bus (each publish surface consults `_getBus()` via
+	// `derivedPublish`), so installing it only once a reactive primitive
+	// registers would leave a window in which a publish escapes routing. The
+	// per-publish overhead of an empty wrap is
 	// one function call plus a `Map.has` check on an empty Map (`O(1)`,
 	// branch-predicted to false); the install cost is one closure scope
 	// per platform, paid once at init.

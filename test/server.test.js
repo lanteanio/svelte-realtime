@@ -6124,9 +6124,9 @@ describe('live.room()', () => {
 	});
 
 	it('stream RPC routes through platform.subscribe so the adapter sees the subscription', async () => {
-		// The stream RPC path
-		// must call `platform.subscribe(ws, topic)` (atomic gate + ws.subscribe
-		// + cap + adapter-side state update) rather than raw `ws.subscribe`.
+		// The stream RPC path must call `platform.subscribe(ws, topic)` (atomic
+		// gate + ws.subscribe + cap + adapter-side state update) rather than raw
+		// `ws.subscribe`.
 		// Without this, the adapter's `MAX_SUBSCRIPTIONS_PER_CONNECTION`
 		// cap is bypassed and stream-RPC subscriptions are invisible to
 		// the close-hook's `ctx.subscriptions` set and to `totalSubscriptions`.

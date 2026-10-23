@@ -120,6 +120,15 @@ function importsResolve(file) {
 }
 
 /**
+ * Parse a package.json, ignoring a leading byte order mark as Vite does.
+ * @param {string} file
+ */
+function readManifest(file) {
+	const text = readFileSync(file, 'utf8');
+	return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+}
+
+/**
  * The version of the package `name` that `file` belongs to, or null.
  * @param {string} file
  * @param {string} name
@@ -129,7 +138,7 @@ function packageVersion(file, name) {
 		const manifest = resolve(dir, 'package.json');
 		if (existsSync(manifest)) {
 			try {
-				const data = JSON.parse(readFileSync(manifest, 'utf8'));
+				const data = readManifest(manifest);
 				if (data.name === name) return typeof data.version === 'string' ? data.version : null;
 			} catch {
 				return null;
@@ -181,7 +190,7 @@ function nearestManifest(dir) {
 		const manifest = resolve(dir, 'package.json');
 		if (existsSync(manifest)) {
 			try {
-				return JSON.parse(readFileSync(manifest, 'utf8'));
+				return readManifest(manifest);
 			} catch {
 				return null;
 			}

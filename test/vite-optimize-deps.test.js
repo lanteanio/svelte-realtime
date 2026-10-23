@@ -413,6 +413,13 @@ describe('dependency optimization for generated modules', () => {
 		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual([]);
 	});
 
+	it('reads a root package.json that starts with a byte order mark', () => {
+		installRealtime(appRoot);
+		writeFileSync(resolve(appRoot, 'package.json'), '﻿' + JSON.stringify({ name: 'svelte-realtime', exports }));
+		installed();
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual([]);
+	});
+
 	it('lists every entry point the devtools module imports', () => {
 		const plugin = realtime({ typedImports: false });
 		plugin.configResolved({ root: appRoot, build: {}, command: 'serve' });
