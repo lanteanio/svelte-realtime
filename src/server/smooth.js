@@ -504,6 +504,7 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			timer: null,
 			tickDue: 0,
 			ticking: false,
+			overrunBursts: 0,
 			// Cluster bookkeeping (unused on the single-instance path). `cfg` is
 			// stashed so the module-level relay handlers can resolve a topic's
 			// initial-state factory; `registry` maps a local subscriber's identity
@@ -903,22 +904,33 @@ function _runSmoothTicks(rec) {
 			// The tick owns rearming: idle, removal, and lost ownership stop here.
 			if (rec.timer === null) return;
 			const now = monotonicNow();
-			if (now < rec.tickDue) return;
-			// Every owed tick runs. Only debt beyond the bound is dropped, so a
-			// long stall cannot turn into an unbounded burst of catch-up work.
+			if (now < rec.tickDue) {
+				// Caught up: any earlier overrun was a hitch.
+				rec.overrunBursts = 0;
+				return;
+			}
+			// Owed ticks run until the debt is paid. Debt beyond the bound is
+			// dropped, so a long stall cannot turn into an unbounded burst of
+			// catch-up work; a room that keeps overrunning drops it all below.
 			if (now - rec.tickDue > maxDebt) rec.tickDue = now - maxDebt;
 			if (count === SMOOTH_TICKS_PER_CALLBACK) {
-				// A burst that ends owing more than it started cannot catch up:
-				// ticks cost more than tickMs. Drop the debt and wait a full
-				// period, so the room does not run back to back forever.
+				// A burst that ends owing more than it started lost ground. One
+				// such burst is a hitch (a GC pause, a slow tick) and keeps its
+				// debt. Two in a row mean ticks cost more than tickMs: drop the
+				// debt and wait a full period, so the room does not run back to
+				// back forever. A burst that gains ground clears the count.
 				if (now - rec.tickDue > debtAtStart) {
-					clearTimer(rec.timer);
-					rec.timer = null;
-					rec.tickDue = now;
-					_armSmoothTick(rec);
+					if (++rec.overrunBursts >= 2) {
+						clearTimer(rec.timer);
+						rec.timer = null;
+						rec.tickDue = now;
+						_armSmoothTick(rec);
+					}
+				} else {
+					rec.overrunBursts = 0;
 				}
-				// Otherwise the timer the tick armed is due now, so the rest of
-				// the debt continues in the next callback after I/O runs.
+				// Unless the debt was dropped, the timer the tick armed is due
+				// now, so the rest continues in the next callback after I/O runs.
 				return;
 			}
 			clearTimer(rec.timer);

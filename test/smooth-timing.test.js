@@ -6,7 +6,7 @@ import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { mockWs } from './helpers/mock-ws.js';
 
-let mono, wallOffset, timers, stamps, workMs, keepAlive, platform, ws, path;
+let mono, wallOffset, timers, stamps, workMs, hitchMs, keepAlive, platform, ws, path;
 let sequence = 0;
 beforeEach(() => {
 	mono = 0;
@@ -14,6 +14,7 @@ beforeEach(() => {
 	timers = new Map();
 	stamps = [];
 	workMs = 0;
+	hitchMs = 0;
 	keepAlive = true;
 	setRuntimeEnv({
 		clock: { monotonic: () => mono, wallEpoch: () => mono + wallOffset },
@@ -38,7 +39,8 @@ function declare(tickMs) {
 		apply: (state, command) => ({ ...state, x: state.x + command.dx }),
 		onTick(world, t) {
 			stamps.push(t);
-			mono += workMs;
+			mono += workMs + hitchMs;
+			hitchMs = 0;
 			return keepAlive;
 		}
 	});
@@ -180,7 +182,11 @@ it('drops the debt and waits a full period when each tick costs more than a peri
 	workMs = 25;
 	fire();
 	expect(stamps).toHaveLength(8);
-	// The burst ended owing more than it started, so it cannot catch up.
+	// One burst that ends owing more than it started may be a hitch.
+	expect(next()[1].at).toBeLessThanOrEqual(mono);
+	fire();
+	expect(stamps).toHaveLength(16);
+	// The second in a row cannot catch up: ticks cost more than a period.
 	expect(next()[1].at).toBe(mono + 20);
 	for (let i = 0; i < 100; i++) {
 		const before = stamps.length;
@@ -199,4 +205,34 @@ it('bounds catch-up in ticks as well as time for a short tickMs', async () => {
 	// The first deadline, then the last 120 owed ticks and the one due now.
 	expect(stamps).toHaveLength(1 + 120 + 1);
 	expect(next()[1].at).toBe(start + 2000 + 1);
+});
+
+it('keeps the debt after one slow tick and pays it off', async () => {
+	await rpc('sync');
+	for (let i = 0; i < 5; i++) fire();
+	workMs = 6;
+	hitchMs = 300;
+	fire();
+	// The 300 ms tick left the burst owing more than it started, once.
+	expect(stamps).toHaveLength(5 + 8);
+	expect(next()[1].at).toBeLessThanOrEqual(mono);
+	const start = stamps[0] - 100000 - 20;
+	while (next()[1].at <= mono) fire();
+	// Every deadline up to now ran: 20, 40, ..., the one due next is a period away.
+	const due = next()[1].at;
+	expect(stamps).toHaveLength((due - 20 - start) / 20);
+	expect(due).toBeGreaterThan(mono);
+	expect(due - mono).toBeLessThanOrEqual(20);
+	// A 150 ms tick leaves debt that the next callback pays off in a few
+	// ticks. Catching up clears the hitch, so a second one keeps its debt too.
+	for (let round = 0; round < 2; round++) {
+		for (let i = 0; i < 5; i++) fire();
+		hitchMs = 150;
+		fire();
+		expect(next()[1].at).toBeLessThanOrEqual(mono);
+		const before = stamps.length;
+		fire();
+		expect(stamps.length - before).toBeLessThan(8);
+		expect(next()[1].at).toBeGreaterThan(mono);
+	}
 });
