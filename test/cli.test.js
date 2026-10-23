@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
@@ -367,5 +368,22 @@ describe('run() helper', () => {
 	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {
 		expect(_cliSrc).toMatch(/function\s+bin\s*\(/);
 		expect(_cliSrc).toMatch(/IS_WIN\s*&&\s*name\s*!==\s*'git'/);
+	});
+});
+
+describe('package bin entries', () => {
+	// npm marks a linked bin target executable on install, so a target tracked
+	// as 100644 leaves the checkout dirty after the fixture install links the
+	// package, and the release identity check refuses a dirty checkout.
+	const root = resolve(_here, '..');
+	const bins = Object.values(JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).bin || {});
+
+	it('tracks every bin target as an executable file with a node shebang', () => {
+		expect(bins.length).toBeGreaterThan(0);
+		for (const target of bins) {
+			const entry = execFileSync('git', ['ls-files', '-s', '--', target], { cwd: root, encoding: 'utf8', windowsHide: true });
+			expect(entry, target).toMatch(/^100755 /);
+			expect(readFileSync(resolve(root, target), 'utf8').startsWith('#!/usr/bin/env node\n'), target).toBe(true);
+		}
 	});
 });
