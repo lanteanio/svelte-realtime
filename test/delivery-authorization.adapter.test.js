@@ -116,4 +116,67 @@ describe.skipIf(!NATIVE)('delivery authorization on the adapter policy (requires
 		expect(has(victim, 'seed-e2')).toBe(false);
 		expect(seen.find((d) => d.kind === 'snapshot')).toMatchObject({ topic: 'scans:e2', rpc: 'scan/log', args: ['e2'], event: null });
 	});
+
+	it('refuses replayed frames after revocation and attributes them to the admitting stream', async () => {
+		const { connect, sockets } = await start();
+		grant('victim', 'e3');
+		const victim = await connect('victim');
+		await subscribe(victim, 'e3');
+		server.platform.send(sockets.get('victim'), '__replay:scans:e3', 'msg', { seq: 1, event: 'created', data: { id: 'replayed-before' } });
+		await vi.waitFor(() => expect(has(victim, 'replayed-before')).toBe(true));
+		expect(seen.find((d) => d.kind === 'replay')).toMatchObject({ topic: 'scans:e3', rpc: 'scan/log', args: ['e3'] });
+		revoke('victim');
+		server.platform.send(sockets.get('victim'), '__replay:scans:e3', 'msg', { seq: 2, event: 'created', data: { id: 'replayed-after' } });
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(has(victim, 'replayed-after')).toBe(false);
+	});
+
+	it('decides server requests without a topic and refuses them after revocation', async () => {
+		const { connect, sockets } = await start();
+		grant('victim', 'e4');
+		const victim = await connect('victim');
+		const first = server.platform.request(sockets.get('victim'), 'confirm', { step: 'request-before' }, { timeoutMs: 200 });
+		await vi.waitFor(() => expect(victim.frames.some((frame) => frame.type === 'request' && frame.data?.step === 'request-before')).toBe(true));
+		await expect(first).rejects.toThrow();
+		expect(victim.closeCode).toBeNull();
+		expect(seen.find((d) => d.kind === 'request')).toMatchObject({ topic: null, event: 'confirm', rpc: null, args: null });
+		revoke('victim');
+		const second = server.platform.request(sockets.get('victim'), 'confirm', { step: 'request-after' }, { timeoutMs: 2000 });
+		await expect(second).rejects.toThrow(/never sent/);
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(victim.frames.some((frame) => frame.data?.step === 'request-after')).toBe(false);
+	});
+
+	it('re-decides frames queued behind a pending decision with the state current when they are decided', async () => {
+		let release;
+		const gate = new Promise((resolve) => { release = resolve; });
+		let held = false;
+		const { connect } = await start((ctx, delivery) => {
+			if (ctx.user.id === 'victim' && delivery.kind === 'message' && delivery.data?.id === 'held' && !held) {
+				held = true;
+				const decision = policy(ctx, delivery);
+				return gate.then(() => decision);
+			}
+			return policy(ctx, delivery);
+		});
+		grant('victim', 'e5'); grant('control', 'e5');
+		const victim = await connect('victim');
+		const control = await connect('control');
+		await subscribe(victim, 'e5');
+		await subscribe(control, 'e5');
+		server.platform.publish('scans:e5', 'created', { id: 'held' });
+		server.platform.publish('scans:e5', 'created', { id: 'queued' });
+		await vi.waitFor(() => expect(has(control, 'queued')).toBe(true));
+		expect(has(victim, 'held')).toBe(false);
+		revoke('victim');
+		release();
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(has(victim, 'held')).toBe(true);
+		expect(has(victim, 'queued')).toBe(false);
+	});
+
+	it('passes the adapter its own option validation', async () => {
+		const hooks = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { maxPendingMessages: 1 } });
+		await expect(createTestServer({ handler: hooks })).rejects.toThrow(/maxPendingMessages/);
+	});
 });
