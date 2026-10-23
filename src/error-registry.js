@@ -22,7 +22,8 @@ export const REALTIME_ERROR_IDS = Object.freeze({
 	UPLOAD_MAX_SIZE: 'REALTIME-ERR-UPLOAD-MAX-SIZE',
 	ROOM_HISTORY_CAPTURE: 'REALTIME-ERR-ROOM-HISTORY-CAPTURE',
 	DOC_PERSIST: 'REALTIME-ERR-DOC-PERSIST',
-	LAZY_REGISTRATION: 'REALTIME-ERR-LAZY-REGISTRATION'
+	LAZY_REGISTRATION: 'REALTIME-ERR-LAZY-REGISTRATION',
+	ADAPTER_VERSION_SKEW: 'REALTIME-ERR-ADAPTER-VERSION-SKEW'
 });
 
 /** @type {ReadonlyArray<Readonly<RealtimeErrorDefinition>>} */
@@ -117,6 +118,19 @@ export const REALTIME_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/server/lazy.js']),
 		anchor: 'realtime-err-lazy-registration',
 		help: 'docs/errors.md#realtime-err-lazy-registration'
+	}),
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.ADAPTER_VERSION_SKEW,
+		code: null,
+		event: 'vite.optimize.adapter-version-skew',
+		messagePrefix: 'The linked svelte-realtime and the app resolve different svelte-adapter-uws versions',
+		cause: 'svelte-realtime is linked from outside node_modules, and the svelte-adapter-uws it resolves from its own location is a different version than the one the app resolves.',
+		consequence: "The dev server pre-bundles the app's adapter client and serves it to the app and to the linked svelte-realtime alike, while a build resolves the adapter svelte-realtime imports from its own location, so development and the build can run different adapter versions.",
+		automaticRecovery: "None; the warning is printed once per process and version pair, and development keeps serving the app's copy.",
+		nextAction: 'Install the same svelte-adapter-uws version in the app and in the linked svelte-realtime checkout, or install svelte-realtime from the registry instead of linking it.',
+		sources: Object.freeze(['src/vite/optimize-deps.js']),
+		anchor: 'realtime-err-adapter-version-skew',
+		help: 'docs/errors.md#realtime-err-adapter-version-skew'
 	})
 ]);
 

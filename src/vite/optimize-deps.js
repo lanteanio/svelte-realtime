@@ -5,6 +5,7 @@ import { dirname, relative, resolve, sep } from 'path';
 import { _findLiveFiles } from './codegen-registry.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _runeSubpathError } from './svelte-version.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 
 export const CLIENT_DEP = 'svelte-realtime/client';
 export const DEVTOOLS_DEPS = [CLIENT_DEP, 'svelte-realtime/devtools'];
@@ -138,19 +139,30 @@ function packageVersion(file, name) {
 	}
 }
 
+/** @type {Set<string>} The version pairs already warned about in this process. */
+const warnedSkew = new Set();
+
 /**
- * Whether `a` and `b` resolve `id` to the same file or to the same version
- * of its package.
- * @param {NodeJS.Require} a
- * @param {NodeJS.Require} b
+ * Warn once per process and version pair when the linked svelte-realtime and
+ * the app resolve different versions of the package of `id`.
+ * @param {NodeJS.Require} fromRealtime
+ * @param {NodeJS.Require} fromRoot
  * @param {string} id
  */
-function sameCopy(a, b, id) {
-	const fileA = realpathSync(a.resolve(id));
-	const fileB = realpathSync(b.resolve(id));
-	if (fileA === fileB) return true;
-	const version = packageVersion(fileA, packageName(id));
-	return version !== null && version === packageVersion(fileB, packageName(id));
+function warnVersionSkew(fromRealtime, fromRoot, id) {
+	const name = packageName(id);
+	const fileRealtime = realpathSync(fromRealtime.resolve(id));
+	const fileRoot = realpathSync(fromRoot.resolve(id));
+	if (fileRealtime === fileRoot) return;
+	const realtimeVersion = packageVersion(fileRealtime, name);
+	const appVersion = packageVersion(fileRoot, name);
+	if (realtimeVersion === null || appVersion === null || realtimeVersion === appVersion) return;
+	const key = realtimeVersion + '\0' + appVersion;
+	if (warnedSkew.has(key)) return;
+	warnedSkew.add(key);
+	console.warn('[svelte-realtime] ' + realtimeErrorMessage(REALTIME_ERROR_IDS.ADAPTER_VERSION_SKEW,
+		': svelte-realtime resolves ' + name + ' ' + realtimeVersion + ', the app ' + appVersion +
+		". The dev server serves the app's copy to both; a build resolves svelte-realtime's own copy."));
 }
 
 /** @param {string} id */
@@ -202,8 +214,10 @@ function excluded(exclude, id) {
  * Vite discovers when the browser requests them. Vite bundles the app's
  * resolution and hands it to every importer of the same id, so an entry is
  * added when the realtime source and the app both resolve it into
- * node_modules and to the same file or package version; a different version
- * is left to discovery.
+ * node_modules. Discovery would hand out one copy by id as well, so a
+ * different version on the two sides changes nothing about which copy runs
+ * in development; it gets a warning, since a build resolves the realtime
+ * source's own copy.
  *
  * The packages generated modules import for the export kinds the app
  * declares are the app's own imports. A realtime subpath among them is added
@@ -236,8 +250,7 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 	const fromRealtime = createRequire(entry);
 	/** @param {string} id */
 	const sharedWithRealtime = (id) => resolvesInstalled(fromRealtime, id, preserveSymlinks)
-		&& resolvesInstalled(fromRoot, id, preserveSymlinks)
-		&& sameCopy(fromRealtime, fromRoot, id);
+		&& resolvesInstalled(fromRoot, id, preserveSymlinks);
 	/** @param {string} id */
 	const realtimeImports = (id) => {
 		try {
@@ -248,9 +261,11 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 		}
 	};
 	const generated = generatedImports();
-	const add = resolvesInstalled(fromRoot, CLIENT_DEP, preserveSymlinks)
+	const installed = resolvesInstalled(fromRoot, CLIENT_DEP, preserveSymlinks);
+	const add = installed
 		? [...ids, ...generated.filter(id => packageName(id) === 'svelte-realtime')]
 		: sourceIds.filter(sharedWithRealtime);
+	if (!installed && add.length > 0) warnVersionSkew(fromRealtime, fromRoot, add[0]);
 	for (const id of generated) {
 		if (packageName(id) === 'svelte-realtime') continue;
 		if (realtimeImports(id) ? !sharedWithRealtime(id) : !resolvesInstalled(fromRoot, id, preserveSymlinks)) continue;

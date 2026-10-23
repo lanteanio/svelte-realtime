@@ -129,12 +129,37 @@ describe('dependency optimization for generated modules', () => {
 		expect(resolveWith()).toEqual(ADAPTER);
 	});
 
-	it('leaves the adapter entries to discovery when the linked package runs another adapter version', () => {
+	it('optimizes the adapter entries and warns once when the linked package runs another adapter version', () => {
 		const target = linkedRealtime();
-		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.1');
-		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.6.0');
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.1-linked');
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.6.0-app');
 		writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });");
-		expect(resolveWith()).toEqual([]);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			expect(resolveWith()).toEqual([...ADAPTER, SMOOTH_CHANNEL]);
+			expect(resolveWith()).toEqual([...ADAPTER, SMOOTH_CHANNEL]);
+			expect(warn).toHaveBeenCalledTimes(1);
+			const message = String(warn.mock.calls[0][0]);
+			expect(message).toContain('[svelte-realtime] The linked svelte-realtime and the app resolve different svelte-adapter-uws versions');
+			expect(message).toContain('svelte-adapter-uws 0.6.1-linked, the app 0.6.0-app');
+			expect(message).toContain("serves the app's copy to both; a build resolves svelte-realtime's own copy");
+			expect(message).toContain('[REALTIME-ERR-ADAPTER-VERSION-SKEW] See: docs/errors.md#realtime-err-adapter-version-skew');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('does not warn when both sides install the same adapter version', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.2-same');
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.6.2-same');
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			expect(resolveWith()).toEqual(ADAPTER);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it('leaves the adapter to be served from source where Vite would not optimize it', () => {
