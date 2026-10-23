@@ -538,11 +538,12 @@ function _compileInvalidatePattern(pattern, unscoped = false) {
  * Record a subscriber as a context a background reload can run under.
  * Every successful subscribe records one (a loader run, a replay resume, a
  * delta), in subscribe order, so a reload has a current subscriber for as
- * long as the topic has one. Keyed by socket; a re-subscribe on the same
- * socket keeps its first binding. The binding carries the subscriber's own
- * stream function, since two streams can share a topic.
+ * long as the topic has one. Keyed by socket, then by stream function: two
+ * streams can share a topic, and one socket can hold both, so each binding
+ * carries its own stream. A re-subscribe of the same stream on the same
+ * socket keeps its first binding.
  *
- * @param {Map<any, { ctx: any, args: any[], platform: any, fn: any }>} bindings
+ * @param {Map<any, Map<any, { ctx: any, args: any[], platform: any, fn: any }>>} bindings
  * @param {any} ctx
  * @param {any[]} args
  * @param {any} platform
@@ -550,41 +551,58 @@ function _compileInvalidatePattern(pattern, unscoped = false) {
  */
 function _addReloadBinding(bindings, ctx, args, platform, fn) {
 	const key = ctx.ws || ctx;
-	if (!bindings.has(key)) bindings.set(key, { ctx, args, platform, fn });
+	let byFn = bindings.get(key);
+	if (!byFn) { byFn = new Map(); bindings.set(key, byFn); }
+	if (!byFn.has(fn)) byFn.set(fn, { ctx, args, platform, fn });
 }
 
 /**
- * Forget a socket that left a topic other subscribers still hold.
+ * Forget a socket's bindings: all of them, or only those of `fns` when the
+ * socket keeps the topic through another stream.
  *
- * @param {Map<any, any>} bindings
+ * @param {Map<any, Map<any, any>>} bindings
  * @param {any} ws
+ * @param {Array<{ fn: any }> | null} fns
  */
-function _dropReloadBinding(bindings, ws) {
-	bindings.delete(ws);
+function _dropReloadBinding(bindings, ws, fns) {
+	if (!fns) { bindings.delete(ws); return; }
+	const byFn = bindings.get(ws);
+	if (!byFn) return;
+	for (const { fn } of fns) byFn.delete(fn);
+	if (byFn.size === 0) bindings.delete(ws);
 }
 
 /**
- * Drop a departing socket's reload bindings for `topic` while other sockets
- * remain subscribed. Called from every path that removes a socket from a
- * topic's subscriber set without emptying it.
+ * Drop a socket's reload bindings for `topic`: every binding when the socket
+ * left the topic (`partial` false), or only those of `owners` when it gave
+ * up those streams and keeps the topic through another. A watcher or
+ * watchdog left without bindings has nobody to reload for and is removed.
  *
  * @param {string} topic
  * @param {any} ws
  * @param {Array<{ fn: any }>} owners
+ * @param {boolean} [partial]
  */
-function _releaseReloadBindings(topic, ws, owners) {
+function _releaseReloadBindings(topic, ws, owners, partial = false) {
 	const stale = _topicStaleWatch.get(topic);
-	if (stale) _dropReloadBinding(stale.bindings, ws);
+	if (stale) {
+		_dropReloadBinding(stale.bindings, ws, partial ? owners : null);
+		if (stale.bindings.size === 0) _unregisterStaleWatch(topic);
+	}
 	if (_topicInvalidationWatch.size === 0) return;
 	for (const owner of owners) {
 		const patterns = owner.fn.__streamInvalidateOn;
 		if (!patterns) continue;
 		const scope = _invalidationScope(topic);
+		let empty = false;
 		for (const p of patterns) {
 			const entry = _topicInvalidationWatch.get(scope + '\0' + p);
 			const watcher = entry?.watchers.find(w => w.topic === topic && w.fn === owner.fn);
-			if (watcher) _dropReloadBinding(watcher.bindings, ws);
+			if (!watcher) continue;
+			_dropReloadBinding(watcher.bindings, ws, partial ? [owner] : null);
+			if (watcher.bindings.size === 0) empty = true;
 		}
+		if (empty) _unregisterInvalidationWatch(topic, owner.fn);
 	}
 }
 
@@ -603,14 +621,16 @@ function _invalidationScope(topic) {
  * throw ends the attempt. Resolves `null` when nothing should be published.
  *
  * @param {string} topic
- * @param {Map<any, { ctx: any, args: any[], platform: any, fn: any }>} bindings
+ * @param {Map<any, Map<any, { ctx: any, args: any[], platform: any, fn: any }>>} bindings
  * @param {'invalidateOn' | 'staleAfterMs'} kind
  * @returns {Promise<{ result: any, ctx: any, platform: any, fn: any } | null>}
  */
 async function _rerunStreamLoader(topic, bindings, kind) {
 	/** @type {{ err: any, ctx: any, fn: any } | null} */
 	let refused = null;
-	for (const [key, binding] of bindings) {
+	for (const [key, byFn] of bindings) {
+		// One run per subscriber: its first stream on this topic.
+		const binding = byFn.values().next().value;
 		const ws = binding.ctx.ws;
 		if (ws && !_topicWsCounts.get(topic)?.has(ws)) {
 			bindings.delete(key);
@@ -1048,7 +1068,12 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 			const idx = owners.findIndex(o => o.fn === fn);
 			if (idx >= 0) {
 				owners[idx].count--;
-				if (owners[idx].count <= 0) owners.splice(idx, 1);
+				if (owners[idx].count <= 0) {
+					owners.splice(idx, 1);
+					// The socket keeps the topic through another stream: forget only
+					// this stream's reload binding (the full leave below forgets all).
+					if (owners.length > 0) _releaseReloadBindings(topic, ws, [{ fn }], true);
+				}
 				if (owners.length === 0) {
 					topicMap.delete(topic);
 					_unregisterCoalesce(ws, topic);

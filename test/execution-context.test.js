@@ -366,4 +366,32 @@ describe('reload bookkeeping for resumed subscribers', () => {
 		expect(_topicStaleWatch.has('closedresume:feed')).toBe(false);
 		expect(_topicInvalidationWatch.size).toBe(0);
 	});
+
+	it('forgets a rolled-back stream on a socket that keeps the topic through another stream', async () => {
+		let failNext = false;
+		live.middleware(async (ctx, next) => {
+			const result = await next();
+			if (failNext) { failNext = false; throw new Error('late failure'); }
+			return result;
+		});
+		const loads = [];
+		env.register('feed', {
+			keeps: live.stream('rollback:feed', async () => { loads.push('keeps'); return { from: 'keeps' }; }, { merge: 'set' }),
+			fails: live.stream('rollback:feed', async () => { loads.push('fails'); return { from: 'fails' }; }, { merge: 'set', invalidateOn: 'rollback:control' }),
+			touch: live(ctx => ctx.publish('rollback:control', 'changed', {})),
+			ping: live(() => 'pong')
+		});
+		const alice = env.connect({ id: 'alice' });
+		await alice.subscribe('feed/keeps').waitFor(v => v?.from === 'keeps');
+		failNext = true;
+		const failed = alice.subscribe('feed/fails');
+		await vi.waitFor(() => expect(failed.error).not.toBeNull());
+		expect(loads).toEqual(['keeps', 'fails']);
+		expect(_topicInvalidationWatch.size).toBe(0);
+		const carol = env.connect({ id: 'carol' });
+		await carol.call('feed/touch');
+		await carol.call('feed/ping');
+		await new Promise(resolve => setImmediate(resolve));
+		expect(loads).toEqual(['keeps', 'fails']);
+	});
 });
