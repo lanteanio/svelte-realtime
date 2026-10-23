@@ -360,10 +360,12 @@ class JoinHold {
 /**
  * Send now, or, while the binding's join is in flight, once it settles (see
  * JoinHold). `ahead` marks the binding of a room an effect names before its
- * view has moved there.
- * @param {any} b @param {string} name @param {Function} send @param {any[]} args @param {boolean} ahead
+ * view has moved there. A held field send goes out through the room's field
+ * method, merged with the other held fields, unless `own` marks a send bound
+ * to its own call options, which keeps its fields in a request of its own.
+ * @param {any} b @param {string} name @param {Function} send @param {any[]} args @param {boolean} ahead @param {boolean} [own]
  */
-function _out(b, name, send, args, ahead) {
+function _out(b, name, send, args, ahead, own = false) {
 	const m = b.membership;
 	if (!m) return send(...args);
 	const join = _joinOf(m);
@@ -405,7 +407,7 @@ function _out(b, name, send, args, ahead) {
 		}
 	}
 	const field = name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock';
-	return join.hold.add(name, field && join.fieldSend ? join.fieldSend : send, args);
+	return join.hold.add(name, field && join.fieldSend && !own ? join.fieldSend : send, args);
 }
 
 // A generated namespace's own send members (board.move(id, ...),
@@ -458,9 +460,9 @@ function _namespaceRoom(factory, args) {
  * Route a namespace send through the hold of the room view that holds its
  * room, or send it as it is when no view holds that room.
  * @param {Function} factory @param {'move' | 'reportViewport' | 'field' | 'react'} kind
- * @param {Function} send @param {any[]} args @param {boolean} oneWay
+ * @param {Function} send @param {any[]} args @param {boolean} oneWay @param {boolean} [own] see `_out`
  */
-function _namespaceOut(factory, kind, send, args, oneWay) {
+function _namespaceOut(factory, kind, send, args, oneWay, own = false) {
 	const entry = _namespaceRoom(factory, args);
 	if (entry === null) return send(...args);
 	const n = entry.args.length;
@@ -469,7 +471,7 @@ function _namespaceOut(factory, kind, send, args, oneWay) {
 	if (kind === 'field' && (payload[0] === null || typeof payload[0] !== 'object')) return send(...args);
 	const prefix = args.slice(0, n);
 	const name = kind === 'field' ? (oneWay ? 'setSelection' : 'setTyping') : kind === 'react' ? (oneWay ? 'react' : 'reactAwaited') : kind;
-	const result = _out(entry, name, (/** @type {any[]} */ ...rest) => send(...prefix, ...rest), payload, false);
+	const result = _out(entry, name, (/** @type {any[]} */ ...rest) => send(...prefix, ...rest), payload, false, own);
 	if (!oneWay) return result;
 	if (result && typeof result.then === 'function') result.then(undefined, () => {});
 	return undefined;
@@ -487,7 +489,8 @@ function _namespaceRpc(rpc, kind, factory) {
 	call.fireAndForget = (/** @type {any[]} */ ...args) => { _namespaceOut(factory, kind, rpc.fireAndForget, args, true); };
 	call.with = (/** @type {any} */ opts) => {
 		const bound = rpc.with(opts);
-		return bound === rpc ? call : (/** @type {any[]} */ ...args) => _namespaceOut(factory, kind, bound, args, false);
+		// Like the RPC's own, the bound callable is a plain function.
+		return bound === rpc ? call : (/** @type {any[]} */ ...args) => _namespaceOut(factory, kind, bound, args, false, true);
 	};
 	// The RPC's own createOptimistic validates and shapes the change; the store
 	// it mutates runs this call instead of the bare RPC.

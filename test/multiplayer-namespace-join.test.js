@@ -193,16 +193,23 @@ it('an awaited namespace field send held for the join answers its caller with th
 	cleanups.push(() => room.destroy());
 	const results = [];
 	const pending = board._setField('r', { 'lock:title': true }).then(value => results.push(['ok', value]), error => results.push(['error', error.code]));
-	const viaWith = board._setField.with({ timeout: 5000 })('r', { typing: true }).then(() => results.push(['with']));
+	const second = board._setField('r', { typing: true }).then(() => results.push(['second']));
+	const viaWith = board._setField.with({ idempotencyKey: 'k1', timeout: 5000 })('r', { 'lock:body': true }).then(() => results.push(['with']));
 	expect(sent('__presence/update')).toEqual([]);
 	await vi.advanceTimersByTimeAsync(0);
 	await pending;
+	await second;
 	await viaWith;
-	expect(results).toEqual([['ok', undefined], ['with']]);
-	// Both fields went out merged in one delta, after the join.
-	expect(sent('__presence/update')).toHaveLength(1);
-	expect(sent('__presence/update')[0].args).toEqual(['r', { 'lock:title': true, typing: true }]);
-	expect(peer.roster.value[0]).toMatchObject({ key: 'alice', 'lock:title': true, typing: true });
+	expect(results).toEqual([['ok', undefined], ['second'], ['with']]);
+	// The plain fields went out merged in one delta after the join; the call
+	// bound to its own options went out on its own, with its key.
+	const updates = sent('__presence/update');
+	expect(updates).toHaveLength(2);
+	expect(updates[0].args).toEqual(['r', { 'lock:title': true, typing: true }]);
+	expect(updates[0].idempotencyKey).toBeUndefined();
+	expect(updates[1].args).toEqual(['r', { 'lock:body': true }]);
+	expect(updates[1].idempotencyKey).toBe('k1');
+	expect(peer.roster.value[0]).toMatchObject({ key: 'alice', 'lock:title': true, typing: true, 'lock:body': true });
 });
 
 it('a namespace send with no view holding the room, or for another room, goes out at once', async () => {

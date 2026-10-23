@@ -136,7 +136,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Offline upload checkpoints, whose keys name their `persistKey`, now expire with their namespace: each carries the queue's retention expiry, and the built-in store deletes an expired one at open once no queue row of that namespace remains. A checkpoint stored without an expiry gets one at its first open. The README persistence example uses an opaque per-account key.
 
-- A generated multiplayer namespace send called directly while a view on the page holds the same room - `board.move(id, ...)` or a presence field in a mount effect beside `board.room(() => id)` - waits for that view's join like the view's own sends, instead of reaching the server ahead of the join and being dropped.
+- A generated multiplayer namespace send called directly while a view on the page holds the same room - `board.move(id, ...)` or a presence field in a mount effect beside `board.room(() => id)` - waits for that view's join like the view's own sends, instead of reaching the server ahead of the join and being dropped. A held field send bound with `.with({ idempotencyKey, timeout })` keeps its options and goes out as a request of its own instead of merging into the other held fields.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.
 
