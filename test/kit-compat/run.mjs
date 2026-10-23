@@ -81,14 +81,34 @@ const UNREGISTERED = 'FORBIDDEN';
 // A shared-state failure carries SPLIT only when HTTP and WebSocket really
 // run different instances of the fixture's state module; any other mismatch
 // (a store that never renders, a stale value) is an ordinary failure.
+// Ask for the WebSocket side's instance id on a socket of its own, so the
+// check's own socket and its recorded close codes stay untouched.
+async function probeInstance() {
+	const probe = new WebSocket(origin.replace('http:', 'ws:') + '/ws', { headers: { Origin: origin } });
+	try {
+		await once(probe, 'open', { signal: AbortSignal.timeout(10000) });
+		const id = 'instance-' + (++requestId);
+		const answer = new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('instance RPC timed out')), 10000);
+			probe.on('message', bytes => {
+				let frame;
+				try { frame = JSON.parse(bytes.toString()); } catch { return; }
+				if (frame.topic !== '__rpc' || frame.event !== id) return;
+				clearTimeout(timer);
+				resolve(frame.data?.data);
+			});
+		});
+		probe.send(JSON.stringify({ rpc: 'counter/instance', id, args: [] }));
+		return await answer;
+	} finally { probe.terminate(); }
+}
 async function sharedStateFailure(message, cause) {
 	let split = false;
 	let detail;
 	try {
 		const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 		const http = (await response.json()).instance;
-		if (socket?.readyState !== WebSocket.OPEN) await connectSocket(origin);
-		const ws = (await rpc('instance')).data;
+		const ws = await probeInstance();
 		split = typeof http === 'string' && typeof ws === 'string' && http !== ws;
 		detail = 'HTTP instance ' + http + ', WebSocket instance ' + ws;
 	} catch (error) { detail = 'instance check failed: ' + error.message; }
@@ -261,8 +281,8 @@ try {
 			const reported = output.match(/\[kit-compat\] vite root (.+)/)?.[1]?.trim();
 			assert.ok(reported, 'Vite did not report its root');
 			const kitRoot = workdir.split(path.sep).join('/');
-			assert.equal(reported.toLowerCase(), kitRoot.toLowerCase(), 'Vite resolved another directory');
-			assert.notEqual(reported, kitRoot, 'Vite kept the working directory spelling, so this run proves nothing');
+			assert.equal(reported.toLowerCase(), kitRoot.toLowerCase(), 'Vite resolved another directory: ' + reported + ' instead of ' + kitRoot);
+			assert.notEqual(reported, kitRoot, 'Vite kept the working directory spelling ' + reported + ', so this run proves nothing');
 		});
 	}
 	await check('cold WebSocket RPC before any page load', async () => {
@@ -385,7 +405,8 @@ try {
 		});
 		await check('one registry reload per live-file save', () => {
 			// Vite can report one save once per spelling of the file's path.
-			assert.equal(counterReloads() - reloadsBeforeEdit, 1, 'The single edit reloaded the registry more than once or not at all');
+			const reloads = counterReloads() - reloadsBeforeEdit;
+			assert.equal(reloads, 1, 'The single edit reloaded the registry ' + reloads + ' times');
 		});
 	}
 	if (hmr) {
@@ -405,7 +426,7 @@ try {
 				await response.arrayBuffer();
 				await pause(100);
 			}
-			assert.equal(response.headers.get('x-route-version'), 'updated', 'Route HMR executed');
+			assert.equal(response.headers.get('x-route-version'), 'updated', 'Route HMR did not execute: x-route-version ' + response.headers.get('x-route-version'));
 			assert.equal(response.status, 200);
 			await response.arrayBuffer();
 			// A fresh socket must see the current registry even after route reloads.

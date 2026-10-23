@@ -13,7 +13,14 @@ export const RELOAD = 'WebSocket handlers did not follow the reload';
 
 export const knownAdapterFailures = [
 	{
-		adapter: '0.6.0-next.96', runs: /^kit3-dev-hmr-adapter(?:wrapped|none)$/, checks: null, signature: SPLIT + '|' + RELOAD, restart: false,
+		adapter: '0.6.0-next.96', runs: /^kit3-dev-hmr-adapter(?:wrapped|none)$/,
+		checks: [
+			'HTTP and WebSocket share state', 'HMR replaces and removes handlers', 'live stores after HMR',
+			'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state',
+			'removed live files unregister without splitting state', 'broken live modules recover without splitting state',
+			'hooks.ws edits keep live handlers and shared state', 'deleted and recreated hooks.ws restore live handlers and shared state'
+		],
+		signature: SPLIT + '|' + RELOAD, restart: false,
 		reason: 'With a wrapped or omitted adapter entry, the SvelteKit 3 dev server and the WebSocket handler load separate module instances'
 	},
 	{

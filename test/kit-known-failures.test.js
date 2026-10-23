@@ -27,6 +27,13 @@ describe('known adapter failure matching', () => {
 		expect(matchKnown(kit3, routeCheck, unsigned)).toBe(-1);
 	});
 
+	it('limits the separate-instance entry to the shared-state and reload checks', () => {
+		const wrapped = entriesFor('0.6.0-next.96', 'kit3-dev-hmr-adapterwrapped');
+		expect(matchKnown(wrapped, 'HTTP and WebSocket share state', 'Error: ' + SPLIT)).toBeGreaterThanOrEqual(0);
+		expect(matchKnown(wrapped, 'browser has no runtime errors', 'Error: ' + SPLIT)).toBe(-1);
+		expect(matchKnown(wrapped, 'devtools runtime', 'Error: ' + RELOAD)).toBe(-1);
+	});
+
 	it('applies entries only to the runs and adapter that reproduce them', () => {
 		expect(matchKnown(kit2, routeCheck, 'Error: ' + SPLIT)).toBe(-1);
 		expect(entriesFor('0.6.0-next.97', 'kit2-dev-hmr')).toEqual([]);
