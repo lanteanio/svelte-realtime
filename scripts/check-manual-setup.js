@@ -12,10 +12,19 @@ import { resolveNpmCli } from './npm-cli.js';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npm = resolveNpmCli();
 const freshInstall = process.argv.includes('--fresh-install');
+const kitArg = process.argv.indexOf('--kit');
+// SvelteKit 3 is what `sv create` starts a reader on; --kit 2 checks the
+// svelte.config.js path the README gives existing SvelteKit 2 projects.
+const kit = kitArg === -1 ? '3' : process.argv[kitArg + 1];
+if (kit !== '2' && kit !== '3') throw new Error('--kit takes 2 or 3');
+// The locked compatibility fixture pins the toolchain each path runs on.
+const fixture = join(root, 'test/fixtures/kit' + kit);
+const appFiles = kit === '3'
+	? ['vite.config.ts', 'src/hooks.ws.js', 'src/live/counter.js', 'src/routes/+page.svelte']
+	: ['svelte.config.js', 'vite.config.js', 'src/hooks.ws.js', 'src/live/counter.js', 'src/routes/+page.svelte'];
 const workspace = mkdtempSync(join(root, '.manual-setup-'));
 const app = join(workspace, 'app');
 const artifacts = join(workspace, 'artifacts');
-const installedModules = realpathSync(join(root, 'node_modules'));
 let child, browser;
 let output = '';
 
@@ -108,17 +117,17 @@ try {
 	assert.ok(manual, 'README manual setup section exists');
 	const files = new Map();
 	for (const match of manual.matchAll(/```(?:js|ts|svelte)\r?\n(?:\/\/ |<!-- )([^\r\n]+?)(?: -->)?\r?\n([\s\S]*?)```/g)) files.set(match[1], match[2]);
-	for (const name of ['vite.config.ts', 'src/hooks.ws.js', 'src/live/counter.js', 'src/routes/+page.svelte']) {
+	for (const name of appFiles) {
 		assert.ok(files.has(name), 'literal README file: ' + name);
 		mkdirSync(dirname(join(app, name)), { recursive: true });
 		writeFileSync(join(app, name), files.get(name));
 	}
 	writeFileSync(join(app, 'src/app.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">%sveltekit.head%</head><body><div style="display:contents">%sveltekit.body%</div></body></html>');
 	const dependencies = {};
-	const ws = [join(installedModules, 'ws'), join(root, 'test/fixture/node_modules/ws'), join(dirname(installedModules), 'test/fixture/node_modules/ws')].find(path => existsSync(join(path, 'package.json')));
-	assert.ok(ws, 'Install the fixture dependencies with npm ci --prefix test/fixture first');
-	for (const name of ['svelte', '@sveltejs/kit', '@sveltejs/vite-plugin-svelte', 'vite']) dependencies[name] = JSON.parse(readFileSync(join(root, 'node_modules', name, 'package.json'), 'utf8')).version;
-	dependencies.ws = JSON.parse(readFileSync(join(ws, 'package.json'), 'utf8')).version;
+	const pins = JSON.parse(readFileSync(join(fixture, 'package.json'), 'utf8'));
+	for (const name of ['svelte', '@sveltejs/kit', '@sveltejs/vite-plugin-svelte', 'vite', 'ws']) dependencies[name] = pins.dependencies[name] || pins.devDependencies[name];
+	const fixtureModules = join(fixture, 'node_modules');
+	if (!freshInstall) assert.ok(existsSync(join(fixtureModules, '@sveltejs/kit/package.json')), 'Install the fixture first: npm ci --install-links --prefix test/fixtures/kit' + kit);
 	console.log('manual setup: packing local candidates');
 	dependencies['svelte-realtime'] = 'file:' + pack(root);
 	dependencies['svelte-adapter-uws'] = 'file:' + pack(join(root, 'node_modules/svelte-adapter-uws'));
@@ -130,12 +139,11 @@ try {
 		run([npm, 'install', '--cache', join(workspace, 'npm-cache'), '--no-audit', '--no-fund']);
 	} else {
 		mkdirSync(join(app, 'node_modules'));
-		for (const entry of readdirSync(join(root, 'node_modules'))) {
+		for (const entry of readdirSync(fixtureModules)) {
 			if (entry.startsWith('.') || ['svelte-realtime', 'svelte-adapter-uws', 'uWebSockets.js'].includes(entry)) continue;
-			symlinkSync(join(root, 'node_modules', entry), join(app, 'node_modules', entry), 'junction');
+			symlinkSync(realpathSync(join(fixtureModules, entry)), join(app, 'node_modules', entry), 'junction');
 		}
 		for (const name of ['svelte-realtime', 'svelte-adapter-uws', 'uWebSockets.js']) installPacked(dependencies[name].slice(5), name);
-		if (!existsSync(join(app, 'node_modules/ws'))) symlinkSync(ws, join(app, 'node_modules/ws'), 'junction');
 		mkdirSync(join(app, 'node_modules/.bin'));
 		const viteEntry = join(app, 'node_modules/vite/bin/vite.js');
 		if (process.platform === 'win32') writeFileSync(join(app, 'node_modules/.bin/vite.cmd'), `@"${process.execPath}" "${viteEntry}" %*\r\n`);
@@ -156,7 +164,7 @@ try {
 	await twoTabs(await start(['build/index.js'], productionPort));
 	await stop();
 	await twoTabs(await start(['build/index.js'], productionPort));
-	console.log(`manual setup: literal README files, native preflight, two tabs, reload, production build and restart pass on Node ${process.versions.node} (${freshInstall ? 'fresh install/cache' : 'packed local packages'})`);
+	console.log(`manual setup: literal README files, native preflight, two tabs, reload, production build and restart pass for SvelteKit ${dependencies['@sveltejs/kit']} on Node ${process.versions.node} (${freshInstall ? 'fresh install/cache' : 'packed local packages'})`);
 } catch (error) {
 	console.error(error.stack || error);
 	if (output) console.error(output);

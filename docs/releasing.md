@@ -21,8 +21,9 @@ reconnection alone does not establish exactly-once delivery.
 Before promoting this package, attach the following evidence at the frozen
 source heads, in addition to the coordinated checks below:
 
-- Run `node scripts/check-manual-setup.js --fresh-install` at the supported
-  Node floor. The literal documented app must install, build, exchange updates
+- Run `node scripts/check-manual-setup.js --fresh-install --kit 2` at the
+  supported Node floor and `--fresh-install --kit 3` at the SvelteKit 3 floor
+  (Node 22.17). The literal documented app must install, build, exchange updates
   between two browser tabs, retain state across reload and demonstrate its
   documented reset after a server restart, with no uncaught browser errors.
 - Run the declaration and generated-client gates in `npm run check`, the Vite

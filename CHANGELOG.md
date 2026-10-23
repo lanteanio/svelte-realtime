@@ -134,8 +134,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
 
 - New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.
-
-- The README's documentation paths send "Add realtime to an existing app" to the README's own manual setup, which the release checks build and run.
+- The README's documentation paths send "Add realtime to an existing app" to the README's own manual setup, which the release checks build and run on SvelteKit 3 and, with the `svelte.config.js` it now shows for existing projects, on SvelteKit 2.
 
 ### Fixed
 

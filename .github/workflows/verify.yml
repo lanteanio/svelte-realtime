@@ -48,8 +48,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run smoke
-      - name: Exercise the manual counter in a fresh app
-        run: node scripts/check-manual-setup.js --fresh-install
+      - name: Exercise the SvelteKit 2 manual counter in a fresh app
+        run: node scripts/check-manual-setup.js --fresh-install --kit 2
   kit:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -73,6 +73,8 @@ jobs:
       - run: npm ci --install-links --prefix test/fixtures/kit3
       - run: npm run test:kit
       - run: npm run test:scaffold
+      - name: Exercise the SvelteKit 3 manual counter in a fresh app
+        run: node scripts/check-manual-setup.js --fresh-install --kit 3
   svelte4:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

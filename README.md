@@ -93,7 +93,7 @@ Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-sup
 
 ## Manual setup
 
-Starting from a SvelteKit 2 or 3 project. If you do not have one yet, run `npx sv@1.1.1 create my-app && cd my-app && npm install` first; it creates a SvelteKit 3 project. An existing SvelteKit 2 project that configures its adapter in `svelte.config.js` keeps that file and adds the two plugins to `vite.config.js`.
+Starting from a SvelteKit 2 or 3 project. If you do not have one yet, run `npx sv@1.1.1 create my-app && cd my-app && npm install` first; it creates a SvelteKit 3 project.
 
 ### Step 1: Install everything
 
@@ -128,6 +128,23 @@ export default defineConfig({
 ```
 
 Do not add a second `svelte.config.js` to a current `sv` project: the direct `sveltekit({ ... })` configuration takes precedence, so the sidecar adapter can look configured while producing no runnable server.
+
+SvelteKit 2 takes no options in `sveltekit()`. Keep the adapter in `svelte.config.js` and add the two plugins to `vite.config.js`:
+
+```js
+// svelte.config.js
+import adapter from 'svelte-adapter-uws';
+export default { kit: { adapter: adapter({ websocket: true }) } };
+```
+
+```js
+// vite.config.js
+import { sveltekit } from '@sveltejs/kit/vite';
+import uws from 'svelte-adapter-uws/vite';
+import realtime from 'svelte-realtime/vite';
+import { defineConfig } from 'vite';
+export default defineConfig({ plugins: [sveltekit(), uws(), realtime()] });
+```
 
 ### Step 3: Create the WebSocket hooks file
 

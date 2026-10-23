@@ -792,9 +792,9 @@
       "workflow": "verify.yml",
       "automatic": true,
       "job": "smoke",
-      "step": "Exercise the manual counter in a fresh app",
+      "step": "Exercise the SvelteKit 2 manual counter in a fresh app",
       "commands": [
-        "node scripts/check-manual-setup.js --fresh-install"
+        "node scripts/check-manual-setup.js --fresh-install --kit 2"
       ]
     },
     {
@@ -831,6 +831,15 @@
       "step": "9",
       "commands": [
         "vitest run --config vitest.scaffold.config.js"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "kit",
+      "step": "Exercise the SvelteKit 3 manual counter in a fresh app",
+      "commands": [
+        "node scripts/check-manual-setup.js --fresh-install --kit 3"
       ]
     }
   ],

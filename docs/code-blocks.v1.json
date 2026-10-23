@@ -6,10 +6,10 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 246,
+		"total": 248,
 		"classifications": {
 			"command": 4,
-			"tutorial": 74,
+			"tutorial": 76,
 			"executed": 33,
 			"output": 5,
 			"syntax": 128,
@@ -18,7 +18,7 @@
 		},
 		"channels": {
 			"manual-command": 4,
-			"app-context": 74,
+			"app-context": 76,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
 			"acorn": 121,
@@ -28,7 +28,7 @@
 			"json": 1
 		},
 		"notRunnable": {
-			"app-context": 74,
+			"app-context": 76,
 			"ambient-identifiers": 119,
 			"browser-component": 6,
 			"type-declarations-only": 1,
@@ -63,6 +63,26 @@
 			"classification": "tutorial",
 			"channel": "app-context",
 			"reason": "app-context imports: svelte-adapter-uws, @sveltejs/kit/vite, svelte-adapter-uws/vite, vite, svelte-adapter-uws, @sveltejs/kit/vite, svelte-adapter-uws/vite, vite"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0f3a59899fa81dcd4622e5b2d39eac001918344138408de9e9ccef58d05005fb",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Manual setup > Step 2: Configure the adapter and Vite plugins",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "70ea1e17b9c2e67ecf7ef831ff6a4eea4aed9b3f36de7d43365dcdb67157378c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Manual setup > Step 2: Configure the adapter and Vite plugins",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: @sveltejs/kit/vite, svelte-adapter-uws/vite, vite"
 		},
 		{
 			"document": "README.md",
