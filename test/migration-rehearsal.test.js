@@ -74,8 +74,11 @@ beforeAll(() => {
 	}
 }, 240000);
 afterAll(async () => {
-	await server?.close();
-	removeTemp();
+	try {
+		await server?.close();
+	} finally {
+		removeTemp();
+	}
 });
 
 function edit(file, from, to) {
@@ -111,28 +114,32 @@ it('applies the documented edits and serves the migrated module through the pack
 	expect(Object.keys(migrated.board.__actions)).toEqual(['setStatus']);
 
 	server = await createTestServer({ handler: { ...migrated.handler, upgrade: () => ({ id: 'user-1' }) } });
-	const socket = new WebSocket(server.wsUrl);
-	const frames = [];
-	socket.addEventListener('message', ({ data }) => { if (typeof data === 'string') frames.push(JSON.parse(data)); });
-	await new Promise((resolve, reject) => {
-		socket.addEventListener('open', resolve, { once: true });
-		socket.addEventListener('error', reject, { once: true });
-	});
-	let sequence = 0;
-	async function call(path, args) {
-		const id = 'call-' + ++sequence;
-		socket.send(JSON.stringify({ rpc: path, id, args }));
-		const deadline = Date.now() + 5000;
-		let reply;
-		while (!(reply = frames.find(f => f.topic === '__rpc' && f.event === id)?.data) && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
-		return reply;
-	}
+	let socket;
 	try {
+		socket = new WebSocket(server.wsUrl);
+		const frames = [];
+		socket.addEventListener('message', ({ data }) => { if (typeof data === 'string') frames.push(JSON.parse(data)); });
+		await new Promise((resolve, reject) => {
+			socket.addEventListener('open', resolve, { once: true });
+			socket.addEventListener('error', reject, { once: true });
+		});
+		let sequence = 0;
+		async function call(path, args) {
+			const id = 'call-' + ++sequence;
+			socket.send(JSON.stringify({ rpc: path, id, args }));
+			const deadline = Date.now() + 5000;
+			let reply;
+			while (!(reply = frames.find(f => f.topic === '__rpc' && f.event === id)?.data) && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+			return reply;
+		}
 		expect(await call('board/board/__action/setStatus', ['b1', 'away'])).toMatchObject({ ok: true, data: { boardId: 'b1', status: 'away', by: 'user-1' } });
 		expect(await call('account/whoami', [])).toMatchObject({ ok: true, data: { id: 'user-1' } });
 		// Changed default: an unregistered path answers like a denied caller.
 		expect(await call('account/missing', [])).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 	} finally {
-		socket.close();
+		socket?.close();
+		const running = server;
+		server = undefined;
+		await running.close();
 	}
 }, 180000);
