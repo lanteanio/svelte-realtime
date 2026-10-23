@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, linkSync, copyFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import {
+	cmdLine,
+	findWindowsCommand,
+	windowsCommand,
 	parseArgs,
 	detectAgent,
 	formatScaffoldAuthWarning,
@@ -217,7 +221,6 @@ describe('newcomer scaffold contract', () => {
 		runScaffoldVerification({
 			agent: 'npm',
 			dest: 'fresh-app',
-			bin: (name) => name + '.cmd',
 			run: (file, args, cwd) => events.push({ file, args, cwd }),
 			onStep: (message) => events.push({ step: message }),
 			onSuccess: (message) => events.push({ success: message })
@@ -225,12 +228,12 @@ describe('newcomer scaffold contract', () => {
 		expect(events).toEqual([
 			{ step: 'Checking Node, OS, architecture, libc, and uWebSockets.js' },
 			{
-				file: 'npm.cmd',
+				file: 'npm',
 				args: ['exec', '--', 'svelte-adapter-uws-preflight'],
 				cwd: 'fresh-app'
 			},
 			{ step: 'Building the production app' },
-			{ file: 'npm.cmd', args: ['run', 'build'], cwd: 'fresh-app' },
+			{ file: 'npm', args: ['run', 'build'], cwd: 'fresh-app' },
 			{ success: 'Production build verified' }
 		]);
 	});
@@ -253,7 +256,7 @@ describe('newcomer scaffold contract', () => {
 			_cliSrc.indexOf("if (template === 'demo')"),
 			_cliSrc.indexOf("if (template !== 'demo')")
 		);
-		expect(demo).not.toContain("run(bin(agent), ['install'], dest)");
+		expect(demo).not.toContain("run(agent, ['install'], dest)");
 		expect(demo.indexOf('SCAFFOLD_ADAPTER_SPEC')).toBeGreaterThan(0);
 		expect(demo.indexOf('SCAFFOLD_UWS_SPEC')).toBeGreaterThan(0);
 	});
@@ -374,7 +377,7 @@ describe('run() helper', () => {
 		// not concatenated into a single shell-style string. If a future
 		// edit re-introduces template-string interpolation here, the regex
 		// for the array-shape call will stop matching.
-		expect(_cliSrc).toMatch(/run\(\s*bin\('npx'\)\s*,\s*\[\s*'-y'\s*,\s*SCAFFOLD_SV_SPEC\s*,\s*'create'\s*,\s*name\s*,/);
+		expect(_cliSrc).toMatch(/run\(\s*'npx'\s*,\s*\[\s*'-y'\s*,\s*SCAFFOLD_SV_SPEC\s*,\s*'create'\s*,\s*name\s*,/);
 	});
 
 	it('sv create runs a pinned SvelteKit 3 scaffold', () => {
@@ -383,9 +386,110 @@ describe('run() helper', () => {
 		expect(SCAFFOLD_SV_SPEC).toBe('sv@1.1.1');
 	});
 
-	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {
-		expect(_cliSrc).toMatch(/function\s+bin\s*\(/);
-		expect(_cliSrc).toMatch(/IS_WIN\s*&&\s*name\s*!==\s*'git'/);
+	it('passes bare command names and resolves them through PATH only on Windows', () => {
+		// No extension is assumed: bun.exe and standalone pnpm.exe have no .cmd shim.
+		expect(_cliSrc).not.toMatch(/\.cmd`/);
+		expect(_cliSrc).not.toMatch(/function\s+bin\s*\(/);
+		expect(_cliSrc).toMatch(/if \(IS_WIN\) \{\s*const command = windowsCommand\(file, args, env, isFile\);\s*execFileSync\(command\.file, command\.args, \{ cwd, stdio: 'inherit', env, shell: command\.shell \}\);/);
+		// Linux and macOS keep the plain args array with no shell.
+		expect(_cliSrc).toMatch(/\} else \{\s*execFileSync\(file, args, \{ cwd, stdio: 'inherit', env \}\);/);
+	});
+});
+
+describe('Windows command resolution', () => {
+	const install = ['add', 'svelte-adapter-uws@^0.6.0', 'svelte-realtime@^0.6.0'];
+	/** @param {string[]} files */
+	const fakeFs = (files) => {
+		const set = new Set(files.map((f) => f.toLowerCase()));
+		return (path) => set.has(path.toLowerCase());
+	};
+	const env = { Path: 'C:\\bun\\bin;"C:\\Program Files\\pnpm";;C:\\nodejs', PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+	const files = ['C:\\bun\\bin\\bun.exe', 'C:\\Program Files\\pnpm\\pnpm.cmd', 'C:\\nodejs\\npm.cmd', 'C:\\nodejs\\node.exe'];
+
+	it('finds an .exe-only agent and a .cmd-only agent, reading Path and PATHEXT case-insensitively', () => {
+		const isFile = fakeFs(files);
+		expect(findWindowsCommand('bun', env, isFile)).toBe('C:\\bun\\bin\\bun.exe');
+		expect(findWindowsCommand('pnpm', env, isFile)).toBe('C:\\Program Files\\pnpm\\pnpm.cmd');
+		expect(findWindowsCommand('npm', { path: env.Path, pathext: env.PATHEXT }, isFile)).toBe('C:\\nodejs\\npm.cmd');
+		expect(findWindowsCommand('yarn', env, isFile)).toBeNull();
+		expect(findWindowsCommand('bun', {}, isFile)).toBeNull();
+	});
+
+	it('takes the first PATH directory, then the first PATHEXT extension within it', () => {
+		const both = ['C:\\a\\pnpm.cmd', 'C:\\b\\pnpm.exe', 'C:\\b\\pnpm.cmd'];
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\a;C:\\b', PATHEXT: '.EXE;.CMD' }, fakeFs(both))).toBe('C:\\a\\pnpm.cmd');
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\b;C:\\a', PATHEXT: '.EXE;.CMD' }, fakeFs(both))).toBe('C:\\b\\pnpm.exe');
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\b;C:\\a', PATHEXT: '.CMD;.EXE' }, fakeFs(both))).toBe('C:\\b\\pnpm.cmd');
+		// Without PATHEXT, the Windows default list applies.
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\b' }, fakeFs(both))).toBe('C:\\b\\pnpm.exe');
+	});
+
+	it('does not search the working directory', () => {
+		expect(findWindowsCommand('npm', { PATH: 'C:\\nodejs' }, (path) => !path.includes('\\') || path === 'npm.cmd')).toBeNull();
+		expect(findWindowsCommand('npm', { PATH: '' }, () => true)).toBeNull();
+	});
+
+	it('runs an executable with an args array and a shim through one quoted command line', () => {
+		const isFile = fakeFs(files);
+		expect(windowsCommand('bun', install, env, isFile)).toEqual({ file: 'C:\\bun\\bin\\bun.exe', args: install, shell: false });
+		expect(windowsCommand('pnpm', install, env, isFile)).toEqual({
+			file: '"C:\\Program Files\\pnpm\\pnpm.cmd" add "svelte-adapter-uws@^0.6.0" "svelte-realtime@^0.6.0"',
+			args: [],
+			shell: true
+		});
+		expect(() => windowsCommand('yarn', install, env, isFile)).toThrow('yarn was not found on PATH');
+		expect(() => windowsCommand('npm', ['%PATH%'], env, isFile)).toThrow(/cannot be passed through cmd.exe/);
+	});
+
+	it('quotes arguments that cmd.exe would rewrite and leaves the rest alone', () => {
+		expect(cmdLine('npm.cmd', ['install', 'a@^1.0.0'])).toBe('npm.cmd install "a@^1.0.0"');
+		expect(cmdLine('npx.cmd', ['-y', 'sv@1.1.1', 'create', 'my-app', 'a b', 'x&y', 'x|y', 'x<y', 'x>y', 'f(x)']))
+			.toBe('npx.cmd -y sv@1.1.1 create my-app "a b" "x&y" "x|y" "x<y" "x>y" "f(x)"');
+		expect(cmdLine('npm.cmd', ['run', ''])).toBe('npm.cmd run ""');
+	});
+
+	it.each(['say "hi"', '%PATH%', 'wow!', 'a\nb', 'a\rb', 'C:\\dir\\'])('refuses %j, which quoting cannot protect', (arg) => {
+		expect(() => cmdLine('npm.cmd', [arg])).toThrow(/cannot be passed through cmd.exe/);
+	});
+
+	it('accepts every literal and scaffold spec run() is given in cli.js', () => {
+		const calls = _cliSrc.split('\n').filter((line) => /\brun\(/.test(line) && !/function\s+run\s*\(/.test(line));
+		const literals = calls.flatMap((line) => [...line.matchAll(/'([^']*)'/g)].map((m) => m[1]));
+		const demo = /const DEMO_REPO = '([^']+)'/.exec(_cliSrc)[1];
+		const specs = [SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC, SCAFFOLD_UWS_SPEC, SCAFFOLD_SV_SPEC];
+		expect(literals).toContain('clone');
+		expect(() => cmdLine('npm.cmd', [...literals, demo, ...specs, 'my-app'])).not.toThrow();
+	});
+
+	it.runIf(process.platform === 'win32')('launches an .exe-only and a .cmd-only agent from a real PATH', () => {
+		const root = mkdtempSync(join(tmpdir(), 'realtime-path-'));
+		try {
+			const exeDir = join(root, 'bun bin');
+			const cmdDir = join(root, 'pnpm (standalone)');
+			mkdirSync(exeDir);
+			mkdirSync(cmdDir);
+			// A native executable named bun.exe, with no bun.cmd anywhere on PATH.
+			try {
+				linkSync(process.execPath, join(exeDir, 'bun.exe'));
+			} catch {
+				copyFileSync(process.execPath, join(exeDir, 'bun.exe'));
+			}
+			writeFileSync(join(cmdDir, 'args.js'), 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+			writeFileSync(join(cmdDir, 'pnpm.cmd'), '@"' + process.execPath + '" "%~dp0args.js" %*\r\n');
+			const pathEnv = { ...process.env, PATH: exeDir + ';' + cmdDir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+			for (const key of Object.keys(pathEnv)) if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete pathEnv[key];
+			const isFile = (path) => statSync(path, { throwIfNoEntry: false })?.isFile() === true;
+			const launch = (name, args) => {
+				const command = windowsCommand(name, args, pathEnv, isFile);
+				return JSON.parse(execFileSync(command.file, command.args, { cwd: root, env: pathEnv, shell: command.shell, encoding: 'utf8' }));
+			};
+			expect(launch('bun', ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', ...install])).toEqual(install);
+			expect(launch('pnpm', install)).toEqual(install);
+			// The bun installer ships no shim, so the name the scaffolder used to run does not exist.
+			expect(findWindowsCommand('bun', { PATH: pathEnv.PATH, PATHEXT: '.CMD' }, isFile)).toBeNull();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

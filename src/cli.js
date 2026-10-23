@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, statSync } from 'fs';
 import { resolve, join } from 'path';
 // Reject Node versions the generated SvelteKit 3 project cannot run on before
 // loading dependencies or starting work: 22.17+ on the 22 line, or 24+.
@@ -23,21 +23,11 @@ const {
 	SCAFFOLD_SV_SPEC,
 	SCAFFOLD_UWS_SPEC,
 	VALID_NAME_RE,
+	windowsCommand,
 	withoutAdapterAuto
 } = await import('./cli-utils.js');
 
 const IS_WIN = process.platform === 'win32';
-
-/**
- * Resolve a binary name to the OS-specific form. npm / pnpm / yarn / bun / npx
- * ship as `.cmd` shims on Windows; Node's execFileSync (no shell) refuses to
- * launch them without the extension. Native binaries (git) work as-is on
- * every platform because Node resolves PATHEXT for them.
- * @param {string} name
- */
-function bin(name) {
-	return IS_WIN && name !== 'git' ? `${name}.cmd` : name;
-}
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
 const DEFAULT_PROJECT_NAME = 'my-app';
@@ -165,21 +155,21 @@ if (template === 'demo') {
 	run('git', ['clone', DEMO_REPO, name]);
 
 	p.log.step('Installing the audited dependency tuple');
-	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
-	run(bin(agent), [add, SCAFFOLD_UWS_SPEC], dest);
+	run(agent, [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
+	run(agent, [add, SCAFFOLD_UWS_SPEC], dest);
 }
 
 if (template !== 'demo') {
 	p.log.step('Creating SvelteKit project');
-	run(bin('npx'), ['-y', SCAFFOLD_SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+	run('npx', ['-y', SCAFFOLD_SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 	// The generated configuration below uses the native adapter exclusively.
 	const manifestPath = join(dest, 'package.json');
 	writeFileSync(manifestPath, JSON.stringify(withoutAdapterAuto(JSON.parse(readFileSync(manifestPath, 'utf8'))), null, 2) + '\n');
 
 	p.log.step('Installing dependencies');
-	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
-	run(bin(agent), [add, SCAFFOLD_UWS_SPEC], dest);
-	run(bin(agent), [add, '-D', 'ws'], dest);
+	run(agent, [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
+	run(agent, [add, SCAFFOLD_UWS_SPEC], dest);
+	run(agent, [add, '-D', 'ws'], dest);
 
 	p.log.step('Configuring svelte-realtime');
 
@@ -266,7 +256,6 @@ export const counter = live.stream('count', () => {
 runScaffoldVerification({
 	agent,
 	dest,
-	bin,
 	run,
 	onStep: (message) => p.log.step(message),
 	onSuccess: (message) => p.log.success(message)
@@ -277,20 +266,19 @@ p.outro(`Verified. cd ${name} && ${agent} run dev`);
 // ---------------------------------------------------------------------------
 
 /**
- * Run an external binary. Args are passed as an explicit array so they reach
- * the OS exec call without shell tokenization - no template-string injection
- * possible from this entrypoint regardless of how the caller assembles args.
+ * Run an external binary. On Linux / Mac args are passed as an explicit array
+ * straight to the OS exec call, with no shell to tokenize them.
  *
- * On Windows, package-manager shims (npm.cmd / pnpm.cmd / yarn.cmd / bun.cmd
- * / npx.cmd) must run under a shell because Node >=22 EINVALs `.cmd` files
- * under `shell: false`. The `shell: IS_WIN` toggle is scoped per-call to that
- * platform-specific need; on Linux / Mac the no-shell path is the default.
- * Even on Windows, the shell:true escaping caveat (DEP0190) is bounded here
- * because every arg fed to run() in this file is either a hardcoded literal,
- * the cli-utils VALID_NAME_RE-validated project name, or the hardcoded demo
- * repo URL - none of which carry shell metacharacters. Adding an arg from an
- * unvalidated source reintroduces the shell-injection class this refactor
- * was designed to remove; new args must keep that invariant.
+ * On Windows, windowsCommand resolves the bare name through PATH and PATHEXT,
+ * because a package manager may be a .cmd shim (npm.cmd, corepack's pnpm.cmd)
+ * or a native executable (bun.exe, standalone pnpm.exe). An executable runs
+ * with an args array and no shell. A .cmd or .bat file must run under cmd.exe
+ * because Node >=22 EINVALs it under `shell: false`; Node would only
+ * concatenate separate args for the shell (DEP0190), so it gets one command
+ * line built by cmdLine, which quotes what cmd.exe would rewrite and refuses
+ * what quoting cannot protect. Every arg fed to run() in this file is a
+ * hardcoded literal, the cli-utils VALID_NAME_RE-validated project name, or
+ * the hardcoded demo repo URL; new args must keep that invariant.
  *
  * @param {string} file
  * @param {string[]} args
@@ -312,15 +300,28 @@ function run(file, args, cwd) {
 		if (/^npm_config_(package|call)$/i.test(key)) delete env[key];
 	}
 	try {
-		execFileSync(file, args, {
-			cwd,
-			stdio: 'inherit',
-			env,
-			shell: IS_WIN
-		});
+		if (IS_WIN) {
+			const command = windowsCommand(file, args, env, isFile);
+			execFileSync(command.file, command.args, { cwd, stdio: 'inherit', env, shell: command.shell });
+		} else {
+			execFileSync(file, args, { cwd, stdio: 'inherit', env });
+		}
 	} catch (e) {
 		const line = `${file} ${args.join(' ')}`;
 		p.cancel(`Command failed: ${line}\n${/** @type {any} */ (e).stderr || /** @type {any} */ (e).message}`);
 		process.exit(1);
+	}
+}
+
+/**
+ * Whether path names a file. A PATH entry that is unreadable or not a
+ * directory is skipped rather than ending the search.
+ * @param {string} path
+ */
+function isFile(path) {
+	try {
+		return statSync(path, { throwIfNoEntry: false })?.isFile() === true;
+	} catch {
+		return false;
 	}
 }

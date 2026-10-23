@@ -1,4 +1,5 @@
 // @ts-check
+import { win32 } from 'path';
 
 export const VALID_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const VALID_TEMPLATES = ['minimal', 'example', 'demo'];
@@ -72,7 +73,6 @@ export function packageExecArgs(agent, binary) {
  * @param {{
  *   agent: 'npm' | 'pnpm' | 'yarn' | 'bun',
  *   dest: string,
- *   bin: (name: string) => string,
  *   run: (file: string, args: string[], cwd?: string) => void,
  *   onStep?: (message: string) => void,
  *   onSuccess?: (message: string) => void
@@ -81,16 +81,89 @@ export function packageExecArgs(agent, binary) {
 export function runScaffoldVerification({
 	agent,
 	dest,
-	bin,
 	run,
 	onStep = () => {},
 	onSuccess = () => {}
 }) {
 	onStep('Checking Node, OS, architecture, libc, and uWebSockets.js');
-	run(bin(agent), packageExecArgs(agent, 'svelte-adapter-uws-preflight'), dest);
+	run(agent, packageExecArgs(agent, 'svelte-adapter-uws-preflight'), dest);
 	onStep('Building the production app');
-	run(bin(agent), ['run', 'build'], dest);
+	run(agent, ['run', 'build'], dest);
 	onSuccess('Production build verified');
+}
+
+/**
+ * The command line that runs file with args through cmd.exe, which .cmd and
+ * .bat files need on Windows. cmd.exe and a .cmd shim each read ^ as an escape
+ * character, so an unquoted `pkg@^1.2.3` reaches the package manager as
+ * `pkg@1.2.3`. Quoting keeps ^, &, |, <, >, parentheses and spaces literal.
+ * What quoting cannot protect is refused: a double quote, %, !, a line break,
+ * or a trailing backslash.
+ * @param {string} file
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function cmdLine(file, args) {
+	return [file, ...args].map((arg) => {
+		if (/["%!\r\n]|\\$/.test(arg)) throw new Error(`Argument cannot be passed through cmd.exe: ${arg}`);
+		return arg === '' || /[\s^&|<>()]/.test(arg) ? `"${arg}"` : arg;
+	}).join(' ');
+}
+
+/**
+ * Read an environment variable the way Windows does, ignoring case. A copied
+ * process.env is a plain object, so `env.PATH` misses a `Path` key.
+ * @param {Record<string, string | undefined>} env
+ * @param {string} key
+ */
+function winEnv(env, key) {
+	const upper = key.toUpperCase();
+	for (const name of Object.keys(env)) if (name.toUpperCase() === upper) return env[name];
+	return undefined;
+}
+
+/**
+ * Find the file Windows would run for a bare command name: every PATH
+ * directory in order, each with every PATHEXT extension in order. Package
+ * managers come as .cmd shims (npm, or pnpm and yarn through corepack) or as
+ * native executables (the bun installer's bun.exe, standalone pnpm.exe), so
+ * no single extension can be assumed. The working directory is not searched,
+ * so a file in the project being created cannot stand in for the package
+ * manager. Returns null when nothing matches.
+ * @param {string} name
+ * @param {Record<string, string | undefined>} env
+ * @param {(path: string) => boolean} isFile
+ * @returns {string | null}
+ */
+export function findWindowsCommand(name, env, isFile) {
+	const exts = (winEnv(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+	for (const entry of (winEnv(env, 'PATH') || '').split(';')) {
+		const dir = entry.trim().replace(/^"(.*)"$/, '$1');
+		if (!dir) continue;
+		for (const ext of exts) {
+			const candidate = win32.join(dir, name + ext.toLowerCase());
+			if (isFile(candidate)) return candidate;
+		}
+	}
+	return null;
+}
+
+/**
+ * How to launch name with args on Windows without handing the arguments to a
+ * shell unquoted. A native executable runs directly with an args array. A
+ * .cmd or .bat file can only run under cmd.exe (Node refuses it otherwise),
+ * so it gets one command line built by cmdLine and no args array.
+ * @param {string} name
+ * @param {string[]} args
+ * @param {Record<string, string | undefined>} env
+ * @param {(path: string) => boolean} isFile
+ * @returns {{ file: string, args: string[], shell: boolean }}
+ */
+export function windowsCommand(name, args, env, isFile) {
+	const file = findWindowsCommand(name, env, isFile);
+	if (!file) throw new Error(`${name} was not found on PATH`);
+	if (/\.(cmd|bat)$/i.test(file)) return { file: cmdLine(file, args), args: [], shell: true };
+	return { file, args, shell: false };
 }
 
 /**

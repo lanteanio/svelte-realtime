@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { win32 } from 'node:path';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -20,6 +21,18 @@ childProcess.execFileSync = (file, args) => {
 };
 syncBuiltinESMExports();
 `);
+
+// On Windows the CLI resolves the command through PATH and runs a .cmd shim as
+// one command line with no args array, so read the name and words from either form.
+function command({ file, args }) {
+	let words = args;
+	if (args.length === 0) {
+		const match = /^("[^"]*"|\S+)\s*(.*)$/.exec(file);
+		file = match[1].replace(/^"|"$/g, '');
+		words = match[2] ? match[2].split(' ').map((word) => word.replace(/^"(.*)"$/, '$1')) : [];
+	}
+	return { name: win32.basename(file).replace(/\.(exe|cmd)$/i, '').toLowerCase(), args: words };
+}
 
 function terminal(args, steps) {
 	return new Promise((resolve, reject) => {
@@ -72,7 +85,7 @@ describe('interactive CLI prompts', { timeout: 25000 }, () => {
 		expect(result.code).toBe(1);
 		expect(result.completedSteps).toBe(2);
 		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
-		expect(captured.args).toEqual(['-y', 'sv@1.1.1', 'create', 'my-app', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+		expect(command(captured)).toEqual({ name: 'npx', args: ['-y', 'sv@1.1.1', 'create', 'my-app', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install'] });
 	});
 
 	it('accepts a valid name and exposes every cancellable template choice', async () => {
@@ -95,7 +108,7 @@ describe('interactive CLI prompts', { timeout: 25000 }, () => {
 		const selected = ['Wiring only', 'Barebones example', 'Full demo app'][index];
 		expect(result.output).toMatch(new RegExp('Which template would you like\\?[^\\n]*\\n[^\\n]*' + selected));
 		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
-		if (template === 'demo') expect(captured).toEqual({ file: 'git', args: ['clone', 'https://github.com/lanteanio/svelte-realtime-demo.git', 'prompt-probe'] });
-		else expect(captured.args).toEqual(['-y', 'sv@1.1.1', 'create', 'prompt-probe', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+		if (template === 'demo') expect(command(captured)).toEqual({ name: 'git', args: ['clone', 'https://github.com/lanteanio/svelte-realtime-demo.git', 'prompt-probe'] });
+		else expect(command(captured)).toEqual({ name: 'npx', args: ['-y', 'sv@1.1.1', 'create', 'prompt-probe', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install'] });
 	});
 });

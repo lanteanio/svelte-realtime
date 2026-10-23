@@ -48,7 +48,7 @@ export function checkScaffoldBuild({ fixture = defaultFixture, run = spawnSync, 
 	};
 	try {
 		runScaffoldVerification({
-			agent: 'npm', dest: fixture, bin: name => name, onStep: log, onSuccess: log,
+			agent: 'npm', dest: fixture, onStep: log, onSuccess: log,
 			run(_file, args) {
 				if (args[0] === 'exec') {
 					// Use the project's installed bin directly, including its native

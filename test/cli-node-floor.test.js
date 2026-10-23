@@ -24,7 +24,7 @@ import { syncBuiltinESMExports } from 'node:module';
 Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });
 // A failing prerequisite must never reach sv, git or a package manager.
 childProcess.execFileSync = (file, args, options) => {
-	console.log('EXTERNAL_COMMAND_REACHED ' + JSON.stringify({ args, env: Object.keys(options?.env ?? {}).filter(key => /^(npm_config_|node_env$)/i.test(key)).sort() }));
+	console.log('EXTERNAL_COMMAND_REACHED ' + JSON.stringify({ file, args, env: Object.keys(options?.env ?? {}).filter(key => /^(npm_config_|node_env$)/i.test(key)).sort() }));
 	throw new Error('EXTERNAL_COMMAND_REACHED');
 };
 syncBuiltinESMExports();
@@ -69,7 +69,8 @@ describe('scaffold Node prerequisite', () => {
 			NODE_ENV: 'production'
 		});
 		const reached = JSON.parse(result.output.match(/EXTERNAL_COMMAND_REACHED (\{[^\r\n]+\})/)[1]);
-		expect(reached.args).toContain('sv@1.1.1');
+		// A .cmd shim on Windows runs as one command line in place of an args array.
+		expect([reached.file, ...reached.args].join(' ').split(' ')).toContain('sv@1.1.1');
 		expect(reached.env).toContain('npm_config_registry');
 		expect(reached.env).not.toContain('npm_config_package');
 		expect(reached.env).not.toContain('npm_config_call');
