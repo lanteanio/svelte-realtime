@@ -71,6 +71,27 @@ describe('runLiveSim', () => {
 		expect(r.invariantViolations.every((v) => v.category === 'live.stream-incomplete')).toBe(true);
 	});
 
+	it('drops stale rows by the stream rowVersion when checking completeness', async () => {
+		const { live } = await import('../src/server.js');
+		const module = () => ({
+			rows: live.stream('rows', async () => [], { merge: 'crud', key: 'id', rowVersion: 'v' })
+		});
+		const scenario = async (api) => {
+			const c = api.connect({ userId: 'u0' });
+			c.subscribe('sim/rows');
+			await api.flush();
+			api.publish('rows', 'created', { id: 1, v: 2, name: 'new' });
+			api.publish('rows', 'updated', { id: 1, v: 1, name: 'old' });
+			api.publish('rows', 'deleted', { id: 1, v: 1 });
+			await api.flush();
+			api.authoritative('rows', [{ id: 1, v: 2, name: 'new' }], { rowVersion: 'v' });
+		};
+		const r = await runLiveSim({ seed: 'row-version', module, scenario });
+		expect(r.metrics.authoritativeChecks).toBe(1);
+		expect(r.metrics.completeSubscribers).toBe(1);
+		expect(r.invariantViolations).toEqual([]);
+	});
+
 	it('reproduces a partially-chaotic run bit-for-bit', async () => {
 		const r = await runLiveSim({ seed: 'chaos-2', clients: 3, events: 12, chaos: { dropRate: 0.5 } });
 		expect(r.invariantViolations).toEqual([]); // convergence holds under partial drop

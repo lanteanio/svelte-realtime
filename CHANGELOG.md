@@ -67,7 +67,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
-- `live.stream(topic, loader, { merge: 'crud', rowVersion: 'rev' })` orders writes to one row by an app-supplied monotonic field: a `created` or `updated` row that is not newer than the held row is dropped, and an older `deleted` is ignored, so replicas delivering two writes in opposite orders no longer leave a client on the older value. Without it crud stays last-writer-by-arrival; the README now says so, and that `seq` numbers delivery per subscriber rather than ordering a topic's events.
+- `live.stream(topic, loader, { merge: 'crud', rowVersion: 'rev' })` orders writes to one row by an app-supplied monotonic field: a `created` or `updated` row that is not newer than the held row is dropped, and an older `deleted` is ignored, so replicas delivering two writes in opposite orders no longer leave a client on the older value. Without it crud stays last-writer-by-arrival; the README now says so, and that `seq` numbers delivery per subscriber rather than ordering a topic's events. The `svelte-realtime/sim` completeness check takes the same field through `api.authoritative(topic, state, { rowVersion })`, so a stale row its subscribers dropped is not reported as missing.
 
 - `simulateOffline()` and `resumeOnline()` from `svelte-realtime/client` pause the connection as a dropped network would and reconnect it on demand, so demos and tests can exercise the offline queue and stream recovery without stubbing `WebSocket`. Pausing a socket that just opened does not count toward the fast-close proxy diagnostic.
 

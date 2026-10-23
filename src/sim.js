@@ -20,6 +20,7 @@
 import { setRuntimeEnv, resetRuntimeEnv } from './shared/runtime.js';
 import { createTestEnv } from './testing.js';
 import { live } from './server.js';
+import { isStaleRow } from './shared/merge.js';
 
 // The lag-compensation ("deterministic netcode") sim drives the smooth shot-resolution
 // path rather than the RPC / stream path, so it lives in its own module; re-exported
@@ -78,7 +79,9 @@ async function flush() {
 // Fold the recorded wire frames into the authoritative CRUD state a real
 // client is expected to expose. In particular, refreshed is a full snapshot:
 // it is the recovery boundary that makes loss before the boundary irrelevant.
-function replayCrudState(frames, key) {
+// With the stream's rowVersion field, a row not newer than the one held is
+// dropped, as the client drops it.
+function replayCrudState(frames, key, rowVersion) {
 	let state = [];
 	for (const { event, data } of frames) {
 		if (event === 'refreshed' || event === 'set') {
@@ -87,6 +90,7 @@ function replayCrudState(frames, key) {
 		}
 		if (!Array.isArray(state) || !data || typeof data !== 'object') continue;
 		const index = state.findIndex((item) => item && item[key] === data[key]);
+		if (index >= 0 && isStaleRow(rowVersion, data, state[index], event === 'deleted')) continue;
 		if (event === 'created') {
 			if (index >= 0) state[index] = data;
 			else state.push(data);
@@ -191,7 +195,7 @@ export async function runLiveSim(config = {}) {
 
 		/** @type {Array<{ topic: string | null, events: any[] }>} */
 		const recordedStreams = [];
-		/** @type {Map<string, { expected: any, encoded: string, key: string }>} */
+		/** @type {Map<string, { expected: any, encoded: string, key: string, rowVersion: string | undefined }>} */
 		const authoritativeStates = new Map();
 		let rpcChecks = 0;
 		let recoveryPublishes = 0;
@@ -214,7 +218,8 @@ export async function runLiveSim(config = {}) {
 				authoritativeStates.set(topic, {
 					expected,
 					encoded: JSON.stringify(expected),
-					key: options.key || 'id'
+					key: options.key || 'id',
+					rowVersion: options.rowVersion
 				});
 			},
 			/** Clear the deterministic publish fault before attempting recovery. */
@@ -268,7 +273,7 @@ export async function runLiveSim(config = {}) {
 			let complete = 0;
 			for (let i = 0; i < streams.length; i++) {
 				authoritativeChecks++;
-				const actual = replayCrudState(streams[i].events, oracle.key);
+				const actual = replayCrudState(streams[i].events, oracle.key, oracle.rowVersion);
 				if (JSON.stringify(actual) === oracle.encoded) {
 					complete++;
 					completeSubscribers++;

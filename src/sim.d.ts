@@ -14,8 +14,12 @@ export interface LiveSimApi {
 	rng(): number;
 	connect(userData?: any): LiveSimClient;
 	publish(topic: string, event: string, data?: any): boolean;
-	/** Register the authoritative state that every subscriber must expose at the end. */
-	authoritative(topic: string, state: any, options?: { key?: string }): void;
+	/**
+	 * Register the authoritative state that every subscriber must expose at the
+	 * end. Pass the stream's `rowVersion` field so a stale row its subscribers
+	 * dropped is not counted as missing.
+	 */
+	authoritative(topic: string, state: any, options?: { key?: string; rowVersion?: string }): void;
 	/** Disable deterministic publish loss before exercising recovery. */
 	clearFaults(): void;
 	/** Publish a full-state `refreshed` recovery boundary. */
