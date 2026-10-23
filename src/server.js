@@ -63,7 +63,7 @@ import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _validateTenantConfig, _tenantConfigRegistry, _makeTenantScope, _tenantTopic, _TENANT_TOPIC_NS, _isTenancyEnabled } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
-import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
+import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _resolveRedactor, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
@@ -679,7 +679,9 @@ async function _reportReloadFailure(failure, run, topic) {
 
 /**
  * Broadcast a reload result as `refreshed` on the stream's own topic,
- * applying the stream's init transform and redactor.
+ * applying the stream's init transform and redactor, then the topic's
+ * redactor exactly as `ctx.publish` would. A topic shared by two streams
+ * thus redacts a reload the same way whichever stream ran it.
  *
  * @param {any} fn
  * @param {string} topic
@@ -694,6 +696,11 @@ function _publishReload(fn, topic, platform, result) {
 		// Fail-closed: a throwing redactor must never broadcast un-redacted
 		// reload data, so skip the publish entirely.
 		try { finalData = redactor(finalData); } catch { return; }
+	}
+	const topicRedactor = _resolveRedactor(topic);
+	if (topicRedactor && topicRedactor.redact !== redactor && finalData != null) {
+		finalData = _redactOrDrop(topic, finalData);
+		if (finalData === REDACT_DROP) return;
 	}
 	try { _platformPublish(platform, topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
 }

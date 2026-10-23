@@ -394,4 +394,24 @@ describe('reload bookkeeping for resumed subscribers', () => {
 		await new Promise(resolve => setImmediate(resolve));
 		expect(loads).toEqual(['keeps', 'fails']);
 	});
+
+	it('applies the topic redactor to a reload run by a stream that has none of its own', async () => {
+		vi.useFakeTimers();
+		env.register('feed', {
+			redacted: live.stream('redactstale:feed', async () => ({ email: 'alice@example.com', n: 1 }), {
+				merge: 'set', staleAfterMs: 1000, piiRedact: (data) => ({ ...data, email: '[hidden]' })
+			}),
+			plain: live.stream('redactstale:feed', async () => ({ email: 'bob@example.com', n: 2 }), { merge: 'set', staleAfterMs: 1000 })
+		});
+		const alice = env.connect({ id: 'alice' });
+		alice.subscribe('feed/redacted');
+		await vi.advanceTimersByTimeAsync(0);
+		const stream = env.connect({ id: 'bob' }).subscribe('feed/plain');
+		await vi.advanceTimersByTimeAsync(0);
+		alice.disconnect();
+		await vi.advanceTimersByTimeAsync(1000);
+		const refreshed = stream.events.filter(e => e.event === 'refreshed');
+		expect(refreshed).toHaveLength(1);
+		expect(refreshed[0].data).toEqual({ email: '[hidden]', n: 2 });
+	});
 });
