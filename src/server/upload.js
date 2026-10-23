@@ -737,8 +737,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	let path = '';
 	/** @type {any} */ let ctx = null;
 	let handlerStarted = false;
-	/** @type {Promise<void> | null} */ let chainRun = null;
+	/** @type {Promise<{ ok: true, data: any } | undefined> | null} */ let chainRun = null;
 	/** @type {number | undefined} */ let refusalRetryAfter;
+	let refusedByMiddleware = false;
+	let chainFailed = false;
 
 	// Count the upload handler as in-flight so onShutdown's drain waits for it.
 	// Uploads are the longest-running handler (they span every chunk via the
@@ -852,48 +854,54 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 
 			if (options?.beforeExecute) {
 				await options.beforeExecute(ws, path, args);
+				if (upload.phase === 'settled') return;
 			}
 
 			handlerStarted = true;
-			const result = await fn(ctx, ...args);
-			if (upload.phase !== 'settled') {
-				upload.phase = 'settled';
-				upload.recordOutcome('');
-				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
-				_respondUpload(ws, platform, streamId, { ok: true, data: result });
-			}
+			return { ok: /** @type {const} */ (true), data: await fn(ctx, ...args) };
 		};
+		// The chain returns its answer instead of sending it, so the upload is
+		// answered once, here, after the middleware returns. The chain promise
+		// is kept so a middleware that drops or swallows next() cannot leave
+		// the upload unanswered, or cleaned up under a running handler.
 		const middlewareResult = await _runWithMiddleware(ctx, () => {
-			// Kept so a middleware that drops or swallows next() cannot leave
-			// the upload unanswered, or cleaned up under a running handler.
 			chainRun = runChain();
-			chainRun.catch(() => {});
+			chainRun.catch(() => { chainFailed = true; });
 			return chainRun;
 		});
 		if (upload.phase !== 'settled') {
-			// A middleware returned without letting the chain settle the upload.
-			// Its return value answers, as on RPC: a failure envelope refuses with
-			// its code. Otherwise the chain's own outcome stands, including a
-			// failure the middleware caught, and an upload nothing settled is a
-			// server bug that fails with INTERNAL_ERROR.
+			// As on RPC the middleware's return value answers first: a failure
+			// envelope refuses with its code, even when the chain went on. Then
+			// the chain's own outcome stands, including a failure the middleware
+			// caught. A middleware that never called next() is a server bug.
 			if (middlewareResult && middlewareResult.ok === false && typeof middlewareResult.code === 'string') {
 				if (typeof middlewareResult.retryAfter === 'number' && Number.isFinite(middlewareResult.retryAfter)) refusalRetryAfter = middlewareResult.retryAfter;
+				refusedByMiddleware = true;
 				throw new LiveError(middlewareResult.code, typeof middlewareResult.error === 'string' ? middlewareResult.error : middlewareResult.code, middlewareResult);
 			}
-			if (chainRun) await chainRun;
-			if (upload.phase !== 'settled') {
-				throw new Error('middleware returned without calling next() and without a failure envelope');
+			if (!chainRun) throw new Error('middleware returned without calling next() and without a failure envelope');
+			const answer = await chainRun;
+			if (answer && upload.phase !== 'settled') {
+				upload.phase = 'settled';
+				upload.recordOutcome('');
+				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
+				_respondUpload(ws, platform, streamId, answer);
 			}
 		}
 		upload.recordOutcome('');
 	} catch (err) {
 		if (upload.phase !== 'settled') {
 			upload.phase = 'settled';
+			// Queued bytes go back now; a chain still running keeps only its
+			// start slot, released when it ends.
+			upload.pendingChunks = null;
+			_releasePendingUploadBytes(upload);
 			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
 			upload.recordOutcome(code);
 			if (upload._diag) {
-				// Guards, middleware and admission limits refuse; the handler fails.
-				_uploadStreamEnded(upload, handlerStarted ? 'handler-failed'
+				// Guards, middleware and admission limits refuse; the handler fails,
+				// also when a middleware turned its failure into an envelope.
+				_uploadStreamEnded(upload, handlerStarted && (chainFailed || !refusedByMiddleware) ? 'handler-failed'
 					: _uploadOutcomeFor(code) === 'cap-exceeded' ? 'cap-exceeded' : 'rejected', code);
 			}
 			if (err instanceof LiveError) {
@@ -927,7 +935,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	} finally {
 		// A chain the middleware did not wait for still owns the stream and its
 		// slot until it ends; the settle above aborted it if it was refused.
-		if (chainRun) await /** @type {Promise<void>} */ (chainRun).catch(() => {});
+		if (chainRun) await /** @type {Promise<any>} */ (chainRun).catch(() => {});
 		// Cancellation releases payload bytes immediately, but a still-running
 		// guard keeps its admission slot until it settles, preventing cancel/retry
 		// loops from starting unbounded asynchronous authorization work.

@@ -128,3 +128,37 @@ it('bounds pending upload authorization per socket independently of handler limi
  expect(handler).not.toHaveBeenCalled();
  expect(state.pendingUploadBytes).toBe(0);
 });
+
+it('a middleware refusal stops a detached upload chain waiting in beforeExecute', async () => {
+ let reached, release;
+ const inBeforeExecute = new Promise(resolve => { reached = resolve; });
+ const held = new Promise(resolve => { release = resolve; });
+ const handler = vi.fn(async () => 'never');
+ server.live.middleware(async (_ctx, next) => { next(); await inBeforeExecute; return { ok: false, code: 'FORBIDDEN', error: 'no' }; });
+ server.__register('open/upload', server.live.upload(handler));
+ const ws = mockWs({ id: 'member' }); const platform = mockPlatform();
+ server.handleRpc(ws, frame('upload', 'open/upload', 8), platform, { beforeExecute: async () => { reached(); await held; } });
+ await vi.waitFor(() => expect(platform.sent.at(-1)?.data.code).toBe('FORBIDDEN'));
+ release();
+ await new Promise(resolve => setTimeout(resolve, 10));
+ expect(handler).not.toHaveBeenCalled();
+ expect(platform.sent.filter(entry => entry.topic === '__upload' && 'ok' in entry.data)).toHaveLength(1);
+});
+
+it('a middleware refusal releases pending upload bytes while its detached guard still runs', async () => {
+ let entered, release;
+ const started = new Promise(resolve => { entered = resolve; });
+ const held = new Promise(resolve => { release = resolve; });
+ server.__registerGuard('sealed', server.guard(async () => { entered(); await held; }));
+ server.__register('sealed/upload', server.live.upload(async () => 'never'));
+ server.live.middleware(async (_ctx, next) => { next(); await started; return { ok: false, code: 'FORBIDDEN', error: 'no' }; });
+ const ws = mockWs({ id: 'member' }); const platform = mockPlatform();
+ const { state } = await import('../src/server/state.js');
+ server.handleRpc(ws, frame('upload', 'sealed/upload', 8), platform);
+ try {
+  await vi.waitFor(() => expect(platform.sent.at(-1)?.data.code).toBe('FORBIDDEN'));
+  expect(state.pendingUploadBytes).toBe(0);
+ } finally { release(); }
+ await new Promise(resolve => setTimeout(resolve, 10));
+ expect(state.pendingUploadBytes).toBe(0);
+});
