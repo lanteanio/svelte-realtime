@@ -878,6 +878,8 @@ function _smoothSendUpdatesTo(rec, ws, list) {
 
 /** Owed tick time a room still catches up; older debt is dropped. */
 const SMOOTH_MAX_TICK_DEBT_MS = 2000;
+/** Owed ticks a room still catches up, so a short tickMs stays bounded too. */
+const SMOOTH_MAX_TICK_DEBT_TICKS = 120;
 /** Owed ticks run back to back before the loop yields to other work. */
 const SMOOTH_TICKS_PER_CALLBACK = 8;
 
@@ -892,6 +894,8 @@ function _armSmoothTick(rec) {
 
 function _runSmoothTicks(rec) {
 	rec.ticking = true;
+	const maxDebt = Math.min(SMOOTH_MAX_TICK_DEBT_MS, SMOOTH_MAX_TICK_DEBT_TICKS * rec.tickMs);
+	const debtAtStart = monotonicNow() - rec.tickDue;
 	try {
 		for (let count = 1; ; count++) {
 			rec.timer = null;
@@ -902,10 +906,21 @@ function _runSmoothTicks(rec) {
 			if (now < rec.tickDue) return;
 			// Every owed tick runs. Only debt beyond the bound is dropped, so a
 			// long stall cannot turn into an unbounded burst of catch-up work.
-			if (now - rec.tickDue > SMOOTH_MAX_TICK_DEBT_MS) rec.tickDue = now - SMOOTH_MAX_TICK_DEBT_MS;
-			// Yield to I/O between bursts. The timer the tick armed is due now,
-			// so the remaining debt continues in the next callback.
-			if (count === SMOOTH_TICKS_PER_CALLBACK) return;
+			if (now - rec.tickDue > maxDebt) rec.tickDue = now - maxDebt;
+			if (count === SMOOTH_TICKS_PER_CALLBACK) {
+				// A burst that ends owing more than it started cannot catch up:
+				// ticks cost more than tickMs. Drop the debt and wait a full
+				// period, so the room does not run back to back forever.
+				if (now - rec.tickDue > debtAtStart) {
+					clearTimer(rec.timer);
+					rec.timer = null;
+					rec.tickDue = now;
+					_armSmoothTick(rec);
+				}
+				// Otherwise the timer the tick armed is due now, so the rest of
+				// the debt continues in the next callback after I/O runs.
+				return;
+			}
 			clearTimer(rec.timer);
 		}
 	} finally {

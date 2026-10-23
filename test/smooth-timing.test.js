@@ -175,17 +175,28 @@ it('keeps fractional sixty-Hz deadlines within one timer millisecond', async () 
 	expect(Math.abs(stamps.at(-1) - stamps[0] - 599 * 1000 / 60)).toBeLessThan(1.1);
 });
 
-it('yields after eight ticks and bounds debt when each tick costs more than a period', async () => {
+it('drops the debt and waits a full period when each tick costs more than a period', async () => {
 	await rpc('sync');
 	workMs = 25;
 	fire();
 	expect(stamps).toHaveLength(8);
-	expect(next()[1].at).toBe(mono);
-	const record = _smoothTopics.get(path);
+	// The burst ended owing more than it started, so it cannot catch up.
+	expect(next()[1].at).toBe(mono + 20);
 	for (let i = 0; i < 100; i++) {
 		const before = stamps.length;
 		fire();
 		expect(stamps.length - before).toBe(8);
-		expect(mono - record.tickDue).toBeLessThanOrEqual(2000);
+		expect(next()[1].at).toBe(mono + 20);
 	}
+});
+
+it('bounds catch-up in ticks as well as time for a short tickMs', async () => {
+	declare(1);
+	await rpc('sync');
+	const start = next()[1].at;
+	fire(2000);
+	while (next()[1].at <= mono) fire();
+	// The first deadline, then the last 120 owed ticks and the one due now.
+	expect(stamps).toHaveLength(1 + 120 + 1);
+	expect(next()[1].at).toBe(start + 2000 + 1);
 });
