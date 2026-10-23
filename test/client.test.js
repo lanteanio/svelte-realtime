@@ -4718,6 +4718,54 @@ describe('CF Tunnel symptom detector', () => {
 			warnSpy.mockRestore();
 		}
 	});
+
+	/** Bind a connection whose pause behaves like the adapter's, or does nothing. */
+	async function bindPausable(pauses) {
+		const pause = vi.fn(() => { if (pauses) simulateStatus('disconnected'); });
+		connectFn.mockImplementationOnce(() => ({
+			sendQueued: sendMockFrame, send: sendMockFrame, bufferedAmount: 0, ...connShape,
+			simulateOffline: pause, resumeOnline: vi.fn()
+		}));
+		const mod = await import('../src/client.js');
+		__rpc('cf/ping')().catch(() => {});
+		return { mod, pause };
+	}
+
+	it('counts fast closes after a simulateOffline() the connection ignored', async () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { mod, pause } = await bindPausable(false);
+			mod.simulateOffline();
+			expect(pause).toHaveBeenCalledTimes(1);
+			simulateStatus('disconnected');
+			simulateStatus('open');
+			simulateStatus('disconnected');
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0][0]).toContain('Cloudflare-Tunnel');
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('ignores the close a pause causes, and counts closes once a connection opens again', async () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { mod } = await bindPausable(true);
+			mod.simulateOffline();
+			simulateStatus('open');
+			mod.simulateOffline();
+			expect(warnSpy).not.toHaveBeenCalled();
+			// A replacement connection that opens without resumeOnline().
+			simulateStatus('connecting');
+			simulateStatus('open');
+			simulateStatus('disconnected');
+			simulateStatus('open');
+			simulateStatus('disconnected');
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
 });
 
 // - combine() ----------------------------------------------------------------

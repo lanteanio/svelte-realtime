@@ -98,7 +98,10 @@ function _warnDeprecation(dep) {
 
 /** @type {boolean} */
 let disconnectListenerAttached = false;
-/** Set while simulateOffline() holds the connection down. */
+/**
+ * Set while a simulateOffline() pause holds the bound connection down;
+ * cleared by resumeOnline() and by any later connect or open.
+ */
 let _offlinePaused = false;
 let _applyStatus;
 
@@ -374,6 +377,9 @@ export function ensureDisconnectListener() {
 			}
 		}
 		if (s === 'open') lastOpenAt = now();
+		// A connection that connects or opens is not paused, including a
+		// replacement bound after the paused one closed for good.
+		if (s === 'open' || s === 'connecting') _offlinePaused = false;
 		// A backgrounded tab's socket ('suspended') is still up and carries frames.
 		const up = s === 'open' || s === 'suspended';
 		if (up && !clientState.socketUp) {
@@ -493,8 +499,26 @@ export const status = {
  */
 export function simulateOffline() {
 	_conn();
+	const conn = _bound;
+	if (typeof conn.simulateOffline !== 'function') return;
+	const before = _statusOf(conn);
+	const wasPaused = _offlinePaused;
+	// Set before the call: the 'disconnected' the pause emits reaches the
+	// status listener while it runs.
 	_offlinePaused = true;
-	_bound.simulateOffline?.();
+	conn.simulateOffline();
+	// The adapter does nothing on a connection closed for good, already
+	// paused, or without a URL during SSR; only a live status it took down
+	// marks a pause. A pause of a socket already waiting to reconnect emits
+	// nothing and needs no mark.
+	if (before === 'disconnected' || before === 'failed' || _statusOf(conn) !== 'disconnected') _offlinePaused = wasPaused;
+}
+
+/** @param {{ status: import('svelte/store').Readable<string> }} conn */
+function _statusOf(conn) {
+	let s;
+	conn.status.subscribe((/** @type {string} */ v) => { s = v; })();
+	return s;
 }
 
 /**
