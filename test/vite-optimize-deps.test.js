@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import realtime from '../src/vite.js';
@@ -33,7 +33,7 @@ describe('dependency optimization for generated modules', () => {
 		}
 	}
 	const installed = () => installRealtime(resolve(appRoot, 'node_modules/svelte-realtime'));
-	function installAdapter(dir) {
+	function installAdapter(dir, version = '0.6.0') {
 		const adapterExports = {};
 		for (const id of [...ADAPTER, SMOOTH_CHANNEL, CRDT_CHANNEL]) {
 			const file = './src/' + id.slice('svelte-adapter-uws/'.length) + '.js';
@@ -42,7 +42,7 @@ describe('dependency optimization for generated modules', () => {
 			writeFileSync(resolve(dir, file), id === CRDT_CHANNEL ? "import * as Y from 'yjs';\nimport { on } from '../../client.js';\n" : '');
 		}
 		mkdirSync(dir, { recursive: true });
-		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-adapter-uws', exports: adapterExports }));
+		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-adapter-uws', version, exports: adapterExports }));
 	}
 	// svelte-realtime linked from a checkout of its own, which has its own
 	// node_modules, as `npm link` and `file:` installs set it up.
@@ -212,6 +212,16 @@ describe('dependency optimization for generated modules', () => {
 			expect(resolveWith()).toEqual([...ADAPTER, SMOOTH_CHANNEL, CRDT_CHANNEL]);
 		});
 
+		it('adds no adapter runtime when the linked package runs the adapter from source', () => {
+			rmSync(resolve(appRoot, 'node_modules/svelte-realtime'), { recursive: true });
+			const target = linkedRealtime();
+			const adapterCheckout = resolve(appRoot, 'checkout/svelte-adapter-uws');
+			installAdapter(adapterCheckout);
+			link(adapterCheckout, resolve(target, 'node_modules/svelte-adapter-uws'));
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });\nexport const notes = live.doc({ topic: 'notes' });");
+			expect(resolveWith()).toEqual([]);
+		});
+
 		it('adds no rune module the installed Svelte cannot run', () => {
 			installPackage('svelte', '4.2.19');
 			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });\nexport const notes = live.doc({ topic: 'notes' });");
@@ -243,6 +253,43 @@ describe('dependency optimization for generated modules', () => {
 			}
 			expect(console.warn).toBe(warn);
 		});
+	});
+
+	it('reads only the import lines of generated code, not literals copied into it', () => {
+		installed();
+		installPackage('lodash');
+		writeLive("export const lobby = live.room({ topic: 'lobby', key: \"from 'lodash'\" });\nexport const items = live.stream('items', async () => [], { key: \"import 'lodash'\" });");
+		expect(resolveWith()).toEqual(DEPS);
+	});
+
+	it('generates every module whose client code imports more than the realtime client', async () => {
+		// Each fixture module, generated in full, against what the scan reports.
+		const { _generateClientStubs } = await import('../src/vite/codegen-client.js');
+		const { _generatedClientImports } = await import('../src/vite/optimize-deps.js');
+		const liveDir = resolve(import.meta.dirname, 'fixture/src/live');
+		writeLive([
+			"export const game = live.smooth({ topic: 'game', apply: (s) => s });",
+			"export const notes = live.array({ topic: 'notes' });",
+			"export const board = live.multiplayer({ topic: 'board', cursors: true });",
+			"export const lobby = live.room({ topic: 'lobby', enumerable: true });"
+		].join('\n'));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			for (const dir of [liveDir, resolve(appRoot, 'src/live')]) {
+				const expected = new Set();
+				for (const file of readdirSync(dir).filter(f => f.endsWith('.js'))) {
+					const code = _generateClientStubs(resolve(dir, file), file.slice(0, -3), 'src/live');
+					for (const m of code.matchAll(/^(?:import|export) .* from '([^']+)';$/gm)) {
+						if (m[1] !== CLIENT) expected.add(m[1]);
+					}
+				}
+				const found = new Set(_generatedClientImports(dir, 'src/live', undefined, null));
+				found.delete(CLIENT);
+				expect([...found].sort()).toEqual([...expected].sort());
+			}
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it('lists every adapter entry the realtime browser modules import', () => {

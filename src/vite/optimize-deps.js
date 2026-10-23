@@ -1,5 +1,5 @@
 // @ts-check
-import { existsSync, readFileSync, realpathSync } from 'fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
 import { createRequire } from 'module';
 import { relative, resolve, sep } from 'path';
 import { _findLiveFiles } from './codegen-registry.js';
@@ -17,15 +17,29 @@ export const ADAPTER_CLIENT_DEPS = ['svelte-adapter-uws/client', 'svelte-adapter
 
 const NODE_MODULES_RE = /[\\/]node_modules[\\/]/;
 const BARE_IMPORT_RE = /\b(?:from|import)\s*\(?\s*['"]([^'"./][^'"]*)['"]/g;
+// The import and re-export lines the client code generator writes. The
+// clause before `from` holds only bindings, so a user's string literal that
+// the generator copies into the module never reads as one.
+const GENERATED_IMPORT_RE = /^(?:import|export)\s+(?:[\w$*{},\s]+?\s+from\s+)?'([^'\n]+)';$/gm;
+// The export kinds whose generated code imports more than the realtime
+// client. A module without one is not generated here.
+const RUNTIME_EXPORT_RE = /export\s+const\s+[\w$]+\s*=\s*live\.(?:smooth|doc|map|array|multiplayer|room)\s*\(/;
+
+/**
+ * The imports found per live file, kept across dev server restarts in one
+ * process and reused while the file's size and modification time stay put.
+ * @type {Map<string, { mtimeMs: number, size: number, key: string, imports: string[] }>}
+ */
+const importCache = new Map();
 
 /**
  * The packages the generated client modules of the app's live directory
  * import. Which ones depends on the export kinds the modules declare (a
  * smoothed entity, a CRDT document, a multiplayer or enumerable room), so the
- * modules are generated here the way the browser will request them. Their
- * warnings are left to that request, and a module whose rune features the
- * installed Svelte cannot run contributes nothing: its request fails with the
- * error that says so.
+ * modules that declare one are generated here the way the browser will
+ * request them. Their warnings are left to that request, and a module whose
+ * rune features the installed Svelte cannot run contributes nothing: its
+ * request fails with the error that says so.
  * @param {string} liveDir
  * @param {string} dir
  * @param {number | undefined} reconcileIntervalMs
@@ -38,21 +52,45 @@ export function _generatedClientImports(liveDir, dir, reconcileIntervalMs, svelt
 	const warn = console.warn;
 	console.warn = () => {};
 	try {
+		const key = dir + '\0' + reconcileIntervalMs + '\0' + (svelte ? svelte.version : '');
 		for (const file of _findLiveFiles(liveDir)) {
-			const modulePath = relative(liveDir, file).split(sep).join('/').replace(/\.(?:[jt]s|mjs)$/, '');
-			let code;
+			let stat;
 			try {
-				code = _generateClientStubs(file, modulePath, dir, reconcileIntervalMs);
+				stat = statSync(file);
 			} catch {
 				continue;
 			}
-			if (_runeSubpathError(code, modulePath, svelte)) continue;
-			for (const m of code.matchAll(BARE_IMPORT_RE)) found.add(m[1]);
+			let cached = importCache.get(file);
+			if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size || cached.key !== key) {
+				cached = { mtimeMs: stat.mtimeMs, size: stat.size, key, imports: fileImports(liveDir, file, dir, reconcileIntervalMs, svelte) };
+				importCache.set(file, cached);
+			}
+			for (const id of cached.imports) found.add(id);
 		}
 	} finally {
 		console.warn = warn;
 	}
 	return [...found];
+}
+
+/**
+ * @param {string} liveDir
+ * @param {string} file
+ * @param {string} dir
+ * @param {number | undefined} reconcileIntervalMs
+ * @param {{ major: number, minor: number, version: string } | null} svelte
+ * @returns {string[]}
+ */
+function fileImports(liveDir, file, dir, reconcileIntervalMs, svelte) {
+	try {
+		if (!RUNTIME_EXPORT_RE.test(readFileSync(file, 'utf8'))) return [];
+		const modulePath = relative(liveDir, file).split(sep).join('/').replace(/\.(?:[jt]s|mjs)$/, '');
+		const code = _generateClientStubs(file, modulePath, dir, reconcileIntervalMs);
+		if (_runeSubpathError(code, modulePath, svelte)) return [];
+		return [...code.matchAll(GENERATED_IMPORT_RE)].map(m => m[1]);
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -126,12 +164,16 @@ function excluded(exclude, id) {
  * node_modules) stays served from source: an optimized client next to source
  * modules that import `./client.js` directly would run two client instances.
  * Its client modules still import svelte-adapter-uws from node_modules, which
- * Vite discovers when the browser requests them, so those entries are added
- * when both the realtime source and the app resolve them into node_modules.
- * Vite bundles the app's resolution and hands it to every importer of the
- * same id. The packages generated modules import for the export kinds the
- * app declares are the app's own imports: a realtime subpath
- * among them is added like the realtime entry points, any other package when
+ * Vite discovers when the browser requests them. Vite bundles the app's
+ * resolution and hands it to every importer of the same id, so an entry is
+ * added when the realtime source and the app both resolve it into
+ * node_modules.
+ *
+ * The packages generated modules import for the export kinds the app
+ * declares are the app's own imports. A realtime subpath among them is added
+ * like the realtime entry points. A package the realtime source imports too
+ * is added on the same terms as above, so a realtime that runs the adapter
+ * from source keeps a single client instance. Any package is added only when
  * it and everything its entry module imports resolve from the app root, so a
  * missing optional peer cannot fail the optimizer run. Nothing is added that
  * Vite would not discover on its own: not with discovery off, not an
@@ -156,12 +198,25 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 		return;
 	}
 	const fromRealtime = createRequire(entry);
+	/** @param {string} id */
+	const sharedWithRealtime = (id) => resolvesInstalled(fromRealtime, id, preserveSymlinks)
+		&& resolvesInstalled(fromRoot, id, preserveSymlinks);
+	/** @param {string} id */
+	const realtimeImports = (id) => {
+		try {
+			fromRealtime.resolve(id);
+			return true;
+		} catch {
+			return false;
+		}
+	};
 	const generated = generatedImports();
 	const add = resolvesInstalled(fromRoot, CLIENT_DEP, preserveSymlinks)
 		? [...ids, ...generated.filter(id => packageName(id) === 'svelte-realtime')]
-		: sourceIds.filter(id => resolvesInstalled(fromRealtime, id, preserveSymlinks) && resolvesInstalled(fromRoot, id, preserveSymlinks));
+		: sourceIds.filter(sharedWithRealtime);
 	for (const id of generated) {
-		if (packageName(id) === 'svelte-realtime' || !resolvesInstalled(fromRoot, id, preserveSymlinks)) continue;
+		if (packageName(id) === 'svelte-realtime') continue;
+		if (realtimeImports(id) ? !sharedWithRealtime(id) : !resolvesInstalled(fromRoot, id, preserveSymlinks)) continue;
 		if (importsResolve(fromRoot.resolve(id))) add.push(id);
 	}
 	const include = (optimizeDeps.include ??= []);
