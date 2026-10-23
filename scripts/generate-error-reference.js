@@ -3,14 +3,84 @@ import { isScriptEntry } from './script-entry.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
+import { REALTIME_ERROR_IDS, REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
 import { CODE_GUIDANCE, EVENT_GUIDANCE } from './error-guidance.js';
-import { isInformational, scanRuntimeErrors } from './runtime-error-inventory.js';
+import { CONSOLE_EXCLUDED_MODULES, CONSOLE_REASONS, DYNAMIC_SITE_REASONS } from './error-decisions.js';
+import { consoleSiteKey, dynamicSiteKey, isInformational, scanRuntimeErrors } from './runtime-error-inventory.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = resolve(ROOT, 'docs/errors.md');
 const GUIDANCE_FIELDS = Object.freeze(['cause', 'consequence', 'automaticRecovery', 'nextAction']);
 const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8')).version;
+export const DECISIONS = Object.freeze({ dynamic: DYNAMIC_SITE_REASONS, excluded: CONSOLE_EXCLUDED_MODULES, console: CONSOLE_REASONS });
+
+// Where each sibling package keeps its own error reference. When a sibling
+// checkout sits next to this repository, --check verifies the linked document
+// exists there, so a moved document fails here instead of shipping a dead link.
+const SIBLING_ERROR_DOCUMENTS = Object.freeze([
+	Object.freeze({ repo: 'svelte-adapter-uws', label: 'svelte-adapter-uws errors', documentPath: 'docs/errors.md' }),
+	Object.freeze({ repo: 'svelte-adapter-uws-extensions', label: 'svelte-adapter-uws-extensions errors', documentPath: 'docs/errors.md' })
+]);
+
+export function releaseDocumentationRef(version = PACKAGE_VERSION) {
+	return String(version).includes('-') ? 'dev' : 'main';
+}
+
+export function checkSiblingDocuments(parentDirectory = dirname(ROOT)) {
+	/** @type {string[]} */
+	const errors = [];
+	for (const sibling of SIBLING_ERROR_DOCUMENTS) {
+		const checkout = resolve(parentDirectory, sibling.repo);
+		if (!existsSync(checkout)) continue;
+		if (!existsSync(resolve(checkout, sibling.documentPath))) {
+			errors.push(sibling.repo + ': the local checkout at ' + checkout + ' has no ' + sibling.documentPath +
+				'; update SIBLING_ERROR_DOCUMENTS in scripts/generate-error-reference.js, then rerun --write');
+		}
+	}
+	return errors;
+}
+
+/**
+ * Every computed emission site and every console warning or error outside
+ * the excluded modules needs a recorded decision, and a decision that matches
+ * nothing is refused.
+ *
+ * @param {ReturnType<typeof scanRuntimeErrors>} inventory
+ * @param {{ dynamic: Readonly<Record<string, string>>, excluded: Readonly<Record<string, string>>, console: Readonly<Record<string, string>> }} decisions
+ */
+export function validateDecisions(inventory, decisions = DECISIONS) {
+	/** @type {string[]} */
+	const errors = [];
+	const siteKeys = new Set(inventory.dynamicSites.map(dynamicSiteKey));
+	for (const key of siteKeys) {
+		if (!Object.hasOwn(decisions.dynamic, key)) errors.push('dynamic emission site ' + JSON.stringify(key) + ' has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js');
+	}
+	for (const key of Object.keys(decisions.dynamic)) {
+		if (!siteKeys.has(key)) errors.push('DYNAMIC_SITE_REASONS[' + JSON.stringify(key) + '] matches no computed emission site');
+	}
+	const consoleKeys = new Set(), consolePaths = new Set();
+	for (const site of inventory.consoleSites) {
+		consolePaths.add(site.path);
+		if (site.registered || Object.hasOwn(decisions.excluded, site.path)) continue;
+		const key = consoleSiteKey(site);
+		consoleKeys.add(key);
+		if (!Object.hasOwn(decisions.console, key)) errors.push('console line ' + JSON.stringify(key) + ' is neither printed through the error registry nor given a CONSOLE_REASONS entry in scripts/error-decisions.js');
+	}
+	for (const key of Object.keys(decisions.console)) {
+		if (!consoleKeys.has(key)) errors.push('CONSOLE_REASONS[' + JSON.stringify(key) + '] matches no console line');
+	}
+	for (const path of Object.keys(decisions.excluded)) {
+		if (!consolePaths.has(path)) errors.push('CONSOLE_EXCLUDED_MODULES[' + JSON.stringify(path) + '] prints no console warning or error');
+	}
+	for (const [table, entries] of [['DYNAMIC_SITE_REASONS', decisions.dynamic], ['CONSOLE_EXCLUDED_MODULES', decisions.excluded], ['CONSOLE_REASONS', decisions.console]]) {
+		for (const [key, reason] of Object.entries(entries)) {
+			if (typeof reason !== 'string' || !reason.trim()) errors.push(table + '[' + JSON.stringify(key) + '] has no reason');
+			else if (!PRINTABLE_ASCII.test(reason)) errors.push(table + '[' + JSON.stringify(key) + '] must be printable ASCII');
+		}
+	}
+	return errors;
+}
 
 /**
  * @param {ReadonlyArray<import('../src/error-registry.js').RealtimeErrorDefinition>} registry
@@ -47,6 +117,13 @@ export function validateErrorRegistry(registry = REALTIME_ERROR_REGISTRY) {
 				errors.push(label + ' has a missing or out-of-root source: ' + source);
 			}
 		}
+		// A registered entry nothing emits documents text no log can contain.
+		const key = Object.keys(REALTIME_ERROR_IDS).find((name) => REALTIME_ERROR_IDS[name] === entry.id);
+		const emitted = key !== undefined && (entry.sources || []).some((source) => {
+			const sourcePath = resolve(ROOT, source);
+			return existsSync(sourcePath) && readFileSync(sourcePath, 'utf8').includes('REALTIME_ERROR_IDS.' + key);
+		});
+		if (!emitted) errors.push(label + ' (' + entry.id + ') is not emitted through REALTIME_ERROR_IDS in any of its sources');
 	}
 	return errors;
 }
@@ -127,8 +204,8 @@ function sections(blocks) {
  * @param {ReadonlyArray<import('../src/error-registry.js').RealtimeErrorDefinition>} registry
  * @param {ReturnType<typeof scanRuntimeErrors>} inventory
  */
-export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, inventory = scanRuntimeErrors(), codes = CODE_GUIDANCE, events = EVENT_GUIDANCE) {
-	const errors = [...validateErrorRegistry(registry), ...validateGuidance(inventory, codes, events)];
+export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, inventory = scanRuntimeErrors(), codes = CODE_GUIDANCE, events = EVENT_GUIDANCE, decisions = DECISIONS) {
+	const errors = [...validateErrorRegistry(registry), ...validateGuidance(inventory, codes, events), ...validateDecisions(inventory, decisions)];
 	if (errors.length) throw new Error('Invalid runtime error reference input:\n- ' + errors.join('\n- '));
 
 	const structured = inventory.diagnostics.filter((row) => row.kind === 'structured event');
@@ -145,7 +222,7 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, invento
 		'<a id="' + entry.anchor + '"></a>',
 		'### ' + code(entry.id),
 		'',
-		'- Runtime code: ' + (entry.code === null ? 'none (build diagnostic)' : '[' + code(entry.code) + '](#live-error-' + entry.code.toLowerCase().replaceAll('_', '-') + ')'),
+		'- Runtime code: ' + (entry.code === null ? 'none' : '[' + code(entry.code) + '](#live-error-' + entry.code.toLowerCase().replaceAll('_', '-') + ')'),
 		'- Event: ' + code(entry.event),
 		'- Message prefix: ' + code(entry.messagePrefix),
 		...guidanceLines(entry),
@@ -178,16 +255,27 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, invento
 		'| <a id="' + row.anchor + '"></a>' + code(row.key) + ' | ' + row.severities.join(', ') + ' | ' +
 		patternList(row, 'computed') + ' | ' + sourceLinks(row.sources) + ' |'
 	);
+	const registryByPrefix = new Map(registry.map((entry) => [entry.messagePrefix, entry]));
+	const decisionLines = (row) => inventory.consoleSites.filter((site) => site.id === row.key).map((site) => {
+		const owner = '[' + site.path + '](../' + site.path + ')';
+		if (site.registered) {
+			const entry = registryByPrefix.get(site.text);
+			return '- ' + owner + ': printed through ' + (entry ? '[' + code(entry.id) + '](#' + entry.anchor + ')' : 'the error registry');
+		}
+		if (Object.hasOwn(decisions.excluded, site.path)) return '- ' + owner + ': outside the decision (' + decisions.excluded[site.path] + ')';
+		return '- ' + owner + ': ' + decisions.console[consoleSiteKey(site)];
+	});
 	const consoleSections = consoleLines.map((row) => [
 		'<a id="' + row.anchor + '"></a>',
 		'### ' + literal(row.key),
 		'',
-		'- Message patterns: ' + patternList(row, 'computed'),
-		'- Owning sources: ' + sourceLinks(row.sources)
+		'- Message pattern: ' + patternList(row, 'computed'),
+		...decisionLines(row)
 	]);
 	const dynamicRows = inventory.dynamicSites.map((site) =>
-		'| [' + site.path + '](../' + site.path + ') | ' + code(site.scope) + ' | ' + site.kind + ' | ' + site.count + ' |'
+		'| [' + site.path + '](../' + site.path + ') | ' + code(site.scope) + ' | ' + site.kind + ' | ' + site.count + ' | ' + decisions.dynamic[dynamicSiteKey(site)] + ' |'
 	);
+	const siblingRef = releaseDocumentationRef();
 
 	return [
 		'# Runtime error reference',
@@ -199,10 +287,14 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, invento
 		'- ' + registry.length + ' [stable IDs](#stable-ids) with full guidance. Their runtime messages append the ID and the help route to this page.',
 		'- ' + inventory.errors.length + ' [runtime error codes](#runtime-error-codes) (`LiveError` on the server, `RpcError` on the client, error replies on the wire), every one with cause, consequence, automatic recovery and next action.',
 		'- ' + failures.length + ' [failure events](#operational-events) (warn, error or fatal), every one with full guidance, and ' + informational.length + ' [informational events](#informational-events) listed without guidance because they report normal operation.',
-		'- ' + consoleLines.length + ' [console lines](#console-lines) listed by searchable text and owning source only. These carry no cause or recovery guidance.',
-		'- ' + dynamicCount + ' emission sites with a computed code, event or message, listed under [dynamic emission sites](#dynamic-emission-sites).',
+		'- ' + consoleLines.length + ' [console lines](#console-lines) indexed by searchable text. A server, Vite or shared console warning or error is either printed through the registry with a stable ID or carries a recorded reason why it needs no guided entry; browser and scaffolder output is listed without one.',
+		'- ' + dynamicCount + ' emission sites with a computed code, event or message, each with a recorded reason, under [dynamic emission sites](#dynamic-emission-sites).',
 		'',
-		'A new error code, or a new event emitted at warn, error or fatal, fails generation until it has guidance; so does guidance for a code or event the runtime no longer emits. An event emitted with a severity the parser cannot resolve counts as a failure event.',
+		'Generation fails on a new error code or a new event emitted at warn, error or fatal without guidance, on a new console warning or error without a stable ID or a recorded reason, and on a new computed emission site without a recorded reason. It also fails on guidance or a reason that no longer matches anything the runtime emits. An event emitted with a severity the parser cannot resolve counts as a failure event. Codes and messages are followed through local constants and through helper functions to their call sites before a site counts as computed.',
+		'',
+		'This is the svelte-realtime part of the ecosystem index. The sibling packages generate and ship their own references:',
+		'',
+		...SIBLING_ERROR_DOCUMENTS.map((sibling) => '- [' + sibling.label + '](https://github.com/lanteanio/' + sibling.repo + '/blob/' + siblingRef + '/' + sibling.documentPath + ')'),
 		'',
 		'Message patterns show the literal text the runtime prints. `<name>` stands for a computed value, named after the variable or property it comes from; search for the literal text around it. Escaped `\\n` and `\\r` stand for actual newlines and carriage returns. Code and event anchors stay stable when message text changes.',
 		'',
@@ -245,23 +337,25 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, invento
 		'<a id="console-lines"></a>',
 		'## Console lines',
 		'',
-		'Listing only: plain `console.warn` and `console.error` lines, outside the structured event format, indexed by searchable text so a pasted log line lands here. Each anchor is derived from the literal text and changes when that text changes. Lines whose first argument is a structured diagnostic are indexed above by their event.',
+		'Plain `console.warn` and `console.error` lines, outside the structured event format, indexed by searchable text so a pasted log line lands here. Each line shows its decision: printed through a stable ID, a recorded reason why an operator needs nothing more than the line itself, or a module outside the decision. Each anchor is derived from the text and changes when the text changes. Lines whose first argument is a structured diagnostic are indexed above by their event.',
 		'',
 		...sections(consoleSections),
 		'',
 		'<a id="dynamic-emission-sites"></a>',
 		'## Dynamic emission sites',
 		'',
-		'These emitters compute their code, event or message, so the parser cannot resolve them to literal text. Wire forwarding and application-provided messages vary at runtime. Sites are keyed by file, enclosing function and emitter, so an edit elsewhere in the file leaves this table unchanged.',
+		'These emitters compute their code, event or message, so the parser cannot resolve them to literal text. Each carries the recorded reason where the value comes from. Sites are keyed by file, enclosing function and emitter, so an edit elsewhere in the file leaves this table unchanged.',
 		'',
-		'| Source | Function | Emitter | Sites |',
-		'|---|---|---|---|',
+		'| Source | Function | Emitter | Sites | Reason |',
+		'|---|---|---|---|---|',
 		...dynamicRows,
 		''
 	].join('\n');
 }
 
 export function checkErrorReference() {
+	const siblingErrors = checkSiblingDocuments();
+	if (siblingErrors.length) throw new Error(siblingErrors.join('\n'));
 	const expected = renderErrorReference();
 	const actual = existsSync(OUTPUT) ? readFileSync(OUTPUT, 'utf8') : '';
 	if (actual !== expected) {

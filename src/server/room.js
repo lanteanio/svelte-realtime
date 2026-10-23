@@ -4,6 +4,7 @@ import { live, close, unsubscribe, handleRpc } from '../server.js';
 import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { _runGuard } from './dispatch.js';
 import { LiveError } from './live-error.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state, _presenceRef } from './state.js';
@@ -969,7 +970,7 @@ export const _roomRegister = function room(config) {
 					} catch (err) {
 						if (!_captureWarned) {
 							_captureWarned = true;
-							console.error('[svelte-realtime] history capture threw; suppressing further capture errors for this room:', err);
+							console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.ROOM_HISTORY_CAPTURE), err);
 						}
 					}
 					return result;

@@ -33,6 +33,12 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'The adapter reconnects, streams subscribe again with backoff, and unsent calls keep waiting. Offline-queue replays stay queued. Other RPCs and uploads are not retried.',
 		nextAction: 'Retry calls that are safe to repeat, ideally with an idempotency key, or enable the offline queue. Start uploads again from the beginning. Check the network or proxy if this happens often.'
 	}),
+	FLOW_BACKPRESSURE: Object.freeze({
+		cause: 'An upload chunk arrives larger than the receive credit the server granted, so the client sent more than the flow-control window allows.',
+		consequence: 'The server aborts the upload and answers FLOW_BACKPRESSURE; the handler\'s iterator and signal abort with the same code, so the upload does not complete.',
+		automaticRecovery: 'None. The aborted upload stream cannot be resumed.',
+		nextAction: 'Use the shipped client, which waits for credit before sending. A custom or outdated client must follow the credit-mode framing in docs/upload-wire.md, then start a new upload.'
+	}),
 	FORBIDDEN: Object.freeze({
 		cause: 'An authenticated caller fails an access check: a guard, `live.access` predicate, stream filter, subscribe hook, document or smooth read gate, or an owner-only room action. It also covers revoked stream access, a changed derived scope, and room membership being erased.',
 		consequence: 'The RPC or stream rejects with RpcError FORBIDDEN, and server code receives a LiveError. The stream\'s `error` store is set and the subscription is released. Anonymous callers get UNAUTHENTICATED instead.',
@@ -52,7 +58,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again. A repeat call only reprocesses the rooms that failed.'
 	}),
 	IDEMPOTENCY_CAPACITY: Object.freeze({
-		cause: 'A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall, 1,000 per tenant, with the last 1,000 slots reserved for small tenants.',
+		cause: 'A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall. With a tenant resolver configured, each tenant and the unscoped bucket are also capped at 1,000 and the last 1,000 slots are kept for small tenants; without one, unscoped callers may use the whole store.',
 		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned.',
 		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.',
 		nextAction: 'Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.'
@@ -137,7 +143,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	LOCK_TIMEOUT: Object.freeze({
 		cause: 'A caller queued behind a `live.lock` key does not get the lock within the configured `maxWaitMs`. A custom Lock that throws its own LOCK_TIMEOUT is rewrapped the same way.',
-		consequence: 'The waiting call rejects with a LOCK_TIMEOUT LiveError carrying `key` and `maxWaitMs`, and its handler never runs. The client receives an RpcError. The current holder and later waiters continue undisturbed.',
+		consequence: 'The waiting call rejects with a LOCK_TIMEOUT LiveError and its handler never runs. Its `key` and `maxWaitMs` fields exist only on the server; the client receives an RpcError with the code and message. The current holder and later waiters continue undisturbed.',
 		automaticRecovery: 'None. The call is not retried and other waiters keep their queue order.',
 		nextAction: 'Find out why the lock is held so long, or raise `maxWaitMs`. Retry the call after a delay and watch the lock wait-timeout metric.'
 	}),
@@ -191,9 +197,9 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	RATE_LIMITED: Object.freeze({
 		cause: 'A `live.rateLimit` or registry `rateLimits` bucket is exhausted, the limiter reaches its cap on tracked identities, or a smooth client re-syncs more often than its per-identity window allows.',
-		consequence: 'The call is refused before the handler runs. The caller gets a LiveError or RpcError with code RATE_LIMITED. Registry-level refusals include `retryAfter` on the wire.',
+		consequence: 'The call is refused before the handler runs. The client receives an RpcError carrying only the code and message. A server-side direct call receives the LiveError, which carries `retryAfter` in milliseconds.',
 		automaticRecovery: 'None. Buckets refill as their window passes, but refused calls are not retried.',
-		nextAction: 'Back off and retry after `retryAfter` when present. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.'
+		nextAction: 'Back off on the client with your own delay; the client error does not say when the bucket refills. Server code can wait for `retryAfter`. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.'
 	}),
 	SERVICE_UNAVAILABLE: Object.freeze({
 		cause: 'A function wrapped with `live.breaker` is called while its circuit breaker is open and no `fallback` is configured.',
@@ -245,9 +251,9 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	UNKNOWN: Object.freeze({
 		cause: 'An RPC, batch, stream or upload error reply arrives with no `code` field, for example from an incompatible server or a custom handler that writes raw replies.',
-		consequence: 'The pending call rejects with an UNKNOWN RpcError using the reply\'s `error` text, or the message `Unknown error` or `Upload failed`. The full reply is attached for inspection.',
+		consequence: 'The pending call rejects with an UNKNOWN RpcError using the reply\'s `error` text, or the message `Unknown error` or `Upload failed`. Only the reply\'s `params` and `details` are carried onto the error; other reply fields are not.',
 		automaticRecovery: 'None.',
-		nextAction: 'Check the reply payload attached to the error and the server version. Make sure every error reply includes a code, by throwing a LiveError in handlers.'
+		nextAction: 'Inspect the raw reply frame in the browser network panel and check the server version. Make sure every error reply includes a code, by throwing a LiveError in handlers.'
 	}),
 	VALIDATION: Object.freeze({
 		cause: 'Arguments fail a `live.validated` or stream-args schema, or a server API is misused: invalid `live.push` or `live.notify` targets or options, alarm, tenant, `ctx.publish` jitter, `ctx.compensate` or `live.breaker` configuration.',

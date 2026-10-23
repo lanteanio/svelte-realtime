@@ -1,6 +1,7 @@
 // @ts-check
 import { _lazyQueue } from './state.js';
 import { _validSegmentRe } from './validate.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 
 // Seam: the register fns _resolveAllLazy dispatches to live in server.js (and
 // cron-engine for registerCron); injected at init.
@@ -72,7 +73,7 @@ export async function _resolveAllLazy() {
 					}
 				}
 			} catch (err) {
-				console.error(`[svelte-realtime] Failed to resolve lazy registration for '${path}':`, err);
+				console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.LAZY_REGISTRATION, " '" + path + "'"), err);
 			}
 		}
 		_lazyResolved = true;

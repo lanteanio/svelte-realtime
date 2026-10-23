@@ -107,7 +107,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
-- The [error reference](docs/errors.md) gives every runtime error code and every warn or error operational event its cause, consequence, automatic recovery and next action, and indexes whole messages with named placeholders, so a pasted line such as `RPC '<path>' timed out after <value>s` is searchable. Console lines stay a searchable listing, and it says so. Generation fails when a new code or failure event has no guidance, and dynamic emission sites are listed by function instead of line, so unrelated source edits no longer stale the reference.
+- The [error reference](docs/errors.md) gives every runtime error code and every warn or error operational event its cause, consequence, automatic recovery and next action, and indexes whole messages with named placeholders, so a pasted line such as `RPC '<path>' timed out after <value>s` is searchable. Every server, Vite and shared console warning or error either prints through a stable ID or shows the recorded reason it needs no entry, and every computed emission site shows where its value comes from. Generation fails when a new code, failure event, console failure or computed site arrives without guidance or a reason, and sites are keyed by function instead of line, so unrelated source edits no longer stale the reference. The reference links the adapter and extensions references.
+
+- A failing `live.room` history capture, a failed `live.doc` persistence hook without `onError`, and a lazy registration that fails to load now print under stable IDs (`REALTIME-ERR-ROOM-HISTORY-CAPTURE`, `REALTIME-ERR-DOC-PERSIST`, `REALTIME-ERR-LAZY-REGISTRATION`) with a help route to their guided entries. The document line now reads `[svelte-realtime] document persistence failed: <label> <op> for "<topic>"`.
 
 - New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
 

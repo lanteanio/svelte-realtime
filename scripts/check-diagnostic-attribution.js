@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
+import { REALTIME_ERROR_IDS, REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = join(root, 'src');
@@ -47,7 +48,12 @@ for (const path of files(sourceRoot)) {
 			counts.set('canonical', counts.get('canonical') + 1);
 			return;
 		}
-		const text = leadingText(first);
+		// A registry-printed line starts with the registered prefix.
+		const key = first?.type === 'CallExpression' && first.callee?.name === 'realtimeErrorMessage' &&
+			first.arguments[0]?.type === 'MemberExpression' && first.arguments[0].object?.name === 'REALTIME_ERROR_IDS'
+			? first.arguments[0].property?.name : undefined;
+		const registered = key === undefined ? undefined : REALTIME_ERROR_REGISTRY.find((entry) => entry.id === REALTIME_ERROR_IDS[key]);
+		const text = registered ? registered.messagePrefix : leadingText(first);
 		const family = families.find(([, pattern]) => pattern.test(text));
 		if (family) {
 			counts.set(family[0], counts.get(family[0]) + 1);

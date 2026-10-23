@@ -19,7 +19,10 @@ export const REALTIME_ERROR_IDS = Object.freeze({
 	INVALID_USER_ID: 'REALTIME-ERR-INVALID-USER-ID',
 	LIVE_RESOLVE: 'REALTIME-ERR-LIVE-RESOLVE',
 	UPLOAD_START_LIMIT: 'REALTIME-ERR-UPLOAD-START-LIMIT',
-	UPLOAD_MAX_SIZE: 'REALTIME-ERR-UPLOAD-MAX-SIZE'
+	UPLOAD_MAX_SIZE: 'REALTIME-ERR-UPLOAD-MAX-SIZE',
+	ROOM_HISTORY_CAPTURE: 'REALTIME-ERR-ROOM-HISTORY-CAPTURE',
+	DOC_PERSIST: 'REALTIME-ERR-DOC-PERSIST',
+	LAZY_REGISTRATION: 'REALTIME-ERR-LAZY-REGISTRATION'
 });
 
 /** @type {ReadonlyArray<Readonly<RealtimeErrorDefinition>>} */
@@ -71,10 +74,49 @@ export const REALTIME_ERROR_REGISTRY = Object.freeze([
 		cause: 'The received upload bytes exceeded the maxSize configured by the resolved upload handler.',
 		consequence: 'The upload is aborted and returns PAYLOAD_TOO_LARGE without invoking or completing the handler.',
 		automaticRecovery: 'None; the aborted stream cannot be resumed.',
-		nextAction: 'Reduce the upload or deliberately raise the audited maxSize, then start a new upload.',
+		nextAction: 'Reduce the upload or deliberately raise maxSize, then start a new upload.',
 		sources: Object.freeze(['src/server/upload.js']),
 		anchor: 'realtime-err-upload-max-size',
 		help: 'docs/errors.md#realtime-err-upload-max-size'
+	}),
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.ROOM_HISTORY_CAPTURE,
+		code: null,
+		event: 'room.history.capture-failed',
+		messagePrefix: '[svelte-realtime] history capture threw; suppressing further capture errors for this room',
+		cause: 'The `history.capture` function of a `live.room` threw while recording the state after a successful action.',
+		consequence: 'The action still succeeds and its result is returned, but no history entry is recorded for it, so a later `ctx.compensate` that rewinds to that moment evaluates against the previous entry. Later capture failures in the same room are not printed.',
+		automaticRecovery: 'None for the missed entry. The next action records again, and a capture that stops throwing records normally.',
+		nextAction: 'Fix the capture function using the error printed with this line; it must return a snapshot of the room state without throwing. Restart the process to see further capture errors after fixing.',
+		sources: Object.freeze(['src/server/room.js']),
+		anchor: 'realtime-err-room-history-capture',
+		help: 'docs/errors.md#realtime-err-room-history-capture'
+	}),
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.DOC_PERSIST,
+		code: null,
+		event: 'doc.persist.failed',
+		messagePrefix: '[svelte-realtime] document persistence failed:',
+		cause: 'The `persist.load` or `persist.store` hook of a `live.doc` declaration threw or rejected, and the declaration has no `onError` handler. The line names the declaration, the operation and the topic.',
+		consequence: 'A failed store leaves the document dirty in memory; it is not durable until a store succeeds and the replica is not unloaded meanwhile. A failed load leaves the document without its stored state.',
+		automaticRecovery: 'A failed store is retried on the `debounceMaxWait` cadence, printing this line on every failed attempt. A failed load is not retried by this line.',
+		nextAction: 'Fix the storage backend or the hook using the error printed with this line. Pass `onError` to the declaration to route these failures into your own logging or alerting.',
+		sources: Object.freeze(['src/server/crdt.js']),
+		anchor: 'realtime-err-doc-persist',
+		help: 'docs/errors.md#realtime-err-doc-persist'
+	}),
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.LAZY_REGISTRATION,
+		code: null,
+		event: 'lazy.registration.failed',
+		messagePrefix: '[svelte-realtime] Failed to resolve lazy registration for',
+		cause: 'Loading a lazily registered live module threw while the server resolved its deferred cron, derived, effect, webhook, aggregate or room-action registrations.',
+		consequence: 'Nothing at that path is registered for the life of the process: its cron never runs, its derived stream or effect never reacts, and calls to its room actions answer NOT_FOUND. Other lazy registrations still resolve.',
+		automaticRecovery: 'None. Lazy registrations resolve once per process and the failed entry is not retried.',
+		nextAction: 'Fix the module error printed with this line, then restart the server.',
+		sources: Object.freeze(['src/server/lazy.js']),
+		anchor: 'realtime-err-lazy-registration',
+		help: 'docs/errors.md#realtime-err-lazy-registration'
 	})
 ]);
 

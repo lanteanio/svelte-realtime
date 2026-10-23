@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import svelteRealtime from '../src/vite.js';
 import { _buildCtx, _getCtxHelpers } from '../src/server/ctx.js';
 import { LiveError } from '../src/server/live-error.js';
@@ -12,12 +12,17 @@ import {
 	realtimeErrorMessage
 } from '../src/error-registry.js';
 import {
+	DECISIONS,
+	checkSiblingDocuments,
 	renderErrorReference,
+	validateDecisions,
 	validateErrorRegistry,
 	validateGuidance
 } from '../scripts/generate-error-reference.js';
 import { CODE_GUIDANCE, EVENT_GUIDANCE } from '../scripts/error-guidance.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { _lazyQueue } from '../src/server/state.js';
+import { _resetLazy, _resolveAllLazy } from '../src/server/lazy.js';
 import { isInformational, runtimeSources, scanRuntimeErrors } from '../scripts/runtime-error-inventory.js';
 
 const read = (relative) => readFileSync(new URL('../' + relative, import.meta.url), 'utf8');
@@ -37,7 +42,7 @@ describe('runtime error reference', () => {
 		}
 		expect(generated).toContain('id="live-error-invalid-user-id"');
 		expect(generated).toContain('id="diagnostic-rpc.execution.non-live-error"');
-		expect(generated).toContain('Listing only');
+		expect(generated).toContain('printed through [`REALTIME-ERR-LAZY-REGISTRATION`](#realtime-err-lazy-registration)');
 	});
 
 	it('validates the owning registry and rejects unknown ids', () => {
@@ -161,6 +166,68 @@ describe('guidance gate', () => {
 			: file);
 		expect(renderErrorReference(undefined, scanRuntimeErrors(shifted))).toBe(renderErrorReference(undefined, scanRuntimeErrors(files)));
 	});
+
+	it('refuses a computed emission site without a recorded reason, and a reason that matches nothing', () => {
+		const inventory = withExtra('export function relay(reply) { throw new LiveError(reply.code, reply.message); }');
+		expect(validateDecisions(inventory)).toEqual([
+			'dynamic emission site "src/example.js::relay()::new LiveError" has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js'
+		]);
+		expect(() => renderErrorReference(undefined, inventory)).toThrow(/relay\(\)::new LiveError/);
+		const stale = { ...DECISIONS, dynamic: { ...DECISIONS.dynamic, 'src/gone.js::gone()::new LiveError': 'x' } };
+		expect(validateDecisions(scanRuntimeErrors(), stale)).toEqual([
+			'DYNAMIC_SITE_REASONS["src/gone.js::gone()::new LiveError"] matches no computed emission site'
+		]);
+	});
+
+	it('refuses a server console failure without a stable ID or a recorded reason', () => {
+		const inventory = withExtra("export function tick() { console.error('[svelte-realtime] tick store failed:', new Error('x')); }");
+		expect(validateDecisions(inventory)).toEqual([
+			'console line "src/example.js::[svelte-realtime] tick store failed:" is neither printed through the error registry nor given a CONSOLE_REASONS entry in scripts/error-decisions.js'
+		]);
+		const reasoned = { ...DECISIONS, console: { ...DECISIONS.console, 'src/example.js::[svelte-realtime] tick store failed:': 'Recorded.' } };
+		expect(validateDecisions(inventory, reasoned)).toEqual([]);
+		expect(validateDecisions(scanRuntimeErrors(), reasoned)).toEqual([
+			'CONSOLE_REASONS["src/example.js::[svelte-realtime] tick store failed:"] matches no console line'
+		]);
+		const routed = withExtra("export function tick(err) { console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.LAZY_REGISTRATION, ' x'), err); }");
+		expect(validateDecisions(routed)).toEqual([]);
+		expect(routed.consoleSites.find((site) => site.path === 'src/example.js').registered).toBe(true);
+	});
+
+	it('refuses a registry entry that nothing emits', () => {
+		const entry = REALTIME_ERROR_REGISTRY.find((item) => item.id === REALTIME_ERROR_IDS.DOC_PERSIST);
+		expect(validateErrorRegistry([{ ...entry, sources: ['src/server/room.js'] }])).toEqual([
+			'entry 0 (REALTIME-ERR-DOC-PERSIST) is not emitted through REALTIME_ERROR_IDS in any of its sources'
+		]);
+	});
+
+	it('checks sibling error references only where a sibling checkout exists', () => {
+		expect(checkSiblingDocuments(fileURLToPath(new URL('./__no-siblings-here__', import.meta.url)))).toEqual([]);
+		const generated = renderErrorReference();
+		expect(generated).toContain('[svelte-adapter-uws errors](https://github.com/lanteanio/svelte-adapter-uws/blob/');
+		expect(generated).toContain('[svelte-adapter-uws-extensions errors](https://github.com/lanteanio/svelte-adapter-uws-extensions/blob/');
+	});
+});
+
+describe('registry-backed console lines', () => {
+	it('prints a failed lazy registration under its stable error ID', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const saved = _lazyQueue.splice(0);
+		_resetLazy();
+		try {
+			_lazyQueue.push({ type: 'cron', path: 'jobs/nightly', loader: async () => { throw new Error('module boom'); } });
+			await _resolveAllLazy();
+			const definition = realtimeErrorDefinition(REALTIME_ERROR_IDS.LAZY_REGISTRATION);
+			expect(errSpy).toHaveBeenCalledTimes(1);
+			expect(errSpy.mock.calls[0][0]).toBe(realtimeErrorMessage(definition.id, " 'jobs/nightly'"));
+			expect(errSpy.mock.calls[0][1].message).toBe('module boom');
+		} finally {
+			errSpy.mockRestore();
+			_lazyQueue.length = 0;
+			_lazyQueue.push(...saved);
+			_resetLazy();
+		}
+	});
 });
 
 describe('runtime emission inventory', () => {
@@ -252,7 +319,7 @@ describe('runtime emission inventory', () => {
 	it('keeps code anchors stable and escapes literal messages in generated Markdown', () => {
 		const render = (source) => {
 			const inventory = scan(source);
-			return { inventory, text: renderErrorReference([], inventory, { VALIDATION: guidance('Documented.') }, {}) };
+			return { inventory, text: renderErrorReference([], inventory, { VALIDATION: guidance('Documented.') }, {}, { dynamic: {}, excluded: {}, console: {} }) };
 		};
 		const before = render("new LiveError('VALIDATION', 'before');");
 		const after = render("new LiveError('VALIDATION', '<script>|after\\n');");
@@ -260,6 +327,48 @@ describe('runtime emission inventory', () => {
 		expect(before.text).not.toBe(after.text);
 		expect(after.text).toContain('&lt;script&gt;&#124;after\\n');
 		expect(after.text).not.toContain('<script>');
+	});
+});
+
+describe('code and message resolution', () => {
+	const scanFiles = (files) => scanRuntimeErrors(Object.entries(files).map(([path, source]) => ({ path, source })));
+
+	it('resolves codes and messages bound to local constants', () => {
+		const inventory = scanFiles({ 'src/example.js': "function deny(authed) { const code = authed ? 'FORBIDDEN' : 'UNAUTHENTICATED'; const message = 'Access denied'; throw new LiveError(code, message); }" });
+		expect(inventory.errors.map((row) => [row.key, row.prefixes])).toEqual([['FORBIDDEN', ['Access denied']], ['UNAUTHENTICATED', ['Access denied']]]);
+		expect(inventory.dynamicSites).toEqual([]);
+	});
+
+	it('follows an exported helper to its call sites in importing files', () => {
+		const inventory = scanFiles({
+			'src/client/state.js': 'export function _lost(code, message) { for (const fail of pending) fail(new RpcError(code, message)); }',
+			'src/client/connection.js': "import { _lost } from './state.js'; function onClose() { _lost('DISCONNECTED', 'WebSocket connection replaced'); }"
+		});
+		expect(inventory.errors).toHaveLength(1);
+		expect(inventory.errors[0].key).toBe('DISCONNECTED');
+		expect(inventory.errors[0].prefixes).toEqual(['WebSocket connection replaced']);
+		expect(inventory.errors[0].sources).toEqual(['src/client/connection.js', 'src/client/state.js']);
+		expect(inventory.dynamicSites).toEqual([]);
+		const forwarded = scanFiles({
+			'src/client/state.js': 'export function _lost(code, message) { return new RpcError(code, message); }',
+			'src/client/connection.js': "import { _lost } from './state.js'; function onReply(data) { _lost(data.code, 'Server error'); }"
+		});
+		expect(forwarded.dynamicSites.map((site) => site.scope)).toEqual(['_lost()']);
+	});
+
+	it('follows a method helper to the calls of that method in its file', () => {
+		const inventory = scanFiles({ 'src/example.js': "const upload = { fail(code, error) { abort(new LiveError(code, error)); } }; upload.fail('FLOW_BACKPRESSURE', 'chunk exceeds credit');" });
+		expect(inventory.errors.map((row) => [row.key, row.prefixes])).toEqual([['FLOW_BACKPRESSURE', ['chunk exceeds credit']]]);
+		expect(inventory.dynamicSites).toEqual([]);
+	});
+
+	it('inlines module constants and hides internal names in placeholders', () => {
+		const inventory = scanFiles({ 'src/example.js': "const CAP = 5000; const PREFIX = '[svelte-realtime] '; function warn(size) { console.warn(PREFIX + 'gate at ' + CAP + ' of ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' for ' + size); }" });
+		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['[svelte-realtime] gate at 5000 of <value> for <size>']);
+	});
+
+	it('indexes the real connection-replaced message under DISCONNECTED', () => {
+		expect(scanRuntimeErrors().errors.find((row) => row.key === 'DISCONNECTED').prefixes).toContain('WebSocket connection replaced');
 	});
 });
 

@@ -1,7 +1,7 @@
 // Build-time inventory only; runtime messages are never changed by this scanner.
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 import { parse } from 'acorn';
 import { REALTIME_ERROR_IDS, REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
 
@@ -12,6 +12,8 @@ const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'Ar
 // How a structured event leaves the process: through the installed sink, or
 // printed straight to the console in the shared line format.
 const DELIVERY = Object.freeze({ emitOperationalEvent: 'operational event sink', formatDiagnostic: 'console only (bypasses the operational event sink)' });
+// Helper arguments are followed through at most this many call levels.
+const MAX_HELPER_DEPTH = 4;
 export const INFORMATIONAL_SEVERITIES = Object.freeze(['debug', 'info', 'trace']);
 
 export function runtimeSources(directory = 'src') {
@@ -34,27 +36,43 @@ function definition(node) {
 	return key?.type === 'MemberExpression' && key.object?.name === 'REALTIME_ERROR_IDS'
 		? registry.get(REALTIME_ERROR_IDS[key.property?.name]) : undefined;
 }
+
+// Module-level `const NAME = <string or number literal>` of the file whose
+// nodes are being read. Their values are inlined into codes and messages.
+let constants = new Map();
+function inUnit(unit, read) {
+	const previous = constants;
+	constants = unit.constants;
+	try { return read(); } finally { constants = previous; }
+}
+const constantOf = node => node?.type === 'Identifier' ? constants.get(node.name) : undefined;
+const isString = node => (node?.type === 'Literal' && typeof node.value === 'string') || typeof constantOf(node) === 'string';
+const stringOf = node => node.type === 'Literal' ? node.value : constantOf(node);
+
 const isFallback = node => node?.type === 'LogicalExpression' && (node.operator === '||' || node.operator === '??');
 function literals(node) {
-	if (node?.type === 'Literal' && typeof node.value === 'string') return [node.value];
+	if (isString(node)) return [stringOf(node)];
 	if (node?.type === 'ConditionalExpression') return [...literals(node.consequent), ...literals(node.alternate)];
 	if (isFallback(node)) return [...literals(node.left), ...literals(node.right)];
 	if (node?.type === 'CallExpression' && node.callee?.name === 'realtimeErrorCode') return [definition(node)?.code].filter(Boolean);
 	return [];
 }
 function hasText(node) {
-	if (node?.type === 'Literal' && typeof node.value === 'string') return true;
-	if (node?.type === 'TemplateLiteral') return true;
+	if (isString(node) || node?.type === 'TemplateLiteral') return true;
 	return node?.type === 'BinaryExpression' && node.operator === '+' && (hasText(node.left) || hasText(node.right));
 }
+// Internal names (leading underscore or SCREAMING_CASE) say nothing to a reader
+// of the log line, so they become a neutral placeholder.
+const readable = name => /^_|^[A-Z0-9_]+$/.test(name) ? '<value>' : '<' + name + '>';
 function hole(node) {
-	if (node?.type === 'Identifier') return '<' + node.name + '>';
-	if (node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier') return '<' + node.property.name + '>';
+	if (node?.type === 'Identifier') return readable(node.name);
+	if (node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier') return readable(node.property.name);
 	return '<value>';
 }
 // A message as literal text with a named placeholder for every computed part.
 function parts(node) {
 	if (node?.type === 'Literal' && (typeof node.value === 'string' || typeof node.value === 'number')) return [{ text: String(node.value) }];
+	if (constantOf(node) !== undefined) return [{ text: String(constantOf(node)) }];
 	if (node?.type === 'TemplateLiteral') {
 		return node.quasis.flatMap((quasi, index) => [
 			{ text: quasi.value.cooked ?? '' },
@@ -92,7 +110,7 @@ function complete(node, message = false) {
 	}
 	if (node?.type === 'CallExpression' && node.callee?.name === (message ? 'realtimeErrorMessage' : 'realtimeErrorCode')) return Boolean(definition(node));
 	if (message) return patterns(node).length > 0;
-	return node?.type === 'Literal' && typeof node.value === 'string';
+	return isString(node);
 }
 function properties(node) {
 	return Object.fromEntries(node.properties.filter(property => property.type === 'Property' && !property.computed)
@@ -109,32 +127,28 @@ function binds(pattern, name) {
 	return false;
 }
 function binding(name, parents) {
-	for (const scope of [...parents].reverse()) {
+	for (let level = parents.length - 1; level >= 0; level--) {
+		const scope = parents[level];
 		if (FUNCTION_TYPES.has(scope.type)) {
 			const index = scope.params.findIndex(param => binds(param, name));
-			if (index >= 0) return (scope.params[index].type === 'Identifier' || (scope.params[index].type === 'AssignmentPattern' && scope.params[index].left.type === 'Identifier')) ? { scope, index, parameter: scope.params[index] } : {};
+			if (index >= 0) return (scope.params[index].type === 'Identifier' || (scope.params[index].type === 'AssignmentPattern' && scope.params[index].left.type === 'Identifier')) ? { scope, index, parameter: scope.params[index], owner: parents[level - 1] } : {};
 			if (scope.id?.name === name) return { declaration: scope };
 		}
 		if (scope.type === 'CatchClause' && binds(scope.param, name)) return {};
 		if (scope.type !== 'BlockStatement' && scope.type !== 'Program') continue;
-		for (const statement of scope.body) {
+		for (const item of scope.body) {
+			if (item.type === 'ImportDeclaration') {
+				const specifier = item.specifiers.find(entry => entry.local.name === name);
+				if (specifier) return specifier.type === 'ImportSpecifier' ? { imported: specifier.imported.name, from: item.source.value } : {};
+				continue;
+			}
+			const statement = item.type === 'ExportNamedDeclaration' && item.declaration ? item.declaration : item;
 			if (statement.type === 'FunctionDeclaration' && statement.id?.name === name) return { declaration: statement };
 			if (statement.type !== 'VariableDeclaration') continue;
-			const declaration = statement.declarations.find(item => binds(item.id, name));
+			const declaration = statement.declarations.find(entry => binds(entry.id, name));
 			if (declaration) return { declaration, kind: statement.kind };
 		}
 	}
-}
-function localValues(node, parents, ast) {
-	if (node?.type !== 'Identifier') return literals(node);
-	const found = binding(node.name, parents);
-	if (!found?.parameter || found.scope.type !== 'FunctionDeclaration' || !ast.body.includes(found.scope)) return [];
-	const values = literals(found.parameter.right);
-	walk(ast, (call, callParents) => {
-		if (call.type !== 'CallExpression' || call.callee.type !== 'Identifier') return;
-		if (binding(call.callee.name, callParents)?.declaration === found.scope) values.push(...literals(call.arguments[found.index]));
-	});
-	return values;
 }
 function assignedErrorMessage(node, parents) {
 	const found = binding(node.left.object?.name, parents);
@@ -191,14 +205,119 @@ function codeMessages(codeNode, codes, message, source) {
 const sorted = values => [...new Set(values)].sort(compare);
 const anchor = (kind, key) => kind === 'diagnostic' ? kind + '-' + encodeURIComponent(key)
 	: kind + '-' + key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const RESOLVABLE_INIT = new Set(['Literal', 'TemplateLiteral', 'ConditionalExpression', 'LogicalExpression', 'BinaryExpression', 'Identifier']);
+
+function prepare({ path, source }) {
+	const ast = parse(source, { sourceType: 'module', ecmaVersion: 'latest' });
+	const unit = { path, source, ast, constants: new Map(), calls: [], methodCalls: [] };
+	for (const item of ast.body) {
+		const statement = item.type === 'ExportNamedDeclaration' && item.declaration ? item.declaration : item;
+		if (statement.type !== 'VariableDeclaration' || statement.kind !== 'const') continue;
+		for (const declaration of statement.declarations) {
+			const init = declaration.init;
+			if (declaration.id.type === 'Identifier' && init?.type === 'Literal' && ['string', 'number'].includes(typeof init.value)) unit.constants.set(declaration.id.name, init.value);
+		}
+	}
+	walk(ast, (node, parents) => {
+		if (node.type === 'CallExpression' && node.callee.type === 'Identifier') unit.calls.push({ call: node, parents });
+		if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && !node.callee.computed && node.callee.property.type === 'Identifier') unit.methodCalls.push({ call: node, parents });
+	});
+	return unit;
+}
 
 /**
- * Literal coverage of emitted codes, events and console lines. Sites whose
- * code, event or message is computed are recorded by file, enclosing function
- * and emitter kind, never by line, so unrelated edits leave them unchanged.
+ * Literal coverage of emitted codes, events and console lines. A code or
+ * message is followed through local `const` bindings and through parameters
+ * of top-level helper functions to every call site, in the same file and in
+ * every file that imports the helper. Sites still computed after that are
+ * recorded by file, enclosing function and emitter kind, never by line, so
+ * unrelated edits leave them unchanged.
  */
 export function scanRuntimeErrors(files = runtimeSources()) {
-	const errors = new Map(), diagnostics = new Map(), dynamic = new Map();
+	const units = files.map(prepare);
+	const sitesOf = new Map();
+	// A method helper (`{ fail(code, error) {...} }`) is matched by name to
+	// every `<object>.fail(...)` call in its own file: a false positive is
+	// possible, a missed call site is not.
+	function methodSites(unit, fn, name) {
+		if (sitesOf.has(fn)) return sitesOf.get(fn);
+		const sites = unit.methodCalls.filter(({ call }) => call.callee.property.name === name).map(entry => ({ unit, ...entry }));
+		sitesOf.set(fn, sites);
+		return sites;
+	}
+	function callSites(unit, fn) {
+		if (sitesOf.has(fn)) return sitesOf.get(fn);
+		const exported = unit.ast.body.some(item => item.type === 'ExportNamedDeclaration' && item.declaration === fn);
+		const sites = [];
+		for (const caller of units) {
+			for (const { call, parents } of caller.calls) {
+				if (call.callee.name !== fn.id.name && caller === unit) continue;
+				const found = binding(call.callee.name, parents);
+				if (caller === unit && found?.declaration === fn) sites.push({ unit: caller, call, parents });
+				else if (exported && found?.imported === fn.id.name && found.from.startsWith('.') &&
+					posix.join(posix.dirname(caller.path), found.from) === unit.path) sites.push({ unit: caller, call, parents });
+			}
+		}
+		sitesOf.set(fn, sites);
+		return sites;
+	}
+	const isTopLevel = (unit, fn) => fn.type === 'FunctionDeclaration' &&
+		unit.ast.body.some(item => item === fn || (item.type === 'ExportNamedDeclaration' && item.declaration === fn));
+	// A reference is a node with the file and scope it is read in.
+	function deref(ref) {
+		if (ref.node?.type !== 'Identifier' || constants.has(ref.node.name)) return ref;
+		const found = binding(ref.node.name, ref.parents);
+		const init = found?.kind === 'const' ? found.declaration.init : undefined;
+		return init && RESOLVABLE_INIT.has(init.type) && init !== ref.node ? { ...ref, node: init } : ref;
+	}
+	const parameterOf = ref => {
+		if (ref?.node?.type !== 'Identifier') return undefined;
+		const found = binding(ref.node.name, ref.parents);
+		if (!found?.parameter) return undefined;
+		if (isTopLevel(ref.unit, found.scope)) return found;
+		const method = ['Property', 'MethodDefinition'].includes(found.owner?.type) && !found.owner.computed ? found.owner.key.name : undefined;
+		return method ? { ...found, method } : undefined;
+	};
+	/**
+	 * Resolve one emitter's code and message to rows of [codes, messages, path].
+	 * @returns {{ rows: Array<[string[], string[], string]>, complete: boolean }}
+	 */
+	function resolveEmitter(codeRef, messageRef, depth = 0) {
+		codeRef = inUnit(codeRef.unit, () => deref(codeRef));
+		if (messageRef) messageRef = inUnit(messageRef.unit, () => deref(messageRef));
+		const codeParam = parameterOf(codeRef), messageParam = parameterOf(messageRef);
+		const helper = codeParam?.scope ?? messageParam?.scope;
+		if (helper && (!codeParam || !messageParam || codeParam.scope === messageParam.scope)) {
+			if (depth >= MAX_HELPER_DEPTH) return { rows: [], complete: false };
+			const helperUnit = (codeParam ? codeRef : messageRef).unit;
+			const param = codeParam ?? messageParam;
+			const sites = param.method ? methodSites(helperUnit, helper, param.method) : callSites(helperUnit, helper);
+			const out = { rows: [], complete: sites.length > 0 };
+			for (const site of sites) {
+				const argument = (param, ref) => {
+					if (!param) return ref;
+					if (site.call.arguments.slice(0, param.index + 1).some(arg => arg.type === 'SpreadElement')) return { unit: site.unit, parents: site.parents, node: undefined };
+					const arg = site.call.arguments[param.index];
+					return arg ? { unit: site.unit, parents: site.parents, node: arg }
+						: { unit: helperUnit, parents: ref.parents, node: param.parameter.type === 'AssignmentPattern' ? param.parameter.right : undefined };
+				};
+				const result = resolveEmitter(argument(codeParam, codeRef), messageRef && argument(messageParam, messageRef), depth + 1);
+				out.rows.push(...result.rows);
+				out.complete &&= result.complete;
+			}
+			return out;
+		}
+		const codes = inUnit(codeRef.unit, () => literals(codeRef.node));
+		const codeComplete = inUnit(codeRef.unit, () => complete(codeRef.node));
+		if (!messageRef) return { rows: [[codes, codes, codeRef.unit.path]], complete: codeComplete };
+		const messageComplete = inUnit(messageRef.unit, () => complete(messageRef.node, true));
+		const pairs = codeRef.unit === messageRef.unit
+			? inUnit(codeRef.unit, () => codeMessages(codeRef.node, codes, messageRef.node, codeRef.unit.source))
+			: [[codes, inUnit(messageRef.unit, () => patterns(messageRef.node))]];
+		return { rows: pairs.map(([owned, messages]) => [owned, messages, codeRef.unit.path]), complete: codeComplete && messageComplete };
+	}
+
+	const errors = new Map(), diagnostics = new Map(), dynamic = new Map(), consoleSites = [];
 	function record(map, key, messages, path, extra = {}) {
 		let row = map.get(key);
 		if (!row) { row = { key, prefixes: new Set(), sources: new Set(), ...extra }; map.set(key, row); }
@@ -206,8 +325,9 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 		row.sources.add(path);
 		return row;
 	}
-	for (const { path, source } of files) {
-		const ast = parse(source, { sourceType: 'module', ecmaVersion: 'latest' });
+	for (const unit of units) {
+		const { path, source, ast } = unit;
+		constants = unit.constants;
 		walk(ast, (node, parents) => {
 			const site = kind => {
 				const scope = enclosingName(parents);
@@ -216,34 +336,42 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 				row.count++;
 				dynamic.set(key, row);
 			};
+			const local = value => deref({ unit, parents, node: value }).node;
 			if (node.type === 'NewExpression' && ['LiveError', 'RpcError'].includes(node.callee?.name)) {
-				const codes = localValues(node.arguments[0], parents, ast);
-				if (!complete(node.arguments[0]) || (node.arguments.length > 1 && !complete(node.arguments[1], true))) site('new ' + node.callee.name);
-				if (node.arguments.length < 2) for (const code of codes) record(errors, code, [code], path);
-				else for (const [owned, message] of codeMessages(node.arguments[0], codes, node.arguments[1], source)) {
-					for (const code of owned) record(errors, code, message, path);
+				const ref = value => ({ unit, parents, node: value });
+				const result = resolveEmitter(ref(node.arguments[0]), node.arguments.length > 1 ? ref(node.arguments[1]) : undefined);
+				constants = unit.constants;
+				if (!result.complete) site('new ' + node.callee.name);
+				for (const [owned, messages, owner] of result.rows) {
+					for (const code of owned) {
+						record(errors, code, messages, owner);
+						record(errors, code, [], path);
+					}
 				}
 			}
 			if (node.type === 'AssignmentExpression' && node.operator === '=' && node.left.type === 'MemberExpression' && !node.left.computed && node.left.property.name === 'code') {
 				const message = assignedErrorMessage(node, parents);
 				if (message) {
-					const codes = literals(node.right);
+					const value = local(node.right);
+					const codes = literals(value);
 					for (const code of codes) record(errors, code, patterns(message), path);
-					if (!complete(node.right) || !complete(message, true)) site('Error.code');
+					if (!complete(value) || !complete(message, true)) site('Error.code');
 				}
 			}
 			if (node.type === 'ObjectExpression') {
 				const fields = properties(node);
 				if (fields.ok?.value === false && fields.code && fields.error) {
-					const codes = literals(fields.code), message = patterns(fields.error);
-					if (!complete(fields.code) || !complete(fields.error, true)) site('error reply');
-					for (const code of codes) record(errors, code, message, path);
+					const code = local(fields.code), error = local(fields.error);
+					const codes = literals(code), message = patterns(error);
+					if (!complete(code) || !complete(error, true)) site('error reply');
+					for (const entry of codes) record(errors, entry, message, path);
 				}
 				if (fields.event && fields.component && (fields.severity || fields.level)) {
-					const message = patterns(fields.message);
-					if (!complete(fields.event) || !complete(fields.message, true)) site('structured event');
-					for (const [event, severities] of eventSeverities(fields.event, fields.severity || fields.level, source)) {
-						const row = record(diagnostics, event, message, path, { kind: 'structured event', severities: new Set(), delivery: new Set() });
+					const event = local(fields.event), text = fields.message && local(fields.message);
+					const message = patterns(text);
+					if (!complete(event) || !complete(text, true)) site('structured event');
+					for (const [name, severities] of eventSeverities(event, local(fields.severity || fields.level), source)) {
+						const row = record(diagnostics, name, message, path, { kind: 'structured event', severities: new Set(), delivery: new Set() });
 						const callee = parents.at(-1)?.type === 'CallExpression' ? parents.at(-1).callee?.name : undefined;
 						if (callee && Object.hasOwn(DELIVERY, callee)) row.delivery.add(DELIVERY[callee]);
 						// An unresolved severity counts as a failure, never as informational.
@@ -253,27 +381,39 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 			}
 			if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression' &&
 				node.callee.object?.name === 'console' && ['warn', 'error'].includes(node.callee.property?.name)) {
-				const message = patterns(node.arguments[0]);
+				const method = 'console.' + node.callee.property.name;
+				const first = local(node.arguments[0]);
+				const message = patterns(first);
 				// Structured diagnostics are indexed by the object carrying their event.
 				if (!message.length) {
-					if (node.arguments[0]?.arguments?.[0]?.type !== 'ObjectExpression') site('console.' + node.callee.property.name);
+					if (first?.arguments?.[0]?.type !== 'ObjectExpression') site(method);
 					return;
 				}
-				if (!complete(node.arguments[0], true)) site('console.' + node.callee.property.name);
+				if (!complete(first, true)) site(method);
+				const registered = first?.type === 'CallExpression' && first.callee?.name === 'realtimeErrorMessage';
 				for (const text of message) {
 					const id = 'console-' + createHash('sha256').update(text).digest('hex').slice(0, 16);
 					record(diagnostics, id, [text], path, { kind: 'console line' });
+					consoleSites.push({ path, method, text, id, registered });
 				}
 			}
 		});
 	}
+	constants = new Map();
 	const finish = (map, kind) => [...map.values()].sort((a, b) => compare(a.key, b.key)).map(row => ({
 		...row, anchor: anchor(kind, row.key), prefixes: sorted(row.prefixes), sources: sorted(row.sources),
 		...(row.severities ? { severities: sorted(row.severities), delivery: sorted(row.delivery) } : {})
 	}));
 	const dynamicSites = [...dynamic.values()].sort((a, b) => compare(a.path, b.path) || compare(a.scope, b.scope) || compare(a.kind, b.kind));
-	return { errors: finish(errors, 'live-error'), diagnostics: finish(diagnostics, 'diagnostic'), dynamicSites };
+	const uniqueConsole = [...new Map(consoleSites.map(entry => [entry.path + '::' + entry.text, entry])).values()]
+		.sort((a, b) => compare(a.path, b.path) || compare(a.text, b.text));
+	return { errors: finish(errors, 'live-error'), diagnostics: finish(diagnostics, 'diagnostic'), dynamicSites, consoleSites: uniqueConsole };
 }
+
+/** Stable decision key of a dynamic site: file, enclosing function and emitter. */
+export const dynamicSiteKey = site => site.path + '::' + site.scope + '::' + site.kind;
+/** Stable decision key of a console line: file and its whole printed pattern. */
+export const consoleSiteKey = site => site.path + '::' + site.text;
 
 /** True when every severity an event is emitted at reports normal operation. */
 export function isInformational(row) {

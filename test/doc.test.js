@@ -27,6 +27,7 @@ import { mockPlatform } from './helpers/mock-platform.js';
 import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 import svelteRealtime from '../src/vite.js';
 import { _purgeCrdtDocs } from '../src/server/crdt.js';
+import { REALTIME_ERROR_IDS, realtimeErrorDefinition } from '../src/error-registry.js';
 import * as Y from 'yjs';
 import { createCrdtAuthority, normalizeCrdtAccess } from 'svelte-adapter-uws/plugins/crdt/replica';
 import { createCrdtWireCodec, CRDT_TOPIC_PREFIX } from 'svelte-adapter-uws/plugins/crdt';
@@ -762,6 +763,32 @@ describe('live.doc cluster persistence and sync replies (real replica)', () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(stores.length).toBeGreaterThanOrEqual(1);
 		expect(decode(stores[0])).toEqual({ a: 1, b: 2 });
+	});
+
+	it('prints a failed store without onError under its stable error ID', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const { name, topic } = declare({
+				snapshotEvery: 1,
+				persist: { load: async () => null, store: () => { throw new Error('disk full'); } }
+			});
+			const { crdt, grant } = heldLease();
+			const platform = wirePlatform();
+			platform.crdt = crdt;
+			const ws = mockWs({ id: 'u1' });
+			await call(ws, platform, name + '/board/__doc/sync', []);
+			await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('a', 1))]);
+			grant();
+			await vi.advanceTimersByTimeAsync(1);
+			const definition = realtimeErrorDefinition(REALTIME_ERROR_IDS.DOC_PERSIST);
+			const line = errSpy.mock.calls.find(([message]) => String(message).startsWith(definition.messagePrefix));
+			expect(line, 'persist failure line').toBeDefined();
+			expect(line[0]).toContain('store for "' + topic + '"');
+			expect(line[0]).toContain('[' + definition.id + '] See: ' + definition.help);
+			expect(line[1]).toBeInstanceOf(Error);
+		} finally {
+			errSpy.mockRestore();
+		}
 	});
 
 	it('does not persist a document erased while its write waited for the lease', async () => {

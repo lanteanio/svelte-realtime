@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _subscribeTracked, trackedUnsubscribe } from './membership.js';
 import { _tenantTopic } from './tenant.js';
 import { _getAuthenticatedId } from './identity.js';
@@ -421,7 +422,7 @@ export function _crdtRegister(kind, config) {
 					if (typeof handler === 'function') {
 						try { handler(err, info); } catch { /* the host's handler must not break the schedule */ }
 					} else {
-						console.error('[svelte-realtime] ' + label + ' persist ' + info.op + ' failed for "' + info.topic + '":', err);
+						console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.DOC_PERSIST, ' ' + label + ' ' + info.op + ' for "' + info.topic + '"'), err);
 					}
 				}
 			});

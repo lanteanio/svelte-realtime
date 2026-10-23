@@ -22,6 +22,7 @@ function fixture() {
 	symlinkSync(join(repository, 'node_modules'), join(actual, 'node_modules'), 'junction');
 	writeFileSync(join(actual, 'docs/errors.md'), 'deliberately stale\n');
 	writeFileSync(join(actual, 'scripts/error-guidance.js'), 'export const CODE_GUIDANCE = {}; export const EVENT_GUIDANCE = {};\n');
+	writeFileSync(join(actual, 'scripts/error-decisions.js'), 'export const DYNAMIC_SITE_REASONS = {}; export const CONSOLE_EXCLUDED_MODULES = {}; export const CONSOLE_REASONS = {};\n');
 	cpSync(join(repository, 'scripts/generate-error-reference.js'), join(actual, 'scripts/generate-error-reference.js'));
 	cpSync(join(repository, 'scripts/runtime-error-inventory.js'), join(actual, 'scripts/runtime-error-inventory.js'));
 	const helper = join(repository, 'scripts/script-entry.js');

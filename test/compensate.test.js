@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { live, handleRpc, __register, LiveError } from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { REALTIME_ERROR_IDS, realtimeErrorDefinition, realtimeErrorMessage } from '../src/error-registry.js';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
@@ -403,6 +404,9 @@ describe('history ring + ctx.compensate', () => {
 			expect(second.ok).toBe(true);
 			expect(captureCalls).toBe(2);
 			expect(errSpy).toHaveBeenCalledTimes(1);
+			const definition = realtimeErrorDefinition(REALTIME_ERROR_IDS.ROOM_HISTORY_CAPTURE);
+			expect(errSpy.mock.calls[0][0]).toBe(realtimeErrorMessage(definition.id));
+			expect(errSpy.mock.calls[0][1].message).toBe('capture boom');
 		} finally {
 			errSpy.mockRestore();
 		}
