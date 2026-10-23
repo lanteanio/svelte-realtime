@@ -1770,8 +1770,10 @@ export namespace live {
 	 * Register a global middleware that runs before per-module guards for every RPC/stream call.
 	 * Middleware receives `(ctx, next)` - call `next()` to continue the chain and
 	 * return its result. Throw a LiveError, or return `{ ok: false, code, error }`,
-	 * to reject the call. Returning anything else without calling `next()` fails
-	 * the call with `INTERNAL_ERROR`.
+	 * to reject the call at once (a handler already started runs to its end).
+	 * Applies to RPC, stream and upload calls. Returning anything else without
+	 * calling `next()` fails the call with `INTERNAL_ERROR`; calling `next()`
+	 * after the call was answered throws.
 	 *
 	 * The chain encloses the guard, `beforeExecute` and the handler, and also
 	 * the background loader re-runs made for a topic's subscribers

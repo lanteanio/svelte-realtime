@@ -157,7 +157,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-invalid-request"></a>
 ### <code>INVALID_REQUEST</code>
 
-- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Invalid upload credit from server</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Streams must be subscribed, not called</code>; <code>Topic function must return a string, got </code>; <code>Upload request could not be encoded</code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)</code>; <code>persistKey must be a non-empty string</code>; <code>replayDeadLetter: </code>; <code>streamId already active</code>
+- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Call already answered</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Invalid upload credit from server</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Streams must be subscribed, not called</code>; <code>Topic function must return a string, got </code>; <code>Upload request could not be encoded</code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)</code>; <code>persistKey must be a non-empty string</code>; <code>replayDeadLetter: </code>; <code>streamId already active</code>
 - Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/client/upload.js](../src/client/upload.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js), [src/server/webhooks.js](../src/server/webhooks.js)
 
 <a id="live-error-invalid-topic"></a>
@@ -1169,20 +1169,21 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/upload.js:847</code>
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
-- <code>src/server.js:2244</code>
-- <code>src/server.js:3248</code>
+- <code>src/server.js:2253</code>
+- <code>src/server.js:3257</code>
 - <code>src/server/ctx.js:113</code>
-- <code>src/server/dispatch.js:1374</code>
-- <code>src/server/dispatch.js:1489</code>
-- <code>src/server/dispatch.js:1736</code>
-- <code>src/server/dispatch.js:1753</code>
-- <code>src/server/dispatch.js:233</code>
-- <code>src/server/dispatch.js:419</code>
-- <code>src/server/dispatch.js:453</code>
-- <code>src/server/dispatch.js:760</code>
-- <code>src/server/dispatch.js:860</code>
-- <code>src/server/dispatch.js:872</code>
-- <code>src/server/dispatch.js:923</code>
+- <code>src/server/dispatch.js:1447</code>
+- <code>src/server/dispatch.js:1564</code>
+- <code>src/server/dispatch.js:1804</code>
+- <code>src/server/dispatch.js:1831</code>
+- <code>src/server/dispatch.js:1848</code>
+- <code>src/server/dispatch.js:281</code>
+- <code>src/server/dispatch.js:467</code>
+- <code>src/server/dispatch.js:501</code>
+- <code>src/server/dispatch.js:808</code>
+- <code>src/server/dispatch.js:908</code>
+- <code>src/server/dispatch.js:920</code>
+- <code>src/server/dispatch.js:975</code>
 - <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:714</code>
 - <code>src/server/upload.js:383</code>

@@ -98,58 +98,106 @@ export function installDispatch(seams) {
 }
 
 /**
+ * @typedef {object} RpcChainHooks
+ * @property {boolean} [isStream] - the frame is a stream subscribe
+ * @property {() => void} [cancel] - the call was refused while its chain still runs
+ * @property {() => void} [settled] - that still-running chain has ended
+ */
+
+/** @param {any} v */
+function _isEnvelope(v) {
+	return v !== null && typeof v === 'object' && typeof v.ok === 'boolean';
+}
+
+/** @param {any} v */
+function _isFailureEnvelope(v) {
+	return v !== null && typeof v === 'object' && v.ok === false && typeof v.code === 'string';
+}
+
+/**
  * Run an RPC's guard/handler chain inside the global middleware and return the
- * answer. Without middleware the chain's own outcome is the answer. With it, a
- * middleware's return value answers when it is a response envelope (`ok` true
- * or false); otherwise the chain's outcome stands, including a failure the
- * middleware caught and swallowed. The chain is always waited for, so a
- * middleware that does not await `next()` cannot answer under a running
- * handler, and a middleware that never calls `next()` without returning a
- * failure envelope is a server bug that fails the call.
+ * answer. Without middleware the chain's own outcome is the answer.
+ *
+ * With middleware: a returned failure envelope (`{ ok: false, code, error }`)
+ * or a thrown error answers at once, so a middleware can time a call out
+ * while the handler keeps running; the in-flight count and `hooks.settled`
+ * wait for that handler. Any other return waits for the chain, and answers
+ * with the middleware's envelope when it returned one, else with the chain's
+ * own outcome (a failure the middleware swallowed included). A middleware
+ * that returns without calling `next()` and without an envelope fails the
+ * call; so does an ok envelope for a stream subscribe, which carries no topic.
+ * Once the answer is decided, a late `next()` throws instead of running the
+ * chain.
  *
  * @param {any} ctx
  * @param {() => Promise<any>} runChain
+ * @param {RpcChainHooks} [hooks]
  * @returns {Promise<any>}
  */
-function _runRpcChain(ctx, runChain) {
-	return _hasMiddleware() ? _runRpcChainThroughMiddleware(ctx, runChain) : runChain();
+function _runRpcChain(ctx, runChain, hooks) {
+	return _hasMiddleware() ? _runRpcChainThroughMiddleware(ctx, runChain, hooks) : runChain();
 }
 
 /**
  * @param {any} ctx
  * @param {() => Promise<any>} runChain
+ * @param {RpcChainHooks} [hooks]
  * @returns {Promise<any>}
  */
-async function _runRpcChainThroughMiddleware(ctx, runChain) {
+async function _runRpcChainThroughMiddleware(ctx, runChain, hooks) {
 	/** @type {Promise<any> | null} */
 	let chainRun = null;
+	let chainDone = false;
+	let decided = false;
+	const detach = () => {
+		decided = true;
+		const run = chainRun;
+		if (!run || chainDone) return;
+		hooks?.cancel?.();
+		_enterInFlight();
+		run.then(() => {}, () => {}).then(() => {
+			_exitInFlight();
+			hooks?.settled?.();
+		});
+	};
 	let answer;
 	try {
 		answer = await _runWithMiddleware(ctx, () => {
+			if (decided) throw new Error('middleware called next() after the call was answered');
 			const run = runChain();
 			chainRun = run;
 			// The middleware may drop the promise; the outcome is read below.
-			run.catch(() => {});
+			run.then(() => { chainDone = true; }, () => { chainDone = true; });
 			return run;
 		});
 	} catch (err) {
-		if (chainRun) await /** @type {Promise<any>} */ (chainRun).catch(() => {});
+		detach();
 		throw err;
 	}
 	if (chainRun === null) {
-		if (answer && typeof answer === 'object' && answer.ok === false && typeof answer.code === 'string') return answer;
-		if (answer && typeof answer === 'object' && answer.ok === true) return answer;
+		decided = true;
+		if (_isFailureEnvelope(answer)) return answer;
+		if (answer && typeof answer === 'object' && answer.ok === true) {
+			if (!hooks?.isStream) return answer;
+			throw new Error('middleware answered a stream subscribe without calling next(); a subscribe needs next() to run');
+		}
 		throw new Error('middleware returned without calling next() and without a response envelope; return next() or { ok: false, code, error }');
+	}
+	if (_isFailureEnvelope(answer) && !chainDone) {
+		detach();
+		return answer;
 	}
 	let value;
 	try {
 		value = await /** @type {Promise<any>} */ (chainRun);
 	} catch (err) {
-		if (answer && typeof answer === 'object' && typeof answer.ok === 'boolean') return answer;
+		decided = true;
+		if (_isEnvelope(answer)) return answer;
 		throw err;
 	}
+	decided = true;
 	if (answer === value) return value;
-	if (answer && typeof answer === 'object' && typeof answer.ok === 'boolean') return answer;
+	if (_isEnvelope(answer)) return answer;
 	return value;
 }
 
@@ -741,7 +789,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  * @param {any} ctx
  * @param {any[]} args
  * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any, attach?: boolean }} msg
- * @param {{ topic: any, claimTopic?: any, validate?: () => void, isActive?: () => boolean }} subscribedRef
+ * @param {{ topic: any, claimTopic?: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} subscribedRef
  * @returns {Promise<any>}
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
@@ -889,6 +937,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// working: if the method isn't there, we fall back to raw
 	// `ws.subscribe` and only the in-realtime gates (`__streamFilter`,
 	// `live.room({ guard })`) remain the stream-RPC access checks.
+	if (subscribedRef.cancelled) {
+		_settleClaimBarriers(ws, topic, fn);
+		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Call already answered' };
+	}
 	// Attribute the topic before the adapter can deliver on it: a frame
 	// published as soon as the subscribe takes effect reaches the delivery
 	// policy with this stream's rpc and args. A refused admission drops it.
@@ -921,6 +973,13 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	if (_subscribeDenial) {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	}
+	if (subscribedRef.cancelled) {
+		// Answered by a middleware while the adapter admitted the subscribe:
+		// record it so the chain's end releases it, and run no loader.
+		subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+		subscribedRef.topic = topic;
+		throw new LiveError('INVALID_REQUEST', 'Call already answered');
 	}
 	// Name the wire topic to the client once the adapter admitted the
 	// subscribe, and before the loader reads its snapshot. The client only
@@ -1290,8 +1349,18 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
-	/** @type {{ topic: any, claimTopic: any, validate?: () => void, isActive?: () => boolean }} */
+	/** @type {{ topic: any, claimTopic: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} */
 	const _subscribedRef = { topic: null, claimTopic: null };
+	// Only a middleware can answer while the chain still runs; the chain's
+	// subscribe bookkeeping is then released when it ends, not here.
+	const _hooks = _hasMiddleware() ? {
+		isStream: !!isStream,
+		cancel() { _subscribedRef.cancelled = true; },
+		settled() {
+			if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
+			if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
+		}
+	} : undefined;
 
 	try {
 		let _result = await _runRpcChain(ctx, async () => {
@@ -1336,10 +1405,10 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 			const result = await fn(ctx, ...args);
 			return { id, ok: true, data: result };
 		}
-		}); // end middleware chain
+		}, _hooks); // end middleware chain
 		// A middleware's own envelope answers for this call id.
 		if (_result.id !== id) _result = { ..._result, id };
-		if (_subscribedRef.topic) {
+		if (_subscribedRef.topic && !_subscribedRef.cancelled) {
 			if (_result.ok === false) {
 				// A middleware refused a subscribe the chain completed.
 				_rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
@@ -1360,14 +1429,18 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
 		return _result;
 	} catch (err) {
-		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
-		// A throw that escaped after the claim barriers opened but before the
-		// happy-path settle (the guard `__streamFilter` throws, an internal
-		// bookkeeping failure) would leave a paired :owner/:presence loader in this
-		// batch - and any later lone sub-stream subscribe on this socket - awaiting
-		// a claim that never resolves. Settle to null here (cleared on the happy
-		// path, so this only fires on that pre-settle throw window).
-		if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
+		// After an early middleware answer, the still-running chain releases its
+		// own subscribe when it ends.
+		if (!_subscribedRef.cancelled) {
+			if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
+			// A throw that escaped after the claim barriers opened but before the
+			// happy-path settle (the guard `__streamFilter` throws, an internal
+			// bookkeeping failure) would leave a paired :owner/:presence loader in this
+			// batch - and any later lone sub-stream subscribe on this socket - awaiting
+			// a claim that never resolves. Settle to null here (cleared on the happy
+			// path, so this only fires on that pre-settle throw window).
+			if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
+		}
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
 			/** @type {any} */
@@ -1460,7 +1533,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, requestId);
 
 	try {
-		const answer = await _runRpcChain(ctx, async () => {
+		let answer = await _runRpcChain(ctx, async () => {
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
@@ -1475,12 +1548,14 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 			}
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
-			/** @type {any} */
-			const _resp = { ok: true, data: result };
-			const _dep = _deprecationSignal(ws, path, fn);
-			if (_dep) _resp.deprecation = _dep;
-			return _resp;
+			return { ok: true, data: result };
 		});
+		// Consumed only by an answer that succeeds, so a middleware refusal
+		// leaves the one-shot deprecation signal for a later call.
+		if (answer.ok !== false) {
+			const _dep = _deprecationSignal(ws, path, fn);
+			if (_dep) answer = { ...answer, deprecation: _dep };
+		}
 		_respond(ws, platform, id, answer, requestId, path);
 		_recordRpcMetrics(path, answer.ok === false ? (answer.code || 'UNKNOWN') : '', _metricsStart, ws);
 	} catch (err) {
@@ -1712,7 +1787,27 @@ async function _runDirectCall(path, args, platform, options) {
 	const ctx = _buildCtx(userValue, null, platform, _h, null);
 
 	// Run global middleware chain, then guard, then execution
-	return _runWithMiddleware(ctx, async () => {
+	// A middleware's response envelope is a wire answer; a direct call turns
+	// it back into what the caller of `.load()` expects: data, or a LiveError
+	// so `fallback` and `onError` apply.
+	let _chainValue;
+	let _chainReturned = false;
+	const _answer = await _runRpcChain(ctx, async () => {
+		const value = await _directCallChain();
+		_chainValue = value;
+		_chainReturned = true;
+		return value;
+	});
+	if (_chainReturned && _answer === _chainValue) return _answer;
+	if (_isEnvelope(_answer)) {
+		if (_answer.ok === true) return _answer.data;
+		const err = new LiveError(typeof _answer.code === 'string' ? _answer.code : 'INTERNAL_ERROR', typeof _answer.error === 'string' ? _answer.error : undefined, _answer);
+		if (typeof _answer.retryAfter === 'number') /** @type {any} */ (err).retryAfter = _answer.retryAfter;
+		throw err;
+	}
+	return _answer;
+
+	async function _directCallChain() {
 	// Run module guard
 	const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 	const guardFn = await _resolveGuard(modulePath);
@@ -1803,7 +1898,7 @@ async function _runDirectCall(path, args, platform, options) {
 	}
 
 	return fn(ctx, ...args);
-	});
+	}
 }
 
 /**

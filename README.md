@@ -1871,7 +1871,7 @@ live.middleware(async (ctx, next) => {
 });
 ```
 
-Middleware runs in registration order. Each must call `next()` to continue the chain and return its result, or return `{ ok: false, code, error }` to refuse the call. A failure from `next()` that the middleware swallows still answers the caller with that failure, the call is answered only after the handler ends even if `next()` is not awaited, and a middleware that returns anything else without calling `next()` fails the call with `INTERNAL_ERROR`. When no middleware is registered, there is zero overhead.
+Middleware runs in registration order and applies to RPC, stream and upload calls. Each must call `next()` and return its result, or return `{ ok: false, code, error }` (or throw a `LiveError`) to refuse the call. A refusal answers at once, so a middleware can time a call out with `Promise.race`; a handler already started still runs to its end. A failure from `next()` that the middleware swallows answers with that failure, a middleware that returns without calling `next()` and without an envelope fails the call with `INTERNAL_ERROR`, and calling `next()` after the call was answered throws. When no middleware is registered, there is zero overhead.
 
 Middleware encloses the module guard, `beforeExecute` and the handler, so it is the place to establish request-scoped context. Run `next` inside an `AsyncLocalStorage` store and every await in that call sees it, even when two sockets' calls interleave:
 <!-- doc-code: ambient names="live" -->

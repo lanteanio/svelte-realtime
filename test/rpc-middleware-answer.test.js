@@ -7,7 +7,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { live, LiveError, guard, _resetMiddleware, setOperationalEventSink } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
-import { handleRpc } from '../src/server/dispatch.js';
+import { handleRpc, __directCall } from '../src/server/dispatch.js';
+import { inFlightCount } from '../src/server/lifecycle.js';
 
 const textEncoder = new TextEncoder();
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -63,6 +64,7 @@ function binaryFrame(path, id, bytes = new Uint8Array([1, 2, 3])) {
 const transports = [
 	{
 		name: 'text',
+		event: 'rpc.execution.non-live-error',
 		async send(env, c, opts, path) {
 			handleRpc(c.ws, textFrame('mw/' + path, 'r1'), env.platform, opts);
 			return answerFor(c, 'r1');
@@ -70,6 +72,7 @@ const transports = [
 	},
 	{
 		name: 'binary',
+		event: 'rpc.binary.execution-failed',
 		async send(env, c, opts, path) {
 			handleRpc(c.ws, binaryFrame('mw/' + path + 'Bin', 'r1'), env.platform, opts);
 			return answerFor(c, 'r1');
@@ -77,6 +80,7 @@ const transports = [
 	},
 	{
 		name: 'batch entry',
+		event: 'rpc.execution.non-live-error',
 		async send(env, c, opts, path) {
 			handleRpc(c.ws, batchFrame([{ rpc: 'mw/' + path, id: 'r1' }]), env.platform, opts);
 			const batch = await answerFor(c, '__batch');
@@ -134,8 +138,9 @@ describe('RPC answers whatever the global middleware returns', () => {
 				expect(reply).toMatchObject({ ok: false, code: 'INTERNAL_ERROR' });
 				expect(ran).toBe(0);
 				expect(errors.map((e) => String(e.err?.message))).toEqual([expect.stringContaining('next()')]);
-				const failed = events.filter((e) => /execution/.test(e.event) && JSON.stringify(e.attributes).includes('next()'));
+				const failed = events.filter((e) => e.event === t.event);
 				expect(failed.length).toBe(1);
+				expect(failed[0].attributes.error.message).toContain('next()');
 			});
 
 			it('a middleware that returns a non-envelope value without next() fails the call', async () => {
@@ -227,16 +232,46 @@ describe('RPC answers whatever the global middleware returns', () => {
 				expect(reply).toMatchObject({ ok: true, data: 'done' });
 			});
 
-			it('a middleware that returns a failure envelope while the handler runs answers after it ends', async () => {
+			it('a failure envelope returned while the handler runs answers at once; the handler still counts in-flight', async () => {
 				live.middleware(async (ctx, next) => {
 					next();
-					return { ok: false, code: 'FORBIDDEN', error: 'Refused late' };
+					return { ok: false, code: 'TIMEOUT', error: 'Took too long' };
 				});
 				const c = conn(env);
 				const reply = await t.send(env, c, opts(), 'slow');
-				expect(reply).toMatchObject({ ok: false, code: 'FORBIDDEN', error: 'Refused late' });
+				expect(reply).toMatchObject({ ok: false, code: 'TIMEOUT', error: 'Took too long' });
+				expect(ran).toBe(1);
+				expect(finished).toBe(0);
+				expect(inFlightCount()).toBe(1);
+				await tick(60);
 				expect(finished).toBe(1);
+				expect(inFlightCount()).toBe(0);
 				expect(c.sent.filter((f) => f.event === 'r1' || f.event === '__batch').length).toBe(1);
+			});
+
+			it('a timeout middleware racing next() answers when the timer wins', async () => {
+				live.middleware((ctx, next) => Promise.race([
+					next(),
+					tick(5).then(() => ({ ok: false, code: 'TIMEOUT', error: 'Took too long' }))
+				]));
+				const c = conn(env);
+				const reply = await t.send(env, c, opts(), 'slow');
+				expect(reply).toMatchObject({ ok: false, code: 'TIMEOUT' });
+				expect(finished).toBe(0);
+			});
+
+			it('a late next() after the answer throws and runs no handler', async () => {
+				const late = [];
+				live.middleware(async (ctx, next) => {
+					setTimeout(() => { try { Promise.resolve(next()).catch((e) => late.push(e)); } catch (e) { late.push(e); } }, 5);
+					return { ok: false, code: 'FORBIDDEN', error: 'No' };
+				});
+				const c = conn(env);
+				const reply = await t.send(env, c, opts(), 'ok');
+				expect(reply).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+				await tick(30);
+				expect(late.map((e) => e.message)).toEqual([expect.stringContaining('after the call was answered')]);
+				expect(ran).toBe(0);
 			});
 		});
 	}
@@ -257,6 +292,109 @@ describe('RPC answers whatever the global middleware returns', () => {
 		const reply = await answerFor(c, 's1');
 		expect(reply).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 		expect([...topics]).toEqual([]);
+	});
+
+	function trackTopics(c) {
+		const topics = new Set();
+		c.ws.subscribe = (t) => { topics.add(t); return true; };
+		c.ws.unsubscribe = (t) => { topics.delete(t); return true; };
+		c.ws.isSubscribed = (t) => topics.has(t);
+		c.ws.getTopics = () => [...topics];
+		return topics;
+	}
+
+	it('a refusal answered before the chain subscribes never subscribes or attaches', async () => {
+		let loaded = 0;
+		env.register('slowfeeds', {
+			_guard: guard(async () => { await tick(20); }),
+			feed: live.stream('slowfeeds:main', async () => { loaded++; return [{ id: 1 }]; })
+		});
+		live.middleware(async (ctx, next) => {
+			next();
+			return { ok: false, code: 'FORBIDDEN', error: 'Refused' };
+		});
+		const c = conn(env);
+		const topics = trackTopics(c);
+		handleRpc(c.ws, textEncoder.encode(JSON.stringify({ rpc: 'slowfeeds/feed', id: 's1', args: [], stream: true, attach: true })).buffer, env.platform);
+		const reply = await answerFor(c, 's1');
+		expect(reply).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+		await tick(60);
+		expect([...topics]).toEqual([]);
+		expect(loaded).toBe(0);
+		expect(c.sent.filter((f) => f.event === 's1').length).toBe(1);
+		expect(inFlightCount()).toBe(0);
+	});
+
+	it('a refusal answered while the loader runs releases the subscription when it ends', async () => {
+		env.register('slowload', { feed: live.stream('slowload:main', async () => { await tick(20); return [{ id: 1 }]; }) });
+		live.middleware(async (ctx, next) => {
+			next();
+			await tick(5);
+			return { ok: false, code: 'FORBIDDEN', error: 'Refused' };
+		});
+		const c = conn(env);
+		const topics = trackTopics(c);
+		handleRpc(c.ws, textEncoder.encode(JSON.stringify({ rpc: 'slowload/feed', id: 's1', args: [], stream: true })).buffer, env.platform);
+		const reply = await answerFor(c, 's1');
+		expect(reply).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+		await tick(60);
+		expect([...topics]).toEqual([]);
+	});
+
+	it('an ok envelope without next() answers a plain call but fails a subscribe', async () => {
+		env.register('cached', { feed: live.stream('cached:main', async () => [{ id: 1 }]) });
+		live.middleware(async () => ({ ok: true, data: 'cached' }));
+		const c = conn(env);
+		handleRpc(c.ws, textFrame('mw/ok', 'r1'), env.platform, opts());
+		expect(await answerFor(c, 'r1')).toMatchObject({ ok: true, data: 'cached' });
+		handleRpc(c.ws, textEncoder.encode(JSON.stringify({ rpc: 'cached/feed', id: 's1', args: [], stream: true })).buffer, env.platform, opts());
+		expect(await answerFor(c, 's1')).toMatchObject({ ok: false, code: 'INTERNAL_ERROR' });
+		expect(errors.map((e) => e.err.message)).toEqual([expect.stringContaining('stream subscribe')]);
+	});
+
+	it('a binary deprecation signal survives a middleware refusal', async () => {
+		env.register('old', { up: live.deprecate(live.binary(async () => 'ok'), { use: 'new/up' }) });
+		let calls = 0;
+		live.middleware(async (ctx, next) => {
+			const r = await next();
+			return calls++ === 0 ? { ok: false, code: 'RATE_LIMITED', error: 'Wait' } : r;
+		});
+		const c = conn(env);
+		handleRpc(c.ws, binaryFrame('old/up', 'b1'), env.platform);
+		const first = await answerFor(c, 'b1');
+		expect(first).toMatchObject({ ok: false, code: 'RATE_LIMITED' });
+		expect(first.deprecation).toBeUndefined();
+		handleRpc(c.ws, binaryFrame('old/up', 'b2'), env.platform);
+		const second = await answerFor(c, 'b2');
+		expect(second).toMatchObject({ ok: true, data: 'ok' });
+		expect(second.deprecation).toBeDefined();
+	});
+
+	describe('server-side direct calls', () => {
+		it('a failure envelope throws a LiveError, so fallback and onError apply', async () => {
+			live.middleware(async () => ({ ok: false, code: 'FORBIDDEN', error: 'No', details: { why: 'x' } }));
+			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'No', details: { why: 'x' } });
+			const seen = [];
+			const out = await __directCall('mw/ok', [], env.platform, { user: { id: 'u1' }, fallback: 'fb', onError: (e) => seen.push(e.code) });
+			expect(out).toBe('fb');
+			expect(seen).toEqual(['FORBIDDEN']);
+			expect(ran).toBe(0);
+		});
+
+		it('an ok envelope answers with its data', async () => {
+			live.middleware(async () => ({ ok: true, data: 5 }));
+			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).resolves.toBe(5);
+		});
+
+		it('a middleware that skips next() without an envelope throws', async () => {
+			live.middleware(async () => undefined);
+			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).rejects.toThrow(/next\(\)/);
+		});
+
+		it('a pass-through middleware returns the handler value unchanged', async () => {
+			live.middleware(async (ctx, next) => next());
+			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).resolves.toBe('value');
+		});
 	});
 
 	it('a batch answers every entry when the middleware skips next() for all of them', async () => {
