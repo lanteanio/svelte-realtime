@@ -888,7 +888,9 @@ function _armSmoothTick(rec) {
 	if (rec.timer !== null) return;
 	const now = monotonicNow();
 	// Continuing ticks advance the deadline, not the callback's finish time.
-	// A demand-armed wake starts fresh instead of replaying an idle interval.
+	// A demand-armed wake starts fresh instead of replaying an idle interval,
+	// and forgets a burst that lost ground before the room went idle.
+	if (!rec.ticking) rec.overrunBursts = 0;
 	rec.tickDue = rec.ticking ? rec.tickDue + rec.tickMs : now + rec.tickMs;
 	rec.timer = setTimer(() => _runSmoothTicks(rec), Math.max(0, Math.ceil(rec.tickDue - now)));
 }

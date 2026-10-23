@@ -236,3 +236,23 @@ it('keeps the debt after one slow tick and pays it off', async () => {
 		expect(next()[1].at).toBeGreaterThan(mono);
 	}
 });
+
+it('forgets a lost burst once the room goes idle and wakes again', async () => {
+	await rpc('sync');
+	workMs = 25;
+	fire();
+	// One burst lost ground; the rest of its debt is due now.
+	expect(next()[1].at).toBeLessThanOrEqual(mono);
+	workMs = 0;
+	keepAlive = false;
+	fire();
+	expect(timers.size).toBe(0);
+	mono += 1000;
+	keepAlive = true;
+	await rpc('command', [[{ id: 1, cmd: { dx: 1 } }]]);
+	workMs = 6;
+	hitchMs = 300;
+	fire();
+	// A single hitch on the first tick after the wake keeps its debt.
+	expect(next()[1].at).toBeLessThanOrEqual(mono);
+});
