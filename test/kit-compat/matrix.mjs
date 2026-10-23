@@ -11,7 +11,7 @@ const reportDir = path.join(root, 'test-results');
 await mkdir(reportDir, { recursive: true });
 const runs = [];
 const commonChecks = [
-	'server startup', 'cold WebSocket RPC before HTTP', 'browser initial live stores',
+	'server startup', 'cold WebSocket RPC before any page load', 'browser initial live stores',
 	'browser RPC roundtrip', 'server-published live stores', 'HTTP and WebSocket share state',
 	'devtools runtime', 'browser has no runtime errors', 'no unsupported HTML hook warning'
 ];

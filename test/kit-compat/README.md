@@ -44,12 +44,12 @@ whose installed copy differs from the checkout. All fixtures use
 svelte-adapter-uws 0.6.0-next.96 from the registry.
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
-Readiness requires a WebSocket RPC returning the spawned process ID and a
-fresh per-run fixture token; an unrelated listener cannot satisfy startup.
-No HTTP page request is made during this check.
+Readiness requires the fixture's `/readiness` route to return the spawned
+process ID and a fresh per-run fixture token; an unrelated listener cannot
+satisfy startup. The route loads no live module and no page.
 Production runs remove old build output and rebuild before starting the generated server.
 Development runs force dependency optimization, then
-open a WebSocket and execute an RPC before the first HTTP request. The browser
+open a WebSocket and execute the first RPC before any page loads. The browser
 loads generated `$live` imports, checks an RPC response on the wire, and observes
 a server-published value in two independent page stores. An HTTP endpoint reads
 the same server state. A module-scope private environment import verifies server

@@ -179,7 +179,7 @@ try {
 	} else {
 		child = start([vite, '--force', '--host', '127.0.0.1', '--port', String(port), '--strictPort']);
 	}
-	await check('server startup', () => waitForFixture({ child, origin, token: readinessToken, WebSocket }));
+	await check('server startup', () => waitForFixture({ child, origin, token: readinessToken }));
 	if (driveCase !== 'as-invoked') {
 		await check('Vite and SvelteKit spell the root differently', () => {
 			const reported = output.match(/\[kit-compat\] vite root (.+)/)?.[1]?.trim();
@@ -189,7 +189,7 @@ try {
 			assert.notEqual(reported, kitRoot, 'Vite kept the working directory spelling, so this run proves nothing');
 		});
 	}
-	await check('cold WebSocket RPC before HTTP', async () => {
+	await check('cold WebSocket RPC before any page load', async () => {
 		await connectSocket(origin);
 		const response = await rpc('echo', ['cold-start']);
 		assert.equal(response.ok, true, JSON.stringify(response));
