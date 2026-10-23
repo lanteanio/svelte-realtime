@@ -160,7 +160,7 @@ function warnVersionSkew(fromRealtime, fromRoot, id) {
 	const key = realtimeVersion + '\0' + appVersion;
 	if (warnedSkew.has(key)) return;
 	warnedSkew.add(key);
-	console.warn('[svelte-realtime] ' + realtimeErrorMessage(REALTIME_ERROR_IDS.ADAPTER_VERSION_SKEW,
+	console.warn(realtimeErrorMessage(REALTIME_ERROR_IDS.ADAPTER_VERSION_SKEW,
 		': svelte-realtime resolves ' + name + ' ' + realtimeVersion + ', the app ' + appVersion +
 		". The dev server serves the app's copy to both; a build resolves svelte-realtime's own copy."));
 }
