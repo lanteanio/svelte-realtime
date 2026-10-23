@@ -10,8 +10,9 @@
 		for (let i = 0; i < size; i++) u8[i] = (fillStart + i) & 0xff;
 		return u8.buffer;
 	}
-	function frameSizeFor(rpc, args, payloadBytes) {
-		const envelope = args.length ? { rpc, args } : { rpc };
+	// Chunk 0 carries the credit-mode header { path, args? } after 12 bytes.
+	function frameSizeFor(path, args, payloadBytes) {
+		const envelope = args.length ? { path, args } : { path };
 		return 12 + new TextEncoder().encode(JSON.stringify(envelope)).length + payloadBytes;
 	}
 
