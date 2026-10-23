@@ -32,6 +32,12 @@ node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --drive-case lower
 ```
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
+Startup is ready once a WebSocket opens and the fixture's `open` hook sends the
+spawned process ID and a fresh per-run token; another server on the port
+cannot satisfy it. Attempts are retried only until a socket opens, since Vite 8
+briefly listens on the port to check that it is free and then initializes
+before it binds for real. Startup makes no RPC and no page request, so the
+cold check below makes the first RPC on the fresh server.
 Production runs remove old build output and rebuild before starting the generated server.
 Development runs force dependency optimization, then
 open a WebSocket and execute an RPC before the first HTTP request. The browser
@@ -61,7 +67,8 @@ Each run writes named pass/fail checks and captured server output to
 `test-results/kit-compat-<major>-<mode>.json`. Use `--report <path>` for a distinct
 output file. Failures return a nonzero exit code; assertions are never skipped.
 The named checks let mutation runs distinguish an assertion failure from a
-startup or dependency failure.
+startup or dependency failure. A WebSocket handler that cannot load counts as a
+startup failure in development too, as it always has in production.
 
 
 The scaffolder smoke uses a loopback npm registry to serve candidate archives.
