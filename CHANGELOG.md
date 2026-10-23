@@ -107,6 +107,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
+- The [error reference](docs/errors.md) gives every runtime error code and every warn or error operational event its cause, consequence, automatic recovery and next action, and indexes whole messages with named placeholders, so a pasted line such as `RPC '<path>' timed out after <value>s` is searchable. Console lines stay a searchable listing, and it says so. Generation fails when a new code or failure event has no guidance, and dynamic emission sites are listed by function instead of line, so unrelated source edits no longer stale the reference.
+
 - New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
 
 - New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.

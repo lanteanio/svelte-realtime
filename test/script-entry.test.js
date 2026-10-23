@@ -21,6 +21,7 @@ function fixture() {
 	writeFileSync(join(actual, 'src/error-registry.js'), 'export const REALTIME_ERROR_REGISTRY = []; export const REALTIME_ERROR_IDS = {};\n');
 	symlinkSync(join(repository, 'node_modules'), join(actual, 'node_modules'), 'junction');
 	writeFileSync(join(actual, 'docs/errors.md'), 'deliberately stale\n');
+	writeFileSync(join(actual, 'scripts/error-guidance.js'), 'export const CODE_GUIDANCE = {}; export const EVENT_GUIDANCE = {};\n');
 	cpSync(join(repository, 'scripts/generate-error-reference.js'), join(actual, 'scripts/generate-error-reference.js'));
 	cpSync(join(repository, 'scripts/runtime-error-inventory.js'), join(actual, 'scripts/runtime-error-inventory.js'));
 	const helper = join(repository, 'scripts/script-entry.js');
