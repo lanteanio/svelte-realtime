@@ -903,6 +903,36 @@ describe('__stream() mutate', () => {
 		}
 	});
 
+	it('a subscriber that throws on that redraw is reported and the call error is the one rethrown', async () => {
+		const ctx = await setupCrudStream('mut/redraw-sub-throws', 'mut-redraw-sub-throws', [{ id: 1, n: 0 }]);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		let runs = 0;
+		let sawCount = false;
+		const unsub = ctx.store.subscribe((v) => {
+			if (!Array.isArray(v) || !v[0]) return;
+			if (v[0].n === 1) sawCount = true;
+			else if (sawCount && v[0].n === 0) { sawCount = false; throw new Error('redraw subscriber threw'); }
+		});
+		try {
+			const b = ctx.store.mutate(() => __rpc('mut/redraw-b')(), (draft) => {
+				if (++runs > 1) throw new Error('counted twice');
+				draft[0] = { ...draft[0], n: draft[0].n + 1 };
+			});
+			await expect(ctx.store.mutate(() => { throw new Error('sync throw'); }, { event: 'created', data: { id: 'a' } })).rejects.toThrow('sync throw');
+			const subscriberReports = report.mock.calls.filter(([err]) => err && err.message === 'redraw subscriber threw');
+			expect(subscriberReports).toHaveLength(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, n: 0 }]);
+			const frame = sendQueuedFn.mock.calls.map((c) => c[0]).filter((f) => f && f.rpc === 'mut/redraw-b').at(-1);
+			simulateRpcResponse(frame.id, { ok: true, data: 'b' });
+			await expect(b).resolves.toBe('b');
+		} finally {
+			vi.unstubAllGlobals();
+			unsub();
+			ctx.unsub();
+		}
+	});
+
 	it('a change that throws when applied to the server state is left out and reported', async () => {
 		const ctx = await setupCrudStream('mut/graduate-throws', 'mut-graduate-throws', [{ id: 1 }]);
 		const save = __rpc('mut/save-graduate-throws');

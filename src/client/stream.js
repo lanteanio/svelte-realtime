@@ -2733,7 +2733,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			} catch (err) {
 				_discard();
 				// An entry this replay hid still shows what it last produced.
-				if (_hiddenCount !== hiddenBefore && _optimisticQueue.length > 0) _recomputeDisplay();
+				if (_hiddenCount !== hiddenBefore && _optimisticQueue.length > 0) _recomputeDisplay(true);
 				throw err;
 			}
 			currentValue = replayed.value;
