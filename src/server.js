@@ -763,6 +763,8 @@ async function _invalidationReload(watcher) {
 		await _reportReloadFailure(failure, run, watcher.topic);
 	} finally {
 		watcher.reloading = false;
+		// Nobody left to reload for: drop the watcher rather than keep it.
+		if (watcher.bindings.size === 0) _unregisterInvalidationWatch(watcher.topic, watcher.fn);
 	}
 }
 
@@ -849,9 +851,12 @@ async function _staleReload(topic) {
 		// subscriber may have left during the async loader call, in
 		// which case _unregisterStaleWatch has already cleared the
 		// timer slot.
+		// A watchdog with no subscriber left to reload for is dropped instead
+		// of re-armed, so it cannot keep firing for a topic nobody holds.
 		const stillThere = _topicStaleWatch.get(topic);
 		if (stillThere === entry) {
-			stillThere.timerId = setTimer(() => _staleReload(topic), entry.staleAfterMs);
+			if (entry.bindings.size === 0) _unregisterStaleWatch(topic);
+			else stillThere.timerId = setTimer(() => _staleReload(topic), entry.staleAfterMs);
 		}
 	}
 }

@@ -13,7 +13,7 @@ import { _subscribeTracked } from './membership.js';
 import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
-import { state, registry, guards, cronRegistry, _declaredRedact, _pendingSubscribeHooks } from './state.js';
+import { state, registry, guards, cronRegistry, _declaredRedact, _pendingSubscribeHooks, _topicWsCounts } from './state.js';
 import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
@@ -977,6 +977,9 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// subscribe, so a reload can run under any current subscriber, including
 	// one that resumed from a replay or a delta without running the loader.
 	const armReloads = () => {
+		// A close, unsubscribe or revoke during a resume await already drained
+		// this subscription; binding it now would arm reloads for a dead socket.
+		if ((subscribedRef.isActive && !subscribedRef.isActive()) || !_topicWsCounts.get(topic)?.has(ws)) return;
 		if (/** @type {any} */ (fn).__streamStaleAfterMs) _registerStaleWatch(topic, fn, ctx, streamArgs, platform);
 		if (/** @type {any} */ (fn).__streamInvalidateOn) _registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
 	};

@@ -7,9 +7,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { live, guard, _resetMiddleware, _resetInvalidationWatch, _prepareHmr } from '../src/server.js';
 import { createTestContext, createTestEnv } from '../src/testing.js';
+import { _topicInvalidationWatch, _topicStaleWatch } from '../src/server/state.js';
 
 const als = new AsyncLocalStorage();
 const actor = () => als.getStore()?.actor ?? null;
+const resumeFrame = (path, id, version) => new TextEncoder().encode(JSON.stringify({ rpc: path, id, args: [], stream: true, version })).buffer;
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
 let env;
@@ -319,5 +321,49 @@ describe('background re-runs in middleware', () => {
 		alice.disconnect();
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(loads).toEqual(['first:alice', 'second:bob', 'second:bob']);
+	});
+});
+
+describe('reload bookkeeping for resumed subscribers', () => {
+	it('arms the watchdog and watchers for a first subscriber that resumes without running the loader', async () => {
+		vi.useFakeTimers();
+		const loads = [];
+		env.register('feed', {
+			read: live.stream('armresume:feed', async () => { loads.push(actor()); return { n: loads.length }; }, {
+				merge: 'set', staleAfterMs: 1000, invalidateOn: 'armresume:control', delta: { version: () => 1, diff: async () => null }
+			})
+		});
+		const bob = env.connect({ id: 'bob' });
+		const replies = [];
+		bob.onMessage(message => replies.push(message));
+		bob.sendRaw(resumeFrame('feed/read', 'bob-resume', 1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(JSON.stringify(replies)).toContain('"unchanged":true');
+		expect(loads).toEqual([]);
+		expect(_topicStaleWatch.has('armresume:feed')).toBe(true);
+		expect(_topicInvalidationWatch.size).toBe(1);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(loads).toEqual(['bob']);
+	});
+
+	it('arms nothing for a socket that closes while its resume is still awaiting', async () => {
+		const gate = deferred();
+		let versionCalled = false;
+		let versionRead = false;
+		env.register('feed', {
+			read: live.stream('closedresume:feed', async () => ({ ok: true }), {
+				merge: 'set', staleAfterMs: 1000, invalidateOn: 'closedresume:control',
+				delta: { version: async () => { versionCalled = true; await gate.promise; versionRead = true; return 1; }, diff: async () => null }
+			})
+		});
+		const bob = env.connect({ id: 'bob' });
+		bob.sendRaw(resumeFrame('feed/read', 'bob-resume', 1));
+		await vi.waitFor(() => expect(versionCalled).toBe(true));
+		bob.disconnect();
+		gate.resolve();
+		await vi.waitFor(() => expect(versionRead).toBe(true));
+		await new Promise(resolve => setImmediate(resolve));
+		expect(_topicStaleWatch.has('closedresume:feed')).toBe(false);
+		expect(_topicInvalidationWatch.size).toBe(0);
 	});
 });
