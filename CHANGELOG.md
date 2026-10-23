@@ -253,7 +253,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - On Vite 8, an SSR build keeps the options an app sets under the legacy `build.rollupOptions` (external, output and the rest) when the plugin adds its externals; they were dropped once the plugin set `build.rolldownOptions`.
 
-- The first page request of a new dev server waits for the live handlers to finish loading. A request that raced that load could get a partly initialized `svelte-realtime/server` and fail with `live.stream is not a function` until the server was restarted.
+- The first page request of a new dev server waits for the live handlers to finish loading, for up to 10 seconds; after that it is served with a warning. A request that raced that load could get a partly initialized `svelte-realtime/server` and fail with `live.stream is not a function` until the server was restarted.
 
 - The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
 

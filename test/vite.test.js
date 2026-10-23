@@ -2249,6 +2249,7 @@ describe('devtools injection', () => {
 		// The startup gate middleware remains; no middleware wraps the response.
 		const write = () => true, end = () => {}, writeHead = () => {};
 		const res = { write, end, writeHead };
+		expect(middlewares).toHaveLength(1);
 		let passed = 0;
 		for (const middleware of middlewares) middleware({ url: '/' }, res, () => { passed++; });
 		expect(passed).toBe(middlewares.length);

@@ -20,7 +20,12 @@ const caseInsensitiveFs = existsSync(join(probe, 'LOWER.js'));
 rmSync(probe, { recursive: true, force: true });
 
 describe('live import file identity', () => {
-	it.runIf(caseInsensitiveFs)('invalidates generated exports using the on-disk spelling after an edit', async () => {
+	// The on-disk spelling runs everywhere; a differently cased import needs a
+	// file system that opens it.
+	it.each([
+		['the on-disk spelling', '$live/nested/counter', true],
+		['a differently cased spelling', '$live/NESTED/Counter', caseInsensitiveFs]
+	].filter(([, , runs]) => runs))('invalidates generated exports after an edit when imported with %s', async (_label, requested) => {
 		root = mkdtempSync(join(tmpdir(), 'realtime-case-'));
 		const liveDir = join(root, 'src/live');
 		mkdirSync(join(liveDir, 'nested'), { recursive: true });
@@ -29,7 +34,6 @@ describe('live import file identity', () => {
 		const p = realtime({ typedImports: false });
 		p.configResolved({ root, command: 'serve', build: {} });
 		const canonical = '\0live:nested/counter';
-		const requested = '$live/NESTED/Counter';
 		const id = p.resolveId(requested);
 		const oldCode = p.load(id);
 		expect(oldCode).toContain('export const before');

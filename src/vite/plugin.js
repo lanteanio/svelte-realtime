@@ -45,6 +45,8 @@ export default function svelteRealtime(options) {
 	let svelteVersion = null;
 	let registryStarting = false;
 	const enqueueRegistry = _createRegistryQueue();
+	// How long the first requests of a dev server wait for the live handlers.
+	const STARTUP_HOLD_MS = 10000;
 	/**
 	 * The live file a reported path names, spelled under liveDir, or null when
 	 * the path lies outside it.
@@ -366,8 +368,20 @@ export default function svelteRealtime(options) {
 						server.warmupRequest(VIRTUAL_PREFIX + rel).catch(() => {});
 					}
 				}).catch(reportRegistryFailure);
-				startup = loading;
-				loading.finally(() => { if (startup === loading) startup = null; });
+				// A live module whose top level never settles would hold every
+				// request forever, so the hold ends after a bound with one warning.
+				const held = new Promise(resolve => {
+					const timer = setTimeout(() => { // determinism-allow: bounds a Vite development request hold, outside the realtime runtime
+						console.warn(`[svelte-realtime] Live handlers are still loading after ${STARTUP_HOLD_MS / 1000} s; serving requests without waiting for them.\n  See: https://svti.me/vite`);
+						resolve(undefined);
+					}, STARTUP_HOLD_MS);
+					loading.then(() => {
+						clearTimeout(timer); // determinism-allow: pairs the development request hold above
+						resolve(undefined);
+					});
+				});
+				startup = held;
+				held.then(() => { if (startup === held) startup = null; });
 				return loading;
 			});
 

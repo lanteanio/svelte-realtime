@@ -168,6 +168,34 @@ describe('SvelteKit development module loading', () => {
 			await chain({ url: '/' }).then(() => { later = true; });
 			expect(later).toBe(true);
 		});
+		it('stops holding requests when the startup registry never settles using the ' + (modern ? 'environment runner' : 'Kit 2 loader'), async () => {
+			vi.useFakeTimers();
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = plugin('serve', { devtools: false });
+				const s = server(modern);
+				s.load.mockImplementation(async id => {
+					if (id === '/@svelte-realtime-registry') return new Promise(() => {});
+					return ['svelte-realtime/server', '/@svelte-realtime-server'].includes(id) ? s.runtime : {};
+				});
+				p.configureServer(s);
+				s.listeners.listening();
+				const [hold] = s.middlewares.use.mock.calls.map(call => call[0]);
+				let passed = 0;
+				hold({ url: '/' }, {}, () => { passed++; });
+				await vi.advanceTimersByTimeAsync(9000);
+				expect(passed).toBe(0);
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(passed).toBe(1);
+				hold({ url: '/' }, {}, () => { passed++; });
+				await vi.advanceTimersByTimeAsync(0);
+				expect(passed).toBe(2);
+				expect(warn.mock.calls.filter(args => /still loading/.test(String(args[0])))).toHaveLength(1);
+			} finally {
+				warn.mockRestore();
+				vi.useRealTimers();
+			}
+		});
 		it('reloads live handlers using the ' + (modern ? 'SSR environment graph' : 'Kit 2 graph'), async () => {
 			const p = plugin();
 			const s = server(modern);
