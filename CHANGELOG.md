@@ -129,6 +129,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Text, binary and batch RPC calls are answered whatever a global middleware returns. A returned `{ ok: false, code, error }` refuses the call with that envelope, as before; a guard or handler failure the middleware caught and swallowed answers with that failure; a middleware that awaits `next()` but returns nothing answers with the handler's result; and a middleware that returns without calling `next()` fails the call with `INTERNAL_ERROR`, `onError` and an `rpc.execution.non-live-error` event naming `next()`. A handler the middleware did not await is waited for before the answer, and a subscribe the middleware refuses after `next()` is released. Before, a text call got no answer (the response write threw), a binary call was never answered, and a refused subscribe stayed subscribed.
+
 - Bounded DevTools previews retain whole family emoji and other joined graphemes when their segmentation window ends inside a cluster. Oversized payloads and the code-point fallback remain bounded.
 
 - Untranslated DevTools panels keep relative ages in English even on browsers using another locale, matching the panel language. Translated panels use their configured locale for relative ages.

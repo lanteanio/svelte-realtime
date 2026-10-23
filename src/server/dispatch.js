@@ -79,7 +79,7 @@ function _withFailureRequestId(result, requestId) {
 
 // Seam: stateful staying machinery (subscription bookkeeping, registry/guard/lazy
 // resolvers, middleware, shared validators), injected once by server.js at init.
-let _isLazyResolved, _trackStreamSub, _rollbackStreamSubscribe, _streamReleaseGeneration, _registerStaleWatch, _registerInvalidationWatch, _resolveRegistryEntry, _resolveGuard, _resolveAllLazy, _runWithMiddleware, _validate, _callTopicFn, _applyInitTransform;
+let _isLazyResolved, _trackStreamSub, _rollbackStreamSubscribe, _streamReleaseGeneration, _registerStaleWatch, _registerInvalidationWatch, _resolveRegistryEntry, _resolveGuard, _resolveAllLazy, _runWithMiddleware, _hasMiddleware, _validate, _callTopicFn, _applyInitTransform;
 export function installDispatch(seams) {
 	_isLazyResolved = seams.isLazyResolved;
 	_trackStreamSub = seams.trackStreamSub;
@@ -91,9 +91,66 @@ export function installDispatch(seams) {
 	_resolveGuard = seams.resolveGuard;
 	_resolveAllLazy = seams.resolveAllLazy;
 	_runWithMiddleware = seams.runWithMiddleware;
+	_hasMiddleware = seams.hasMiddleware;
 	_validate = seams.validate;
 	_callTopicFn = seams.callTopicFn;
 	_applyInitTransform = seams.applyInitTransform;
+}
+
+/**
+ * Run an RPC's guard/handler chain inside the global middleware and return the
+ * answer. Without middleware the chain's own outcome is the answer. With it, a
+ * middleware's return value answers when it is a response envelope (`ok` true
+ * or false); otherwise the chain's outcome stands, including a failure the
+ * middleware caught and swallowed. The chain is always waited for, so a
+ * middleware that does not await `next()` cannot answer under a running
+ * handler, and a middleware that never calls `next()` without returning a
+ * failure envelope is a server bug that fails the call.
+ *
+ * @param {any} ctx
+ * @param {() => Promise<any>} runChain
+ * @returns {Promise<any>}
+ */
+function _runRpcChain(ctx, runChain) {
+	return _hasMiddleware() ? _runRpcChainThroughMiddleware(ctx, runChain) : runChain();
+}
+
+/**
+ * @param {any} ctx
+ * @param {() => Promise<any>} runChain
+ * @returns {Promise<any>}
+ */
+async function _runRpcChainThroughMiddleware(ctx, runChain) {
+	/** @type {Promise<any> | null} */
+	let chainRun = null;
+	let answer;
+	try {
+		answer = await _runWithMiddleware(ctx, () => {
+			const run = runChain();
+			chainRun = run;
+			// The middleware may drop the promise; the outcome is read below.
+			run.catch(() => {});
+			return run;
+		});
+	} catch (err) {
+		if (chainRun) await /** @type {Promise<any>} */ (chainRun).catch(() => {});
+		throw err;
+	}
+	if (chainRun === null) {
+		if (answer && typeof answer === 'object' && answer.ok === false && typeof answer.code === 'string') return answer;
+		if (answer && typeof answer === 'object' && answer.ok === true) return answer;
+		throw new Error('middleware returned without calling next() and without a response envelope; return next() or { ok: false, code, error }');
+	}
+	let value;
+	try {
+		value = await /** @type {Promise<any>} */ (chainRun);
+	} catch (err) {
+		if (answer && typeof answer === 'object' && typeof answer.ok === 'boolean') return answer;
+		throw err;
+	}
+	if (answer === value) return value;
+	if (answer && typeof answer === 'object' && typeof answer.ok === 'boolean') return answer;
+	return value;
 }
 
 /**
@@ -1237,7 +1294,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 	const _subscribedRef = { topic: null, claimTopic: null };
 
 	try {
-		const _result = await _runWithMiddleware(ctx, async () => {
+		let _result = await _runRpcChain(ctx, async () => {
 		const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 		const guardFn = await _resolveGuard(modulePath);
 		if (guardFn) await _runGuard(guardFn, ctx);
@@ -1279,8 +1336,18 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 			const result = await fn(ctx, ...args);
 			return { id, ok: true, data: result };
 		}
-		}); // end _runWithMiddleware
-		if (_subscribedRef.topic && _result?.ok !== false) _subscribedRef.validate?.();
+		}); // end middleware chain
+		// A middleware's own envelope answers for this call id.
+		if (_result.id !== id) _result = { ..._result, id };
+		if (_subscribedRef.topic) {
+			if (_result.ok === false) {
+				// A middleware refused a subscribe the chain completed.
+				_rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
+				if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
+			} else {
+				_subscribedRef.validate?.();
+			}
+		}
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/
 		// stream-subscribe (all flow through here); binary RPC attaches its own.
@@ -1393,7 +1460,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, requestId);
 
 	try {
-		await _runWithMiddleware(ctx, async () => {
+		const answer = await _runRpcChain(ctx, async () => {
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
@@ -1409,12 +1476,13 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			/** @type {any} */
-				const _resp = { ok: true, data: result };
-				const _dep = _deprecationSignal(ws, path, fn);
-				if (_dep) _resp.deprecation = _dep;
-				_respond(ws, platform, id, _resp, requestId, path);
+			const _resp = { ok: true, data: result };
+			const _dep = _deprecationSignal(ws, path, fn);
+			if (_dep) _resp.deprecation = _dep;
+			return _resp;
 		});
-		_recordRpcMetrics(path, '', _metricsStart, ws);
+		_respond(ws, platform, id, answer, requestId, path);
+		_recordRpcMetrics(path, answer.ok === false ? (answer.code || 'UNKNOWN') : '', _metricsStart, ws);
 	} catch (err) {
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {

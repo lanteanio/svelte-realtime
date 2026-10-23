@@ -111,7 +111,7 @@ import { _roomRegister, installRoom } from './server/room.js';
 import { _flagRegister, _derivedRegister, _configureDynamicDerived, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
 import { handleRpc, _runGuard, _unknownPathReply, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
-installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, streamReleaseGeneration: _streamReleaseGeneration, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
+installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, streamReleaseGeneration: _streamReleaseGeneration, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, hasMiddleware: () => _globalMiddleware.length > 0, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
 export { _resetUploadAutoDiscovery };
 export { _armSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWarning, _resetPublishRateWarning };
 export { _crdtLoadError, _setCrdtRuntime, _resetCrdt };
