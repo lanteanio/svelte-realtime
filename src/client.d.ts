@@ -559,7 +559,11 @@ export interface UploadProgress {
  *   - `DISCONNECTED`         - the connection dropped mid-upload
  *   - `CONNECTION_CLOSED`    - the connection closed for good, before or during the upload
  *   - `SOURCE_ERROR`         - the source iterator threw
- *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
+ *   - `INVALID_REQUEST`      - the upload arguments could not be JSON-encoded (nothing is sent)
+ *   - `PAYLOAD_TOO_LARGE`    - the encoded arguments exceed 65535 bytes or leave chunk 0 no room
+ *                              under the server's frame size (nothing is sent); the server also
+ *                              answers with it for an upload over `maxSize`
+ *   - any other code from the server (`NOT_FOUND`, `FORBIDDEN`, ...)
  */
 export interface UploadHandle<T = any> extends Promise<T> {
 	/** Bytes sent so far. */

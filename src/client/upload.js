@@ -419,6 +419,14 @@ async function _pumpUpload(handle) {
 				if (handle._cancelled || handle._settled) return;
 			}
 
+			// Chunk 0 carries the header and at least one payload byte. Under
+			// a known cap a header that leaves no room would make the adapter
+			// close the connection (1009), so the upload is refused instead.
+			if (seq === 0 && clientState.uploadCap > 0
+				&& _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES + handle._argsLen + 1 > clientState.uploadCap) {
+				handle._settle(false, new RpcError('PAYLOAD_TOO_LARGE', 'Upload arguments do not fit the server frame size'));
+				return;
+			}
 			const { value, last } = await reader.read(_payloadSizeForFrame(_computeUploadFrameSize(), handle._argsLen));
 			if (handle._cancelled || handle._settled) return;
 			const bytes = value ? value.byteLength : 0;
@@ -499,7 +507,11 @@ function _sendUploadChunk(conn, handle, seq, isLast, hasArgs, argsJson, payload)
  *   - `DISCONNECTED`         - the connection dropped mid-upload
  *   - `CONNECTION_CLOSED`    - the connection closed for good, before or during the upload
  *   - `SOURCE_ERROR`         - the source iterator threw (filesystem, etc.)
- *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
+ *   - `INVALID_REQUEST`      - the upload arguments could not be JSON-encoded (nothing is sent)
+ *   - `PAYLOAD_TOO_LARGE`    - the encoded arguments exceed 65535 bytes or leave chunk 0 no room
+ *                              under the server's frame size (nothing is sent); the server also
+ *                              answers with it for an upload over `maxSize`
+ *   - any other code from the server (`NOT_FOUND`, `FORBIDDEN`, ...)
  *
  * Events:
  *   - `progress` - { sent, total?, percent?, chunks, bytesPerSec }

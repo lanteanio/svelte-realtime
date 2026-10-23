@@ -162,7 +162,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Smooth rooms run every owed tick instead of dropping the debt beyond eight ticks per timer callback, so a 60 Hz room keeps 60 ticks per second when timers fire late under load. Catch-up still yields after eight ticks, and only debt older than two seconds is dropped.
 
-- An upload whose arguments cannot be JSON-encoded rejects its handle with `INVALID_REQUEST` (the encoding error as `cause`) instead of throwing from the upload call, and arguments that encode past 65535 bytes reject with `PAYLOAD_TOO_LARGE` instead of sending a corrupt chunk 0. The arguments are encoded once per upload, also when the client falls back to the older upload format.
+- An upload whose arguments cannot be JSON-encoded rejects its handle with `INVALID_REQUEST` (the encoding error as `cause`) instead of leaving the upload pending, and arguments that encode past 65535 bytes reject with `PAYLOAD_TOO_LARGE` instead of sending a corrupt chunk 0, as do arguments that leave chunk 0 no room under the frame size the server announced (the adapter would close the connection with 1009). The arguments are encoded once per upload, also when the client falls back to the older upload format.
 
 - Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
 
