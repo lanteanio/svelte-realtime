@@ -106,6 +106,9 @@ export function installDispatch(seams) {
  * @property {{ pending?: Promise<void> }} [track] - receives the promise that settles with that chain
  */
 
+/** Ends a subscribe chain that a middleware answered while it ran. */
+const _CALL_ANSWERED = new LiveError('INVALID_REQUEST', 'Call already answered');
+
 /** @param {any} v */
 function _isEnvelope(v) {
 	return v !== null && typeof v === 'object' && typeof v.ok === 'boolean';
@@ -128,8 +131,8 @@ function _isFailureEnvelope(v) {
  * own outcome (a failure the middleware swallowed included). A middleware
  * that returns without calling `next()` and without an envelope fails the
  * call; so does an ok envelope for a stream subscribe, which carries no topic.
- * Once the answer is decided, a late `next()` throws instead of running the
- * chain.
+ * Once the answer is decided, a late `next()` returns a rejected promise
+ * instead of running the rest of the chain.
  *
  * @param {any} ctx
  * @param {() => Promise<any>} runChain
@@ -160,6 +163,8 @@ async function _runRpcChainThroughMiddleware(ctx, runChain, hooks) {
 		_enterInFlight();
 		const settled = run.then(() => {}, (err) => {
 			// Nobody receives this failure: the caller already has its answer.
+			// A subscribe stopped because of that answer is not a failure.
+			if (err === _CALL_ANSWERED) return;
 			emitOperationalEvent({
 				source: 'svelte-realtime',
 				component: 'server.rpc',
@@ -175,32 +180,34 @@ async function _runRpcChainThroughMiddleware(ctx, runChain, hooks) {
 		});
 		if (hooks?.track) hooks.track.pending = settled;
 	};
+	// Every next() checks this, so after the answer neither an inner
+	// middleware nor the handler runs. A rejected promise, not a throw:
+	// `setTimeout(next)` must not become an uncaught exception, while an
+	// awaiting caller still sees why nothing ran.
+	const late = () => {
+		if (!decided) return null;
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.rpc',
+			event: 'rpc.middleware.next-after-answer',
+			severity: 'warn',
+			dataClass: 'application',
+			message: 'A middleware called next() after the call was answered; the rest of the chain did not run.',
+			attributes: { path }
+		});
+		const refused = Promise.reject(new Error('middleware called next() after the call was answered'));
+		refused.catch(() => {});
+		return refused;
+	};
 	let answer;
 	try {
 		answer = await _runWithMiddleware(ctx, () => {
-			if (decided) {
-				// A rejected promise, not a throw: `setTimeout(next)` must not
-				// become an uncaught exception, while an awaiting caller still
-				// sees why nothing ran.
-				emitOperationalEvent({
-					source: 'svelte-realtime',
-					component: 'server.rpc',
-					event: 'rpc.middleware.next-after-answer',
-					severity: 'warn',
-					dataClass: 'application',
-					message: 'A middleware called next() after the call was answered; the handler did not run.',
-					attributes: { path }
-				});
-				const late = Promise.reject(new Error('middleware called next() after the call was answered'));
-				late.catch(() => {});
-				return late;
-			}
 			const run = runChain();
 			chainRun = run;
 			// The middleware may drop the promise; the outcome is read below.
 			run.then(() => { chainDone = true; }, () => { chainDone = true; });
 			return run;
-		});
+		}, late);
 	} catch (err) {
 		detach();
 		throw err;
@@ -1015,7 +1022,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// record it so the chain's end releases it, and run no loader.
 		subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
 		subscribedRef.topic = topic;
-		throw new LiveError('INVALID_REQUEST', 'Call already answered');
+		throw _CALL_ANSWERED;
 	}
 	// Name the wire topic to the client once the adapter admitted the
 	// subscribe, and before the loader reads its snapshot. The client only

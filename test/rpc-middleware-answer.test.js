@@ -478,4 +478,48 @@ describe('RPC answers whatever the global middleware returns', () => {
 			expect.objectContaining({ id: 'b', ok: false, code: 'INTERNAL_ERROR' })
 		]);
 	});
+
+	it('a late next() runs no inner middleware either, from a timer or a detached function', async () => {
+		let inner = 0;
+		let n = 0;
+		live.middleware(async (ctx, next) => {
+			if (n++ === 0) setTimeout(next, 5);
+			else (async () => { await tick(5); next(); })();
+			return { ok: false, code: 'FORBIDDEN', error: 'No' };
+		});
+		live.middleware(async (ctx, next) => { inner++; return next(); });
+		const c = conn(env);
+		handleRpc(c.ws, textFrame('mw/ok', 'r1'), env.platform);
+		handleRpc(c.ws, textFrame('mw/ok', 'r2'), env.platform);
+		expect(await answerFor(c, 'r1')).toMatchObject({ code: 'FORBIDDEN' });
+		expect(await answerFor(c, 'r2')).toMatchObject({ code: 'FORBIDDEN' });
+		await tick(40);
+		expect(inner).toBe(0);
+		expect(ran).toBe(0);
+		expect(events.filter((e) => e.event === 'rpc.middleware.next-after-answer')).toHaveLength(2);
+	});
+
+	it('a subscribe answered while its admission is pending is released without a failure event', async () => {
+		env.register('admit', { feed: live.stream('admit:main', async () => { ran++; return []; }) });
+		live.middleware(async (ctx, next) => {
+			next();
+			return { ok: false, code: 'TIMEOUT', error: 'Took too long' };
+		});
+		const c = conn(env);
+		const topics = trackTopics(c);
+		const original = env.platform.subscribe;
+		env.platform.subscribe = async (ws, topic) => { await tick(20); ws.subscribe(topic); return null; };
+		try {
+			handleRpc(c.ws, textEncoder.encode(JSON.stringify({ rpc: 'admit/feed', id: 's1', args: [], stream: true, attach: true })).buffer, env.platform);
+			expect(await answerFor(c, 's1')).toMatchObject({ code: 'TIMEOUT' });
+			await tick(60);
+		} finally {
+			env.platform.subscribe = original;
+		}
+		expect([...topics]).toEqual([]);
+		expect(ran).toBe(0);
+		expect(c.sent.filter((f) => f.event === 's1')).toHaveLength(1);
+		expect(events.filter((e) => e.event === 'rpc.execution.failed-after-answer')).toEqual([]);
+		expect(inFlightCount()).toBe(0);
+	});
 });

@@ -3860,9 +3860,11 @@ installUpload({ unknownPathReply: _unknownPathReply, resolveAllLazy: _resolveAll
  * If no middleware is registered, calls handler directly (zero overhead).
  * @param {any} ctx
  * @param {() => Promise<any>} handler
+ * @param {() => Promise<never> | null} [late] - checked by every `next()`; a
+ *   promise it returns is that call's result, and the chain below does not run
  * @returns {Promise<any>}
  */
-function _runWithMiddleware(ctx, handler) {
+function _runWithMiddleware(ctx, handler, late) {
 	if (_globalMiddleware.length === 0) return handler();
 
 	let idx = 0;
@@ -3888,6 +3890,10 @@ function _runWithMiddleware(ctx, handler) {
 				);
 			}
 			called = true;
+			if (late) {
+				const refused = late();
+				if (refused) return refused;
+			}
 			return dispatch();
 		};
 		return fn(ctx, next);
