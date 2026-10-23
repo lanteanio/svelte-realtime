@@ -426,12 +426,18 @@ describe('release source identity', () => {
 		const stable = { ...pkg, version: '1.2.3', publishConfig: { tag: 'latest' } };
 		const stableTag = stable.name + '@' + stable.version;
 		const stableContext = { ...context, GITHUB_REF_NAME: stableTag, GITHUB_REF: 'refs/tags/' + stableTag };
-		expect(validateReleaseContext(stableContext, stable, { ...git, sourceBranch: 'origin/main' })).toEqual([]);
+		expect(validateReleaseContext(stableContext, stable, { ...git, sourceBranch: 'origin/main' }, { realtime: stableTag })).toEqual([]);
 		expect(validateReleaseContext(stableContext, stable, git).join('\n')).toContain('origin/main');
 		expect(validateReleaseContext(context, { ...pkg, publishConfig: { tag: 'latest' } }, git).join('\n')).toContain('version channel');
 	});
 	it('accepts only the canonical annotated version tag on a clean exact commit', () => {
 		expect(validateReleaseContext(context, pkg, git)).toEqual([]);
+	});
+
+	it('requires the scaffolder to install the version being released', () => {
+		const errors = validateReleaseContext(context, pkg, git, { realtime: pkg.name + '@0.0.1' }).join('\n');
+		expect(errors).toContain('scaffolder installs ' + pkg.name + '@0.0.1');
+		expect(validateReleaseContext(context, pkg, git, { realtime: pkg.name + '@' + pkg.version })).toEqual([]);
 	});
 
 	it('binds the event revision to the checkout', () => {

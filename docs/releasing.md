@@ -104,7 +104,9 @@ There is no token fallback and no manual-dispatch publication path.
 The `verify` job has only `contents: read`. It installs locked root and fixture
 dependencies, Chromium, and checks Docker before `npm run verify:release` runs
 the unit, simulation, DevTools, scaffold, browser, chaos, lifecycle, smooth-stack
-and smoke checks. `prepublishOnly` runs the full check chain, and source identity
+and smoke checks. The source identity check also refuses a release whose
+scaffolder still installs another svelte-realtime version than the one being
+published. `prepublishOnly` runs the full check chain, and source identity
 is checked again afterward so test or lifecycle mutations cannot enter the pack.
 The job packs one
 retained tarball and exports its SHA-256 digest separately from the artifact.

@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SCAFFOLD_REALTIME_SPEC } from '../src/cli-utils.js';
 const versionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,9 +15,12 @@ const packagePath = resolve(root, 'package.json');
 const expectedRepository = 'lanteanio/svelte-realtime';
 const expectedRepositoryUrl = 'git+https://github.com/lanteanio/svelte-realtime.git';
 
-export function validateReleaseContext(env, pkg, git) {
+export function validateReleaseContext(env, pkg, git, scaffold = { realtime: SCAFFOLD_REALTIME_SPEC }) {
 	const errors = [];
 	const expectedTag = pkg.name + '@' + pkg.version;
+	// New projects install the realtime version the scaffolder pins, so it must
+	// be the one this release publishes.
+	if (scaffold.realtime !== expectedTag) errors.push('scaffolder installs ' + scaffold.realtime + ', not ' + expectedTag);
 	if (env.GITHUB_EVENT_NAME !== 'push') errors.push('release event must be push');
 	if (env.GITHUB_REF_TYPE !== 'tag') errors.push('release ref type must be tag');
 	if (env.GITHUB_REF_NAME !== expectedTag) errors.push('release tag must exactly match package name and version');
