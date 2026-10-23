@@ -6,13 +6,13 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 245,
+		"total": 246,
 		"classifications": {
 			"command": 4,
 			"tutorial": 74,
 			"executed": 33,
 			"output": 5,
-			"syntax": 127,
+			"syntax": 128,
 			"fragment": 1,
 			"config": 1
 		},
@@ -21,7 +21,7 @@
 			"app-context": 74,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
-			"acorn": 120,
+			"acorn": 121,
 			"svelte": 6,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
@@ -29,7 +29,7 @@
 		},
 		"notRunnable": {
 			"app-context": 74,
-			"ambient-identifiers": 118,
+			"ambient-identifiers": 119,
 			"browser-component": 6,
 			"type-declarations-only": 1,
 			"requires-browser": 1
