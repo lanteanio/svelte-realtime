@@ -226,8 +226,10 @@ let runCounter = 0;
 /**
  * Run one schedule to quiescence and return each replica's value and the
  * server's, canonicalized. Throws when a replica differs from the server.
+ * `omitRecovery` leaves every resubscribe after a reconnect unanswered: the
+ * negative control that shows a replica which misses recovery fails.
  */
-export async function runSchedule(net, merge, schedule) {
+export async function runSchedule(net, merge, schedule, { omitRecovery = false } = {}) {
 	const model = MERGES[merge];
 	const run = ++runCounter;
 	const path = 'fuzz/' + merge + '/' + run, topic = 'fuzz:' + merge + ':' + run, rpcPath = 'fuzz/write/' + run;
@@ -251,7 +253,7 @@ export async function runSchedule(net, merge, schedule) {
 			else if (frame.rpc === path && frame.stream) {
 				// The server subscribes the socket and acknowledges the attach as
 				// soon as a subscribe arrives; its answer follows later.
-				const request = { id: frame.id, request: frame, attachedAt: seq };
+				const request = { id: frame.id, request: frame, attachedAt: seq, epoch };
 				answers.push(request);
 				subscribed = true;
 				net.emit('__rpc', { event: frame.id, data: { attach: true, topic } });
@@ -259,6 +261,7 @@ export async function runSchedule(net, merge, schedule) {
 		}
 	};
 	const answer = (request, mode, at) => {
+		if (omitRecovery && request.epoch > 0) return;
 		const from = versions.findIndex(v => v.seq === request.attachedAt);
 		const version = versions[from + (at % (versions.length - from))];
 		const since = request.request.seq;

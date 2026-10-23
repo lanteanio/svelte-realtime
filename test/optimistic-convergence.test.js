@@ -53,6 +53,38 @@ describe('optimistic replica convergence', () => {
 			expect(result.actual.every(value => JSON.stringify(value) === JSON.stringify(result.expected))).toBe(true);
 		} finally { await net.close(); }
 	});
+
+	// A write the replicas miss while reconnecting reaches them only through
+	// the resubscribe answer: without it the oracle must report the replica.
+	const missedWrite = { replicas: 2, initial: [0], steps: [
+		{ t: 'bounce' },
+		{ t: 'server', op: { kind: 'upsert', key: 1 } },
+		{ t: 'server', op: { kind: 'delete', key: 0 } }
+	] };
+	it('rejects a stale replica when reconnect recovery is omitted', async () => {
+		const net = await openFuzzWire();
+		try {
+			await expect(runSchedule(net, 'crud', missedWrite, { omitRecovery: true })).rejects.toThrow(/differs from the server/);
+			// The same schedule with recovery answered converges.
+			const result = await runSchedule(net, 'crud', missedWrite);
+			expect(result.actual).toEqual([result.expected, result.expected]);
+		} finally { await net.close(); }
+	});
+
+	it('replays a seed with identical schedules, settlements and values', async () => {
+		const options = { seed, numRuns: 8 };
+		const schedules = fc.sample(scheduleArbitrary('crud'), options);
+		expect(fc.sample(scheduleArbitrary('crud'), options)).toEqual(schedules);
+		// Request ids differ between runs on one wire; everything else repeats.
+		const strip = result => ({ ...result, trace: result.trace.map(({ answer, ...rest }) => rest) });
+		const net = await openFuzzWire();
+		try {
+			for (const schedule of schedules) {
+				const first = strip(await runSchedule(net, 'crud', schedule));
+				expect(strip(await runSchedule(net, 'crud', schedule))).toEqual(first);
+			}
+		} finally { await net.close(); }
+	}, 60000);
 });
 
 describe('delta with an optimistic created row', () => {
