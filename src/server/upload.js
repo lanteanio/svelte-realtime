@@ -878,8 +878,8 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			return chainRun;
 		});
 		if (upload.phase !== 'settled') {
-			// The middleware's return value answers first, as on RPC: a failure
-			// envelope refuses with its code. Otherwise the chain's own outcome
+			// If nothing settled the upload yet, the middleware's return value
+			// answers, as on RPC: a failure envelope refuses with its code. Otherwise the chain's own outcome
 			// stands, including a failure the middleware caught. A middleware
 			// that never called next() is a server bug.
 			if (middlewareResult && middlewareResult.ok === false && typeof middlewareResult.code === 'string') {
@@ -889,6 +889,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			}
 			if (!chainRun) throw new Error('middleware returned without calling next() and without a failure envelope');
 			await chainRun;
+			if (upload.phase !== 'settled') throw new Error('upload chain ended without settling the upload');
 		}
 		upload.recordOutcome('');
 	} catch (err) {

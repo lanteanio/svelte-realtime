@@ -235,7 +235,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-payload-too-large"></a>
 ### <code>PAYLOAD_TOO_LARGE</code>
 
-- Searchable message prefixes: <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>Upload arguments exceed 65535 bytes</code>; <code>upload exceeds maxSize</code>
+- Searchable message prefixes: <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>Upload arguments do not fit the server frame size</code>; <code>Upload arguments exceed 65535 bytes</code>; <code>upload exceeds maxSize</code>
 - Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/upload.js](../src/client/upload.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
 
 <a id="live-error-protocol-mismatch"></a>
@@ -1136,9 +1136,9 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/offline.js:315</code>
 - <code>src/client/stream.js:2110</code>
 - <code>src/client/stream.js:2903</code>
-- <code>src/client/upload.js:642</code>
-- <code>src/client/upload.js:756</code>
-- <code>src/client/upload.js:833</code>
+- <code>src/client/upload.js:656</code>
+- <code>src/client/upload.js:770</code>
+- <code>src/client/upload.js:847</code>
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
 - <code>src/server.js:2033</code>
@@ -1160,7 +1160,8 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/upload.js:383</code>
 - <code>src/server/upload.js:509</code>
 - <code>src/server/upload.js:511</code>
-- <code>src/server/upload.js:876</code>
+- <code>src/server/upload.js:888</code>
+- <code>src/server/upload.js:912</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>
