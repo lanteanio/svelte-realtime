@@ -1577,7 +1577,9 @@ export interface UploadOptions extends LiveOptions {
 	 * `upload.stream.ended` with `outcome` (`completed`, `cancelled`,
 	 * `disconnected`, `backpressure`, `cap-exceeded`, `invalid`, `rejected`,
 	 * `handler-failed`), `code`, `bytes`, `chunks` and `durationMs`. Records
-	 * are `pseudonymous` and never carry payload bytes.
+	 * are `pseudonymous` and never carry payload bytes. `started` also carries
+	 * `credits` (whether the client sends with receiver credits). An
+	 * `INVALID_REQUEST` from the guard or admission checks ends as `rejected`.
 	 * @default false
 	 */
 	diagnostics?: boolean;
