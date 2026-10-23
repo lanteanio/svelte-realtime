@@ -722,6 +722,57 @@ describe('__stream() mutate', () => {
 		ctx.unsub();
 	});
 
+	it('an optimistic change that throws rejects with no call sent and nothing queued', async () => {
+		const ctx = await setupCrudStream('mut/change-throws', 'mut-change-throws', [{ id: 1 }]);
+		const save = __rpc('mut/save-throwing-change');
+		const before = sendQueuedFn.mock.calls.length;
+		let called = false;
+		await expect(
+			ctx.store.mutate(
+				() => { called = true; return save({ id: 't1' }); },
+				() => { throw new Error('change threw'); }
+			)
+		).rejects.toThrow('change threw');
+		expect(called).toBe(false);
+		expect(sendQueuedFn.mock.calls.slice(before).filter((c) => c[0] && c[0].rpc)).toEqual([]);
+		// Nothing is left in the queue: a server event applies directly instead
+		// of replaying the throwing change over it.
+		simulateTopicMessage('mut-change-throws', { event: 'created', data: { id: 2 } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+		ctx.unsub();
+	});
+
+	it('a subscriber that throws on the optimistic change does not fail the call it follows', async () => {
+		const ctx = await setupCrudStream('mut/sub-throws', 'mut-sub-throws', [{ id: 1 }]);
+		const save = __rpc('mut/save-throwing-sub');
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		let thrown = false;
+		const unsub = ctx.store.subscribe((v) => {
+			if (!thrown && Array.isArray(v) && v.some((row) => row.id === 't1')) {
+				thrown = true;
+				throw new Error('subscriber threw');
+			}
+		});
+		try {
+			const before = sendQueuedFn.mock.calls.length;
+			const op = ctx.store.mutate(() => save({ id: 't1' }), { event: 'created', data: { id: 't1' } });
+			const frames = sendQueuedFn.mock.calls.slice(before).map((c) => c[0]).filter((f) => f && f.rpc);
+			expect(frames.map((f) => f.rpc)).toEqual(['mut/save-throwing-sub']);
+			expect(thrown).toBe(true);
+			expect(report).toHaveBeenCalledWith(expect.objectContaining({ message: 'subscriber threw' }));
+			simulateRpcResponse(frames[0].id, { ok: true, data: 'saved' });
+			expect(await op).toBe('saved');
+			// The entry settled: a later server event applies over the confirmed state.
+			simulateTopicMessage('mut-sub-throws', { event: 'created', data: { id: 2 } });
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 't1' }, { id: 2 }]);
+		} finally {
+			vi.unstubAllGlobals();
+			unsub();
+			ctx.unsub();
+		}
+	});
+
 	it('a call that throws synchronously never shows its optimistic change', async () => {
 		const ctx = await setupCrudStream('mut/throw-early', 'mut-throw-early', [{ id: 1 }]);
 		const seen = ctx.values.length;

@@ -1487,6 +1487,36 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_recordHistory();
 	}
 
+	/** @param {unknown} err */
+	function _reportSubscriberError(err) {
+		if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
+		else console.error('[svelte-realtime] a stream subscriber threw during mutate():', err);
+	}
+
+	/** Publish `currentValue` and record history, reporting a subscriber that throws. */
+	function _publishReporting() {
+		try {
+			store.set(currentValue);
+		} catch (err) {
+			_reportSubscriberError(err);
+		}
+		_recordHistory();
+	}
+
+	/**
+	 * Settle a mutate's queue entry once its call has an outcome, reporting a
+	 * subscriber that throws so the mutate settles as the call did.
+	 * @param {(success: boolean) => void} settle
+	 * @param {boolean} success
+	 */
+	function _settleReporting(settle, success) {
+		try {
+			settle(success);
+		} catch (err) {
+			_reportSubscriberError(err);
+		}
+	}
+
 	/**
 	 * Exit queue mode. Promotes `_serverValue` to `currentValue`, clears
 	 * the parallel server-state slots, publishes to the store, and
@@ -2633,12 +2663,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				);
 			}
 
-			// Start the operation before the change shows: a subscriber that
-			// sends in reaction to the optimistic value then puts its frame on
-			// the wire after the frame that caused it, never ahead of it. An
-			// operation that throws synchronously rejects with nothing shown.
-			const op = asyncOp();
-
 			let optimisticKey = _NO_OPTIMISTIC_KEY;
 			if (isEvent) {
 				const k = mergeKeyField(merge, key);
@@ -2664,7 +2688,35 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			}
 			const entry = { change: optimisticChange, optimisticKey, touched: /** @type {Set<any> | null | undefined} */ (undefined), serverConfirmed: false, superseded: false };
 			_optimisticQueue.push(entry);
-			_recomputeDisplay();
+			const _discard = () => {
+				_optimisticQueue.splice(_optimisticQueue.indexOf(entry), 1);
+				if (_optimisticQueue.length === 0) {
+					_serverValue = null;
+					_serverIndex = null;
+				}
+			};
+
+			// Run the change before the operation starts, and the operation
+			// before the change shows. A change that throws rejects with no call
+			// sent; an operation that throws synchronously rejects with nothing
+			// shown; a subscriber that sends in reaction to the optimistic value
+			// puts its frame on the wire after the frame that caused it.
+			let replayed;
+			let op;
+			try {
+				replayed = _replayQueue();
+				op = asyncOp();
+			} catch (err) {
+				_discard();
+				throw err;
+			}
+			currentValue = replayed.value;
+			_index.clear();
+			for (const [k, i] of replayed.index) _index.set(k, i);
+			// The call is out: from here the operation decides how mutate
+			// settles. A store subscriber that throws is reported instead of
+			// failing a call the server may still commit.
+			_publishReporting();
 
 			/** @param {boolean} success */
 			const settle = (success) => {
@@ -2689,10 +2741,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			try {
 				value = await op;
 			} catch (err) {
-				settle(false);
+				_settleReporting(settle, false);
 				throw err;
 			}
-			settle(true);
+			_settleReporting(settle, true);
 			return value;
 		},
 

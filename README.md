@@ -1268,7 +1268,7 @@ Apply changes to a stream store instantly, then roll back if the server call fai
 
 ### Auto-rollback with `store.mutate()`
 
-`store.mutate(asyncOp, optimisticChange)` wraps the apply-await-rollback pattern. Starts the RPC, applies the optimistic change synchronously, awaits the RPC, and on rejection rolls back and re-throws. The call goes out before subscribers see the change, so a subscriber that sends in reaction to it never gets its frame onto the wire first.
+`store.mutate(asyncOp, optimisticChange)` wraps the apply-await-rollback pattern. Starts the RPC, applies the optimistic change synchronously, awaits the RPC, and on rejection rolls back and re-throws. The call goes out before subscribers see the change, so a subscriber that sends in reaction to it never gets its frame onto the wire first. An optimistic change that throws rejects the mutate before the RPC starts.
 
 ```js
 // Event-based: server's confirming event reconciles the placeholder by key

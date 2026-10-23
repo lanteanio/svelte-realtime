@@ -124,9 +124,11 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - A successful `store.mutate()` no longer applies its change again over server state that arrived while the call was in flight. A function change on a crud stream, or any change on a `set` stream, could overwrite another client's later write and leave that replica on a value the server no longer held.
 
+- A successful `store.mutate()` no longer applies its change again over server state that arrived while the call was in flight. A function change on a crud stream, or any change on a `set` stream, could overwrite another client's later write and leave that replica on a value the server no longer held. Handlers behind a mutate must publish the committed change before they return: when a server event reached what the change touched while the call was in flight, the client keeps the server's events and drops its own copy, so a handler that commits without publishing leaves the stream without that change until a later event or a refetch carries it.
+
 - When a room owner's last connection leaves, the `:owner` stream names the successor before the presence stream publishes the owner's `leave`, including when the departed owner is retired early to admit a member at capacity. A client reacting to the roster change reads the new owner, never the member who just left.
 
-- `store.mutate()` (and `createOptimistic`) starts its call before subscribers see the optimistic change, so a subscriber that sends in reaction to the change puts its frame on the wire after the call that caused it, never ahead of it. A call that throws synchronously rejects without showing the change.
+- `store.mutate()` (and `createOptimistic`) starts its call before subscribers see the optimistic change, so a subscriber that sends in reaction to the change puts its frame on the wire after the call that caused it, never ahead of it. A call that throws synchronously rejects without showing the change, an optimistic change that throws rejects before the call is made, and a store subscriber that throws on the change is reported through `reportError` while the mutate settles as its call did, so a caller never sees a failure for a call the server committed.
 
 - The IndexedDB offline store no longer reports a write as failed when the write was still committing at its five-second timeout: the transaction is aborted, and the write settles by its abort or by its commit. A mutation it reported failed could otherwise replay on the next page load.
 

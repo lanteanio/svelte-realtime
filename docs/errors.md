@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 113 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 114 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -683,6 +683,13 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>[svelte-realtime] configure({ upload: { chunkSize } }) is deprecated -- </code>
 - Owning sources: [src/client/upload.js](../src/client/upload.js)
 
+<a id="diagnostic-console-8cf3a67c87129f49"></a>
+### <code>console-8cf3a67c87129f49</code>
+
+- Kind: legacy console prefix
+- Searchable message prefixes: <code>[svelte-realtime] a stream subscriber threw during mutate():</code>
+- Owning sources: [src/client/stream.js](../src/client/stream.js)
+
 <a id="diagnostic-console-8d33a16463d3e3d5"></a>
 ### <code>console-8d33a16463d3e3d5</code>
 
@@ -1113,8 +1120,8 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/connection.js:260</code>
 - <code>src/client/internal-state.js:140</code>
 - <code>src/client/offline.js:315</code>
-- <code>src/client/stream.js:2059</code>
-- <code>src/client/stream.js:2816</code>
+- <code>src/client/stream.js:2089</code>
+- <code>src/client/stream.js:2868</code>
 - <code>src/client/upload.js:632</code>
 - <code>src/client/upload.js:744</code>
 - <code>src/client/upload.js:808</code>
