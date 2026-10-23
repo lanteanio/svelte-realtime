@@ -4365,7 +4365,7 @@ import { createCrdtCluster } from 'svelte-adapter-uws-extensions/redis/crdt';
 platform.crdt = createCrdtCluster(redisClient);   // alongside platform.redis / platform.presence
 ```
 
-That is the whole wiring. The document layer detects `platform.crdt` and routes through it automatically: every instance keeps its own replica and serves its own subscribers (no extra hop), every edit relays so all replicas converge, snapshots persist single-writer per topic (no clobber), and a cold-joining instance pulls the latest from a live peer. Without it the document family still works - it just runs single-instance, which is correct on one process and divergent across a cluster.
+That is the whole wiring. The document layer detects `platform.crdt` and routes through it automatically: every instance keeps its own replica and serves its own subscribers (no extra hop), every edit relays so all replicas converge, and a cold-joining instance pulls the latest from a live peer. One instance at a time writes a topic's snapshot (a per-topic lease), and it writes its replica's full state at write time, so instances never store divergent snapshots side by side. When the lease moves to another instance, that replica replaces the stored snapshot: it is not merged with the snapshot first, so an edit that only the previous writer held (its relay was lost) does not survive the handover. Without it the document family still works - it just runs single-instance, which is correct on one process and divergent across a cluster.
 
 Requires Svelte 5 (the stores are rune classes) and svelte-adapter-uws 0.6.0-next.25 or newer.
 
