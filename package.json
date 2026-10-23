@@ -152,6 +152,7 @@
     "typescript": "^6.0.3",
     "vitest": "^4.0.18",
     "yaml": "^2.9.0",
+    "yjs": "13.6.31",
     "@axe-core/playwright": "^4.13.0"
   },
   "overrides": {
