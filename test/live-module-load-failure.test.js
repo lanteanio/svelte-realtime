@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { live, __register, __registerGuard, __registerFlag, _activateDerived, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
+import { live, __directCall, __register, __registerGuard, __registerFlag, _activateDerived, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
 import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { mockWs } from './helpers/mock-ws.js';
@@ -170,6 +170,50 @@ describe('a development reload that fails', () => {
 		await flush();
 		expect(platform.sent.find(item => item.data?.id === 'after-fix').data).toMatchObject({ ok: true, data: 'fixed' });
 		expect(guardCalls).toEqual(['loaded', 'fixed']);
+	});
+
+	it('caches a loader that returns the handler it replaced', async () => {
+		const handler = live(() => 'same');
+		__register('hmr/same', handler);
+		// The registry evaluated again in the same instance: its loader returns
+		// the very function already registered.
+		let loads = 0;
+		const loader = async () => { loads++; return handler; };
+		loader.__lazy = true;
+		__register('hmr/same', loader);
+		const ws = mockWs({ id: 'member' });
+		const platform = mockPlatform();
+		for (const id of ['first', 'second']) {
+			handleRpc(ws, frame({ rpc: 'hmr/same', id, args: [] }), platform);
+			await flush();
+			expect(platform.sent.find(item => item.data?.id === id).data).toMatchObject({ ok: true, data: 'same' });
+		}
+		expect(loads).toBe(1);
+	});
+
+	it('reports a failure again after a development reload that follows a direct load', async () => {
+		const events = [];
+		cleanups.push(setOperationalEventSink(record => events.push(record)));
+		const fail = () => { throw new SyntaxError('again'); };
+		const entry = scripted([fail, fail]);
+		__register('reported/direct', entry.loader);
+		const ws = mockWs({ id: 'member' });
+		const platform = mockPlatform();
+		handleRpc(ws, frame({ rpc: 'reported/direct', id: 'a', args: [] }), platform);
+		await flush();
+		// The file is fixed and saved: a reload, then a load outside RPC
+		// dispatch, then the same breakage saved again.
+		_prepareHmr();
+		const fixed = live(() => 'fixed');
+		const good = async () => fixed;
+		good.__lazy = true;
+		__register('reported/direct', good);
+		await __directCall('reported/direct', [], platform);
+		_prepareHmr();
+		__register('reported/direct', entry.loader);
+		handleRpc(ws, frame({ rpc: 'reported/direct', id: 'b', args: [] }), platform);
+		await flush();
+		expect(events.filter(record => record.event === 'rpc.module.load-failed')).toHaveLength(2);
 	});
 
 	it.each([

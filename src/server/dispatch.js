@@ -43,6 +43,11 @@ const textDecoder = new TextDecoder();
 const _reportedLoadFailures = new Map();
 const _LOAD_FAILURE_REPORT_CAP = 256;
 
+/** Forget reported load failures; a development reload starts the reports over. */
+export function _clearLoadFailureReports() {
+	_reportedLoadFailures.clear();
+}
+
 /**
  * Resolve the live function a call names. A module that fails to load (a
  * syntax error saved in development, a module whose top level throws) answers

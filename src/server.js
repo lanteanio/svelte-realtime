@@ -109,7 +109,7 @@ export { configureWebhooks, getDeadLetter, replayDeadLetter, createDeadLetterSto
 import { _multiplayerRegister, installMultiplayer } from './server/multiplayer.js';
 import { _roomRegister, installRoom } from './server/room.js';
 import { _flagRegister, _derivedRegister, _configureDynamicDerived, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
-import { handleRpc, _runGuard, _unknownPathReply, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
+import { handleRpc, _runGuard, _unknownPathReply, guard, __directCall, message, createMessage, installDispatch, _clearLoadFailureReports } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
 installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, streamReleaseGeneration: _streamReleaseGeneration, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, hasMiddleware: () => _globalMiddleware.length > 0, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
 export { _resetUploadAutoDiscovery };
@@ -1227,14 +1227,16 @@ function _keepLoaded(existing, loader) {
 
 /**
  * Run a lazy loader, falling back to the entry it replaced when the module
- * fails to load. Without a loaded entry the failure propagates.
+ * fails to load. Without a loaded entry the failure propagates. `fallback`
+ * tells the caller to keep the loader, so the next call loads again.
  * @param {any} entry
+ * @returns {Promise<{ fn: any, fallback: boolean }>}
  */
 async function _loadLazy(entry) {
 	try {
-		return await entry();
+		return { fn: await entry(), fallback: false };
 	} catch (error) {
-		if (entry.__loaded) return entry.__loaded;
+		if (entry.__loaded) return { fn: entry.__loaded, fallback: true };
 		throw error;
 	}
 }
@@ -1250,10 +1252,9 @@ async function _resolveRegistryEntry(path) {
 	if (!entry) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
 	const hint = /** @type {any} */ (entry).__modulePathHint;
-	const loaded = /** @type {any} */ (entry).__loaded;
-	const fn = await _loadLazy(entry);
+	const { fn, fallback } = await _loadLazy(entry);
 	// The module still fails to load: serve the loaded entry, keep the loader.
-	if (loaded && fn === loaded) return fn;
+	if (fallback) return fn;
 	if (!fn) {
 		registry.delete(path);
 		return null;
@@ -1288,9 +1289,8 @@ async function _resolveGuard(modulePath) {
 	const entry = guards.get(modulePath);
 	if (!entry) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
-	const loaded = /** @type {any} */ (entry).__loaded;
-	const fn = await _loadLazy(entry);
-	if (loaded && fn === loaded) return fn;
+	const { fn, fallback } = await _loadLazy(entry);
+	if (fallback) return fn;
 	if (!fn) {
 		guards.delete(modulePath);
 		return null;
@@ -3753,6 +3753,8 @@ export function _prepareHmr() {
 	// Clear lazy queue and reset lazy init state
 	_lazyQueue.length = 0;
 	_resetLazy();
+	// A reload can fix a module that failed before, so its next failure reports.
+	_clearLoadFailureReports();
 
 	// Clear all registries and lookup maps
 	registry.clear();
