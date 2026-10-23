@@ -149,6 +149,19 @@ describe('dependency optimization for generated modules', () => {
 		}
 	});
 
+	it('does not warn about another adapter version when the adapter is excluded', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.3-linked');
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.6.3-app');
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			expect(resolveWith({}, { exclude: ['svelte-adapter-uws'] })).toEqual([]);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('does not warn when both sides install the same adapter version', () => {
 		const target = linkedRealtime();
 		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.2-same');
@@ -307,30 +320,32 @@ describe('dependency optimization for generated modules', () => {
 	});
 
 	it('generates every module whose client code imports more than the realtime client', async () => {
-		// Each fixture module, generated in full, against what the scan reports.
+		// Each module on its own, generated in full, against what the scan
+		// reports for a live directory holding only that module.
 		const { _generateClientStubs } = await import('../src/vite/codegen-client.js');
 		const { _generatedClientImports } = await import('../src/vite/optimize-deps.js');
-		const liveDir = resolve(import.meta.dirname, 'fixture/src/live');
-		writeLive([
+		const fixtureDir = resolve(import.meta.dirname, 'fixture/src/live');
+		const sources = readdirSync(fixtureDir).filter(f => f.endsWith('.js')).map(f => [f, readFileSync(resolve(fixtureDir, f), 'utf8')]);
+		const kinds = [
 			"export const game = live.smooth({ topic: 'game', apply: (s) => s });",
 			"export const notes = live.array({ topic: 'notes' });",
+			"export const tags = live.map({ topic: 'tags' });",
+			"export const draft = live.doc({ topic: 'draft' });",
 			"export const board = live.multiplayer({ topic: 'board', cursors: true });",
 			"export const lobby = live.room({ topic: 'lobby', enumerable: true });"
-		].join('\n'));
+		];
+		kinds.forEach((source, i) => sources.push(['kind' + i + '.js', "import { live } from 'svelte-realtime/server';\n" + source + '\n']));
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
-			for (const dir of [liveDir, resolve(appRoot, 'src/live')]) {
-				const expected = new Set();
-				for (const file of readdirSync(dir).filter(f => f.endsWith('.js'))) {
-					const code = _generateClientStubs(resolve(dir, file), file.slice(0, -3), 'src/live');
-					for (const m of code.matchAll(/^(?:import|export) .* from '([^']+)';$/gm)) {
-						if (m[1] !== CLIENT) expected.add(m[1]);
-					}
-				}
-				const found = new Set(_generatedClientImports(dir, 'src/live', undefined, null));
-				found.delete(CLIENT);
-				expect([...found].sort()).toEqual([...expected].sort());
-			}
+			sources.forEach(([name, source], i) => {
+				const dir = resolve(appRoot, 'single/' + i);
+				mkdirSync(dir, { recursive: true });
+				writeFileSync(resolve(dir, name), source);
+				const code = _generateClientStubs(resolve(dir, name), name.slice(0, -3), 'src/live');
+				const expected = [...code.matchAll(/^(?:import|export) .* from '([^']+)';$/gm)].map(m => m[1]).filter(id => id !== CLIENT);
+				const found = _generatedClientImports(dir, 'src/live', undefined, null).filter(id => id !== CLIENT);
+				expect([name, found.sort()]).toEqual([name, [...new Set(expected)].sort()]);
+			});
 		} finally {
 			warn.mockRestore();
 		}

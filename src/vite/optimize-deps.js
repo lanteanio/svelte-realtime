@@ -265,7 +265,9 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 	const add = installed
 		? [...ids, ...generated.filter(id => packageName(id) === 'svelte-realtime')]
 		: sourceIds.filter(sharedWithRealtime);
-	if (!installed && add.length > 0) warnVersionSkew(fromRealtime, fromRoot, add[0]);
+	// An excluded entry is loaded by each side from its own copy.
+	const shared = installed ? undefined : add.find(id => !excluded(exclude, id));
+	if (shared) warnVersionSkew(fromRealtime, fromRoot, shared);
 	for (const id of generated) {
 		if (packageName(id) === 'svelte-realtime') continue;
 		if (realtimeImports(id) ? !sharedWithRealtime(id) : !resolvesInstalled(fromRoot, id, preserveSymlinks)) continue;
