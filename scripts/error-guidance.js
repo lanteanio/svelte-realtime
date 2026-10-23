@@ -362,10 +362,10 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the compute error reported in the `error` attribute. Check that the source streams return data in the shape the derived function expects.'
 	}),
 	'rpc.module.load-failed': Object.freeze({
-		cause: 'Loading the live module behind a called path threw, for example a syntax error saved in development or a module whose top level throws.',
-		consequence: 'The call is answered INTERNAL_ERROR with a generic message; the load error stays on the server in the `error` attribute. Each distinct error message is reported once per path.',
-		automaticRecovery: 'The entry stays lazy, so the next call to that path loads the module again; a successful load clears the report for that path.',
-		nextAction: 'Fix the module named by the `path` attribute using the `error` attribute, then call again or reload. In development, save the corrected file.'
+		cause: 'Loading the live module behind a called path threw, for example a syntax error saved in development or a module whose top level throws. A path whose handler is already loaded serves the call directly and never reaches this event.',
+		consequence: 'The call is answered INTERNAL_ERROR with a generic message; the load error stays on the server in the `error` attribute. Each distinct error message is reported once per path while fewer than 256 paths and messages are tracked; past that bound every failure is reported.',
+		automaticRecovery: 'The entry stays lazy, so the next call loads the module again. In development a saved fix loads on that next call. In production Node caches the failed import, so every later call fails the same way until the process restarts.',
+		nextAction: 'Fix the module named by the `path` attribute using the `error` attribute. In development, save the corrected file; in production, deploy the fix and restart the process.'
 	}),
 	'reactive.effect.failed': Object.freeze({
 		cause: 'A `live.effect` handler throws or rejects while running for a publish on one of its watched source topics.',

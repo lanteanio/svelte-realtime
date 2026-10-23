@@ -432,9 +432,45 @@ describe('code and message resolution', () => {
 		expect(reworded.consoleSites.map((site) => site.text)).toContain("[svelte-realtime] live.aggregate '<name>': window publish failed; it retries later.\n  <message>");
 	});
 
-	it('hides camelCase internal fields in placeholders but keeps plain names', () => {
-		const inventory = scanFiles({ 'src/server/example.js': "export function warn(state, call) { console.warn('[svelte-realtime] cap ' + state.maxPushRegistry + ' for ' + call.path); }" });
-		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['[svelte-realtime] cap <value> for <path>']);
+	it('names placeholders after the property, hiding only underscore and SCREAMING names', () => {
+		const inventory = scanFiles({ 'src/server/example.js': "export function warn(entry, call) { console.warn('[svelte-realtime] late (misfireMs=' + entry.misfireMs + ') for ' + call.path + ' cap ' + entry._cap + ' of ' + LIMITS.MAX_ROWS); }" });
+		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['[svelte-realtime] late (misfireMs=<misfireMs>) for <path> cap <value> of <value>']);
+	});
+
+	it('treats a message branch without literal text as computed', () => {
+		const inventory = scanFiles({ 'src/server/example.js': "export function note(msg, verbose) { console.warn(msg + (verbose ? ' (details)' : '')); }" });
+		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['<msg> (details)']);
+		expect(inventory.dynamicSites).toEqual([{ path: 'src/server/example.js', scope: 'note()', kind: 'console.warn', count: 1 }]);
+	});
+
+	it('keeps collected text and marks the site computed when a + chain exceeds the variant cap', () => {
+		const branches = ['a', 'b', 'c', 'd', 'e'].map((flag) => " + (" + flag + " ? ' " + flag + "1' : ' " + flag + "2')").join('');
+		const inventory = scanFiles({ 'src/server/example.js': "export function many(a, b, c, d, e) { console.warn('[svelte-realtime] prefix:'" + branches + " + ' tail'); }" });
+		const texts = inventory.consoleSites.map((site) => site.text);
+		expect(texts.length).toBeGreaterThan(0);
+		expect(texts.length).toBeLessThanOrEqual(16);
+		for (const text of texts) {
+			expect(text.startsWith('[svelte-realtime] prefix:'), text).toBe(true);
+			expect(text.endsWith(' tail'), text).toBe(true);
+		}
+		expect(inventory.dynamicSites).toEqual([{ path: 'src/server/example.js', scope: 'many()', kind: 'console.warn', count: 1 }]);
+	});
+
+	it('marks a template over the variant cap as computed', () => {
+		const holes = ['a', 'b', 'c', 'd', 'e'].map((flag) => '${' + flag + " ? '" + flag + "1' : '" + flag + "2'}").join('-');
+		const inventory = scanFiles({ 'src/server/example.js': 'export function many(a, b, c, d, e) { console.warn(`[svelte-realtime] ' + holes + ' done`); }' });
+		for (const text of inventory.consoleSites.map((site) => site.text)) expect(text.startsWith('[svelte-realtime] ')).toBe(true);
+		expect(inventory.dynamicSites).toEqual([{ path: 'src/server/example.js', scope: 'many()', kind: 'console.warn', count: 1 }]);
+	});
+
+	it('resolves console aliases through their binding, not their name', () => {
+		const sites = (source) => scanFiles({ 'src/server/example.js': source }).consoleSites.map((site) => site.method + ' ' + site.text);
+		expect(sites("function a() { const warn = console.warn; warn('[svelte-realtime] one'); } function b(warn) { warn('[svelte-realtime] two'); }")).toEqual(['console.warn [svelte-realtime] one']);
+		expect(sites("const c = console; c.warn('[svelte-realtime] object alias');")).toEqual(['console.warn [svelte-realtime] object alias']);
+		expect(sites("console['error']('[svelte-realtime] computed member');")).toEqual(['console.error [svelte-realtime] computed member']);
+		expect(sites("globalThis.console.error('[svelte-realtime] qualified');")).toEqual(['console.error [svelte-realtime] qualified']);
+		expect(sites("function f(log = console.error) { log('[svelte-realtime] default param'); }")).toEqual(['console.error [svelte-realtime] default param']);
+		expect(sites("function f(console) { console.warn('[svelte-realtime] shadowed'); }")).toEqual([]);
 	});
 
 	it('indexes the real connection-replaced message under DISCONNECTED', () => {

@@ -63,40 +63,78 @@ function hasText(node) {
 	if (node?.type === 'ConditionalExpression') return hasText(node.consequent) || hasText(node.alternate);
 	return node?.type === 'BinaryExpression' && node.operator === '+' && (hasText(node.left) || hasText(node.right));
 }
-// Internal names say nothing to a reader of the log line, so they become a
-// neutral placeholder: a leading underscore or SCREAMING_CASE anywhere, and a
-// camelCase property of an internal object.
+// Internal names say nothing to a reader of the log line, so a leading
+// underscore or SCREAMING_CASE name becomes a neutral placeholder; any other
+// identifier or property keeps its name (`entry.misfireMs` -> `<misfireMs>`).
 const internal = name => /^_|^[A-Z0-9_]+$/.test(name);
 function hole(node) {
 	if (node?.type === 'Identifier') return internal(node.name) ? '<value>' : '<' + node.name + '>';
 	if (node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier') {
-		const name = node.property.name;
-		return internal(name) || /[A-Z]/.test(name) ? '<value>' : '<' + name + '>';
+		return internal(node.property.name) ? '<value>' : '<' + node.property.name + '>';
 	}
 	return '<value>';
 }
 // One message can print several texts: a conditional with literal text inside
 // a template or a `+` chain yields one pattern per branch, so each phrase is
 // searchable and rewording one branch changes its pattern. Past this many
-// variants the remaining conditionals collapse into placeholders.
+// variants the overflowing part collapses into a placeholder and the message
+// counts as truncated, so its site needs a recorded decision.
 const MAX_VARIANTS = 16;
-const product = (left, right) => left.length * right.length > MAX_VARIANTS ? undefined : left.flatMap(a => right.map(b => [...a, ...b]));
-function variants(node) {
-	if (node?.type === 'Literal' && (typeof node.value === 'string' || typeof node.value === 'number')) return [[{ text: String(node.value) }]];
-	if (constantOf(node) !== undefined) return [[{ text: String(constantOf(node)) }]];
+const PLACEHOLDER = Object.freeze([[{ hole: '<value>' }]]);
+const cross = (left, right) => left.length * right.length > MAX_VARIANTS ? undefined : left.flatMap(a => right.map(b => [...a, ...b]));
+/** @returns {{ list: Array<Array<{ text?: string, hole?: string }>>, truncated: boolean }} */
+function expand(node) {
+	if (node?.type === 'Literal' && (typeof node.value === 'string' || typeof node.value === 'number')) return { list: [[{ text: String(node.value) }]], truncated: false };
+	if (constantOf(node) !== undefined) return { list: [[{ text: String(constantOf(node)) }]], truncated: false };
 	if (node?.type === 'TemplateLiteral') {
-		let out = [[]];
+		let list = [[]], truncated = false;
 		node.quasis.forEach((quasi, index) => {
-			out = product(out, [[{ text: quasi.value.cooked ?? '' }]]);
-			if (index < node.expressions.length) out = product(out, variants(node.expressions[index])) ?? product(out, [[{ hole: '<value>' }]]);
+			list = list.map(segments => [...segments, { text: quasi.value.cooked ?? '' }]);
+			if (index >= node.expressions.length) return;
+			const part = expand(node.expressions[index]);
+			truncated ||= part.truncated;
+			const joined = cross(list, part.list);
+			if (joined) list = joined;
+			else { list = cross(list, PLACEHOLDER); truncated = true; }
 		});
-		return out;
+		return { list, truncated };
 	}
 	if (node?.type === 'BinaryExpression' && node.operator === '+' && hasText(node)) {
-		return product(variants(node.left), variants(node.right)) ?? [[{ hole: '<value>' }]];
+		const left = expand(node.left), right = expand(node.right);
+		const joined = cross(left.list, right.list);
+		if (joined) return { list: joined, truncated: left.truncated || right.truncated };
+		// Collapse only the operand that overflows. A chain nests to the left,
+		// so that is the right operand and the text collected so far survives.
+		return right.list.length > 1
+			? { list: cross(left.list, PLACEHOLDER), truncated: true }
+			: { list: cross(PLACEHOLDER, right.list), truncated: true };
 	}
-	if (node?.type === 'ConditionalExpression' && hasText(node)) return [...variants(node.consequent), ...variants(node.alternate)];
-	return [[{ hole: hole(node) }]];
+	if (node?.type === 'ConditionalExpression' && hasText(node)) {
+		const a = expand(node.consequent), b = expand(node.alternate);
+		const list = [...a.list, ...b.list];
+		return list.length > MAX_VARIANTS ? { list: PLACEHOLDER, truncated: true } : { list, truncated: a.truncated || b.truncated };
+	}
+	return { list: [[{ hole: hole(node) }]], truncated: false };
+}
+const hasLiteral = segments => segments.some(segment => segment.text);
+/**
+ * The searchable patterns of one message, and whether they cover every text
+ * it can print. A truncated expansion or a variant with no literal text (for
+ * example `msg + (verbose ? ' (details)' : '')`) leaves the message incomplete.
+ * @returns {{ patterns: string[], complete: boolean }}
+ */
+function messageOf(node) {
+	if (node?.type === 'ConditionalExpression' || isFallback(node)) {
+		const [a, b] = (node.type === 'ConditionalExpression' ? [node.consequent, node.alternate] : [node.left, node.right]).map(messageOf);
+		return { patterns: [...a.patterns, ...b.patterns], complete: a.complete && b.complete };
+	}
+	if (node?.type === 'CallExpression' && node.callee?.name === 'realtimeErrorMessage') {
+		const entry = definition(node);
+		return { patterns: entry ? [entry.messagePrefix] : [], complete: Boolean(entry) };
+	}
+	if (!hasText(node)) return { patterns: [], complete: false };
+	const { list, truncated } = expand(node);
+	return { patterns: [...new Set(list.filter(hasLiteral).map(render))], complete: !truncated && list.every(hasLiteral) };
 }
 function render(segments) {
 	let out = '', previousHole = false;
@@ -111,20 +149,14 @@ function render(segments) {
 	}
 	return out;
 }
-function patterns(node) {
-	if (node?.type === 'ConditionalExpression') return [...patterns(node.consequent), ...patterns(node.alternate)];
-	if (isFallback(node)) return [...patterns(node.left), ...patterns(node.right)];
-	if (node?.type === 'CallExpression' && node.callee?.name === 'realtimeErrorMessage') return [definition(node)?.messagePrefix].filter(Boolean);
-	if (!hasText(node)) return [];
-	return [...new Set(variants(node).filter(segments => segments.some(segment => segment.text)).map(render))];
-}
+const patterns = node => messageOf(node).patterns;
 function complete(node, message = false) {
+	if (message) return messageOf(node).complete;
 	if (node?.type === 'ConditionalExpression' || isFallback(node)) {
 		const [a, b] = node.type === 'ConditionalExpression' ? [node.consequent, node.alternate] : [node.left, node.right];
-		return complete(a, message) && complete(b, message);
+		return complete(a) && complete(b);
 	}
-	if (node?.type === 'CallExpression' && node.callee?.name === (message ? 'realtimeErrorMessage' : 'realtimeErrorCode')) return Boolean(definition(node));
-	if (message) return patterns(node).length > 0;
+	if (node?.type === 'CallExpression' && node.callee?.name === 'realtimeErrorCode') return Boolean(definition(node));
 	return isString(node);
 }
 function properties(node) {
@@ -222,12 +254,80 @@ const anchor = (kind, key) => kind === 'diagnostic' ? kind + '-' + encodeURIComp
 	: kind + '-' + key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const RESOLVABLE_INIT = new Set(['Literal', 'TemplateLiteral', 'ConditionalExpression', 'LogicalExpression', 'BinaryExpression', 'Identifier']);
 
-function consoleMethod(node, unit) {
+const FAILURE_METHODS = new Set(['warn', 'error']);
+const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'global']);
+// `x.warn` and `x['warn']` both name the method.
+const memberName = node => node?.type !== 'MemberExpression' ? undefined
+	: !node.computed && node.property.type === 'Identifier' ? node.property.name
+		: node.computed && node.property.type === 'Literal' && typeof node.property.value === 'string' ? node.property.value : undefined;
+// The binding a name resolves to: its declarator or its parameter.
+const bindingTarget = (name, parents) => {
+	const found = binding(name, parents);
+	return found?.declaration ?? found?.parameter;
+};
+// The global console, or `globalThis.console` and friends, or a local name
+// bound to one of them.
+function consoleObject(node, parents, unit) {
+	if (node?.type === 'Identifier') {
+		if (node.name === 'console' && !binding('console', parents)) return true;
+		return unit.consoleObjects.get(bindingTarget(node.name, parents))?.has(node.name) === true;
+	}
+	return memberName(node) === 'console' && node.object.type === 'Identifier' && GLOBAL_OBJECTS.has(node.object.name);
+}
+// `console.warn`, `console.error.bind(console)` and the qualified spellings.
+function printerOf(node, parents, unit) {
+	const target = node?.type === 'CallExpression' && memberName(node.callee) === 'bind' ? node.callee.object : node;
+	const name = memberName(target);
+	return FAILURE_METHODS.has(name) && consoleObject(target.object, parents, unit) ? name : undefined;
+}
+/**
+ * The console failure method a call prints through, if any. Aliases resolve
+ * through the callee's lexical binding to the declaration or parameter that
+ * bound the printer, never by name alone. What this cannot see: a printer
+ * stored on an object property (`obj.log = console.error`), one passed as an
+ * argument to a parameter with no default, one imported from another module,
+ * and a printer chosen at runtime (`console[level]`).
+ */
+function consoleMethod(node, unit, parents) {
 	if (node.type !== 'CallExpression') return undefined;
 	const callee = node.callee;
-	if (callee?.type === 'MemberExpression' && !callee.computed && callee.object?.name === 'console' && ['warn', 'error'].includes(callee.property?.name)) return 'console.' + callee.property.name;
-	if (callee?.type === 'Identifier' && unit.consoleAliases.has(callee.name)) return 'console.' + unit.consoleAliases.get(callee.name);
+	const name = memberName(callee);
+	if (FAILURE_METHODS.has(name) && consoleObject(callee.object, parents, unit)) return 'console.' + name;
+	if (callee?.type === 'Identifier') {
+		const method = unit.consolePrinters.get(bindingTarget(callee.name, parents))?.get(callee.name);
+		if (method) return 'console.' + method;
+	}
 	return undefined;
+}
+function recordConsoleAliases(unit) {
+	unit.consolePrinters = new Map();
+	unit.consoleObjects = new Map();
+	const add = (map, target, name, value) => {
+		if (!target) return;
+		if (!map.has(target)) map.set(target, new Map());
+		map.get(target).set(name, value);
+	};
+	walk(unit.ast, (node, parents) => {
+		const bind = (id, init, target) => {
+			if (id?.type === 'Identifier') {
+				const method = printerOf(init, parents, unit);
+				if (method) add(unit.consolePrinters, target, id.name, method);
+				else if (consoleObject(init, parents, unit)) add(unit.consoleObjects, target, id.name, true);
+			}
+			if (id?.type === 'ObjectPattern' && consoleObject(init, parents, unit)) {
+				for (const property of id.properties) {
+					const key = property.type === 'Property' ? (property.computed ? memberName({ type: 'MemberExpression', computed: true, property: property.key }) : property.key.name) : undefined;
+					const value = property.value?.type === 'AssignmentPattern' ? property.value.left : property.value;
+					if (FAILURE_METHODS.has(key) && value?.type === 'Identifier') add(unit.consolePrinters, target, value.name, key);
+				}
+			}
+		};
+		if (node.type === 'VariableDeclarator') bind(node.id, node.init, node);
+		if (node.type === 'AssignmentExpression' && node.operator === '=' && node.left.type === 'Identifier') bind(node.left, node.right, bindingTarget(node.left.name, parents));
+		if (node.type === 'AssignmentPattern' && node.left.type === 'Identifier' && FUNCTION_TYPES.has(parents.at(-1)?.type)) {
+			bind(node.left, node.right, bindingTarget(node.left.name, [...parents]));
+		}
+	});
 }
 function prepare({ path, source }) {
 	const ast = parse(source, { sourceType: 'module', ecmaVersion: 'latest' });
@@ -240,30 +340,7 @@ function prepare({ path, source }) {
 			if (declaration.id.type === 'Identifier' && init?.type === 'Literal' && ['string', 'number'].includes(typeof init.value)) unit.constants.set(declaration.id.name, init.value);
 		}
 	}
-	// Console printers bound to a local name: `const warn = console.warn`,
-	// `console.error.bind(console)` and `const { warn } = console`. Matched by
-	// name across the file, so a false positive is possible, a missed alias is not.
-	unit.consoleAliases = new Map();
-	const printer = node => {
-		const target = node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.property.name === 'bind' ? node.callee.object : node;
-		return target?.type === 'MemberExpression' && !target.computed && target.object.type === 'Identifier' && target.object.name === 'console' &&
-			['warn', 'error'].includes(target.property.name) ? target.property.name : undefined;
-	};
-	walk(ast, (node) => {
-		const bind = (id, init) => {
-			if (id?.type === 'Identifier' && printer(init)) unit.consoleAliases.set(id.name, printer(init));
-			if (id?.type === 'ObjectPattern' && init?.type === 'Identifier' && init.name === 'console') {
-				for (const property of id.properties) {
-					const key = property.type === 'Property' && !property.computed ? property.key.name : undefined;
-					const value = property.value?.type === 'AssignmentPattern' ? property.value.left : property.value;
-					if (['warn', 'error'].includes(key) && value?.type === 'Identifier') unit.consoleAliases.set(value.name, key);
-				}
-			}
-		};
-		if (node.type === 'VariableDeclarator') bind(node.id, node.init);
-		if (node.type === 'AssignmentExpression' && node.operator === '=') bind(node.left, node.right);
-		if (node.type === 'AssignmentPattern') bind(node.left, node.right);
-	});
+	recordConsoleAliases(unit);
 	walk(ast, (node, parents) => {
 		if (node.type === 'CallExpression' && node.callee.type === 'Identifier') unit.calls.push({ call: node, parents });
 		if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && !node.callee.computed && node.callee.property.type === 'Identifier') unit.methodCalls.push({ call: node, parents });
@@ -427,7 +504,7 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 					}
 				}
 			}
-			const method = consoleMethod(node, unit);
+			const method = consoleMethod(node, unit, parents);
 			if (method) {
 				const first = local(node.arguments[0]);
 				const message = patterns(first);

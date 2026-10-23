@@ -561,7 +561,7 @@ export function _hideNonCodeExports(source, file) {
 			if (decl && !_warnedExports.has(key)) {
 				_warnedExports.add(key);
 				console.warn(
-					`[svelte-realtime] ${file ? file + ': ' : ''}'${decl[1]}' looks like a live export but is read as text inside a string or template, so it gets no client stub. ` +
+					`[svelte-realtime] ${file}: '${decl[1]}' looks like a live export but is read as text inside a string or template, so it gets no client stub. ` +
 					`If it is a real export, look above it for an unbalanced quote or backtick.`
 				);
 			}
