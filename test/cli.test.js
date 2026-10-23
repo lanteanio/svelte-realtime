@@ -16,7 +16,8 @@ import {
 	SCAFFOLD_EXTENSIONS_SPEC,
 	SCAFFOLD_REALTIME_SPEC,
 	SCAFFOLD_SV_SPEC,
-	SCAFFOLD_UWS_SPEC
+	SCAFFOLD_UWS_SPEC,
+	withoutAdapterAuto
 } from '../src/cli-utils.js';
 
 const _here = dirname(fileURLToPath(import.meta.url));
@@ -192,6 +193,23 @@ describe('newcomer scaffold contract', () => {
 		expect(config).toContain('uws()');
 		expect(config).toContain('realtime()');
 		expect(_cliSrc).toContain("rmSync(join(dest, 'svelte.config.js'), { force: true })");
+	});
+
+	it('drops adapter-auto from the generated manifest and keeps everything else', () => {
+		const generated = {
+			name: 'fresh-app',
+			devDependencies: { '@sveltejs/adapter-auto': '^7.0.0', '@sveltejs/kit': '^3.0.0', vite: '^8.0.0' },
+			dependencies: { '@sveltejs/adapter-auto': '^7.0.0', svelte: '^5.0.0' }
+		};
+		const cleaned = withoutAdapterAuto(generated);
+		expect(cleaned).toEqual({
+			name: 'fresh-app',
+			devDependencies: { '@sveltejs/kit': '^3.0.0', vite: '^8.0.0' },
+			dependencies: { svelte: '^5.0.0' }
+		});
+		expect(generated.devDependencies['@sveltejs/adapter-auto']).toBe('^7.0.0');
+		expect(withoutAdapterAuto({ name: 'bare' })).toEqual({ name: 'bare' });
+		expect(_cliSrc).toContain('withoutAdapterAuto(JSON.parse(readFileSync(manifestPath');
 	});
 
 	it('executes preflight and build in order through the injected real runner contract', () => {

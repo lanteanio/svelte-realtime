@@ -25,6 +25,22 @@ export const SCAFFOLD_AUTH_WARNING = Object.freeze({
 		'Every connection receives a random UUID. Replace upgrade() in src/hooks.ws.ts and delete SCAFFOLD_PLACEHOLDER before deployment.'
 });
 
+/**
+ * The generated configuration uses svelte-adapter-uws only, so drop the
+ * adapter-auto entry `sv create` lists. Other entries keep their order.
+ * @param {any} manifest - Parsed package.json of the generated project
+ * @returns {any}
+ */
+export function withoutAdapterAuto(manifest) {
+	const next = { ...manifest };
+	for (const field of ['dependencies', 'devDependencies']) {
+		if (!next[field] || !('@sveltejs/adapter-auto' in next[field])) continue;
+		next[field] = { ...next[field] };
+		delete next[field]['@sveltejs/adapter-auto'];
+	}
+	return next;
+}
+
 export function formatScaffoldAuthWarning() {
 	const warning = SCAFFOLD_AUTH_WARNING;
 	return '[' + warning.code + '] ' + warning.title + ': ' + warning.body;

@@ -22,7 +22,8 @@ const {
 	SCAFFOLD_REALTIME_SPEC,
 	SCAFFOLD_SV_SPEC,
 	SCAFFOLD_UWS_SPEC,
-	VALID_NAME_RE
+	VALID_NAME_RE,
+	withoutAdapterAuto
 } = await import('./cli-utils.js');
 
 const IS_WIN = process.platform === 'win32';
@@ -173,10 +174,7 @@ if (template !== 'demo') {
 	run(bin('npx'), ['-y', SCAFFOLD_SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 	// The generated configuration below uses the native adapter exclusively.
 	const manifestPath = join(dest, 'package.json');
-	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-	delete manifest.dependencies?.['@sveltejs/adapter-auto'];
-	delete manifest.devDependencies?.['@sveltejs/adapter-auto'];
-	writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+	writeFileSync(manifestPath, JSON.stringify(withoutAdapterAuto(JSON.parse(readFileSync(manifestPath, 'utf8'))), null, 2) + '\n');
 
 	p.log.step('Installing dependencies');
 	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
