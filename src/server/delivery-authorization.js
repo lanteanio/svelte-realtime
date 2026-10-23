@@ -17,8 +17,8 @@ import { formatDiagnostic } from '../shared/diagnostic.js';
 /**
  * @typedef {{ rpc: string, args: readonly unknown[], copy: boolean, confirmed: boolean, token: object | null }} Admission
  * @typedef {{ live: Map<string, Admission>, retired: Map<string, Admission>, inflight: Map<string, number> }} SocketAdmissions
- * @typedef {{ authorize: (ctx: any, delivery: any) => unknown, options: any, installed: boolean }} DeliveryPolicy
- * @typedef {{ policy: DeliveryPolicy }} Installation
+ * @typedef {{ authorize: (ctx: any, delivery: any) => unknown, options: any }} DeliveryPolicy
+ * @typedef {{ options: any }} Installation
  */
 
 /** @type {WeakMap<object, SocketAdmissions>} */
@@ -30,11 +30,14 @@ const resolved = new WeakMap();
 /** Whether a policy is configured or installed in this process; keeps every other path free. */
 let anyConfigured = false;
 /**
- * The process's policy record. Installed platforms call it through a stable
- * trampoline, so a later realtime() call (a dev reload of hooks.ws) replaces
- * the policy in place. @type {DeliveryPolicy | null}
+ * The policy record whose hooks the adapter ran last. Installed platforms
+ * call it through a stable trampoline, so a reloaded hooks.ws takes over in
+ * place once the adapter runs its hooks. This assumes one instance of this
+ * module per process (one realtime module graph); a second copy would keep
+ * its own active record and could not reach a platform the first installed.
+ * @type {DeliveryPolicy | null}
  */
-let currentPolicy = null;
+let activePolicy = null;
 /** Platforms that already logged each diagnostic. @type {WeakSet<object>} */
 const reportedUnavailable = new WeakSet();
 /** @type {WeakSet<object>} */
@@ -191,12 +194,9 @@ function _sameOptions(a, b) {
 }
 
 /**
- * Validate and register the policy of one realtime() call. The adapter holds
- * one policy per worker; every realtime() call with a policy shares one
- * record, and the latest call's function decides from then on, so reloading
- * hooks.ws in dev swaps the policy without reinstalling it. Options are fixed
- * once installed: a call with different options throws. A call without a
- * policy leaves the record in place. Returns the record, or null.
+ * Validate the policy of one realtime() call and return its own record, or
+ * null without one. Creating a record never changes the active policy; the
+ * hooks of the call activate it when the adapter runs them.
  * @param {unknown} authorize
  * @param {unknown} options
  * @returns {DeliveryPolicy | null}
@@ -204,18 +204,12 @@ function _sameOptions(a, b) {
 export function configureDeliveryAuthorization(authorize, options) {
 	validateDeliveryAuthorizationConfig(authorize, options);
 	if (authorize === undefined) return null;
-	if (currentPolicy === null) {
-		currentPolicy = { authorize: /** @type {any} */ (authorize), options, installed: false };
-		anyConfigured = true;
-		return currentPolicy;
-	}
-	if (currentPolicy.installed && !_sameOptions(currentPolicy.options, options)) {
-		throw new Error('[svelte-realtime] realtime({ deliveryAuthorizationOptions }): the installed delivery policy has different options; restart the server to change them');
-	}
-	currentPolicy.authorize = /** @type {any} */ (authorize);
-	currentPolicy.options = options;
-	return currentPolicy;
+	anyConfigured = true;
+	return { authorize: /** @type {any} */ (authorize), options };
 }
+
+/** @type {(ctx: any, delivery: any) => unknown} */
+const _trampoline = (ctx, delivery) => /** @type {DeliveryPolicy} */ (activePolicy).authorize(ctx, delivery);
 
 /**
  * The platform object that owns `authorizeDelivery`: the adapter hands hooks
@@ -253,21 +247,43 @@ export function abandonDeliveryAuthorization(platform) {
 }
 
 /**
- * Install the policy record on this platform unless it already runs it.
- * Throws when the adapter lacks the capability.
+ * Make a record the active policy, because the adapter ran its hooks, and
+ * install the trampoline on this platform unless it already has it. Throws
+ * when the adapter lacks the capability, or when the platform was installed
+ * with other options (the adapter's bounds are fixed once installed).
  * @param {any} platform
  * @param {DeliveryPolicy} policy
- * @returns {Installation}
+ * @returns {{ installedNow: boolean }}
  */
 export function ensureDeliveryAuthorization(platform, policy) {
 	const existing = _installationOf(platform);
-	if (existing !== undefined) return existing;
+	if (existing !== undefined && !_sameOptions(existing.options, policy.options)) {
+		throw new Error('[svelte-realtime] realtime({ deliveryAuthorizationOptions }): the installed delivery policy has different options; restart the server to change them');
+	}
+	if (existing === undefined) {
+		const owner = _owner(platform);
+		// Refuse an adapter without the capability before the record becomes active.
+		_requireCapability(owner);
+	}
+	if (activePolicy !== policy) {
+		const replaced = activePolicy !== null;
+		activePolicy = policy;
+		if (replaced) {
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.delivery-authorization',
+				event: 'delivery-authorization.replaced',
+				severity: 'warn',
+				message: 'The active delivery policy changed to the realtime() call whose hooks the adapter ran.',
+				attributes: {}
+			}));
+		}
+	}
+	if (existing !== undefined) return { installedNow: false };
 	const owner = _owner(platform);
-	installDeliveryAuthorization(owner, (ctx, delivery) => policy.authorize(ctx, delivery), policy.options);
-	policy.installed = true;
-	const installation = { policy };
-	installations.set(owner, installation);
-	return installation;
+	installDeliveryAuthorization(owner, _trampoline, policy.options);
+	installations.set(owner, { options: policy.options });
+	return { installedNow: true };
 }
 
 /** @param {any} ws */
@@ -276,12 +292,12 @@ function _end(ws) {
 }
 
 /**
- * Connection-level capture point used by every realtime() hook. Installs the
- * policy when init did not. Ends with 1011, before realtime serves it, a
- * connection the policy cannot cover: the adapter lacks the capability, or
- * the connection's own non-open hook is what installed the policy, so it was
- * open before any policy existed. Connections first seen after the policy
- * was installed are covered.
+ * Connection-level capture point used by every realtime() hook. Activates
+ * this call's policy and installs it when init did not. Ends with 1011,
+ * before realtime serves it, a connection the policy cannot be installed
+ * for. When a non-open hook performs the install, the connection was open
+ * before any policy existed: it is served, and an `unguarded` diagnostic is
+ * logged once per platform.
  * @param {any} ws
  * @param {any} platform
  * @param {DeliveryPolicy} policy
@@ -289,9 +305,10 @@ function _end(ws) {
  * @returns {boolean} whether the connection may be served
  */
 export function guardDeliveryAuthorization(ws, platform, policy, opening) {
-	if (platform && _installationOf(platform) !== undefined) return true;
+	if (activePolicy === policy && platform && _installationOf(platform) !== undefined) return true;
+	let installedNow;
 	try {
-		ensureDeliveryAuthorization(platform, policy);
+		({ installedNow } = ensureDeliveryAuthorization(platform, policy));
 	} catch (error) {
 		const key = platform ? _owner(platform) : reportedUnavailable;
 		if (!reportedUnavailable.has(key)) {
@@ -308,7 +325,7 @@ export function guardDeliveryAuthorization(ws, platform, policy, opening) {
 		_end(ws);
 		return false;
 	}
-	if (opening) return true;
+	if (!installedNow || opening) return true;
 	const key = _owner(platform);
 	if (!reportedUnguarded.has(key)) {
 		reportedUnguarded.add(key);
@@ -317,12 +334,11 @@ export function guardDeliveryAuthorization(ws, platform, policy, opening) {
 			component: 'server.delivery-authorization',
 			event: 'delivery-authorization.unguarded',
 			severity: 'error',
-			message: 'A connection reached realtime before its delivery policy was installed; export init or open from realtime(). The connection is closed.',
-			attributes: { closeCode: 1011 }
+			message: 'A connection reached realtime before its delivery policy was installed; export init or open from realtime().',
+			attributes: {}
 		}));
 	}
-	_end(ws);
-	return false;
+	return true;
 }
 
 /** @param {object} ws */
@@ -429,6 +445,16 @@ function _isStreamReply(reply) {
 	return reply !== null && typeof reply === 'object' && reply.ok === true && reply.attach !== true && typeof reply.topic === 'string';
 }
 
+/** @param {any} platform */
+function _requireCapability(platform) {
+	if (typeof platform?.authorizeDelivery !== 'function') {
+		throw new Error(
+			'[svelte-realtime] realtime({ authorizeDelivery }): the installed svelte-adapter-uws has no platform.authorizeDelivery. ' +
+			'Upgrade svelte-adapter-uws to 0.6.0-next.97 or newer, or remove authorizeDelivery.'
+		);
+	}
+}
+
 /**
  * Install the adapter's per-recipient delivery gate. Refuses an adapter
  * without the capability instead of falling back to a publish wrapper that
@@ -439,12 +465,7 @@ function _isStreamReply(reply) {
  */
 export function installDeliveryAuthorization(platform, authorize, options) {
 	validateDeliveryAuthorizationConfig(authorize, options);
-	if (typeof platform?.authorizeDelivery !== 'function') {
-		throw new Error(
-			'[svelte-realtime] realtime({ authorizeDelivery }): the installed svelte-adapter-uws has no platform.authorizeDelivery. ' +
-			'Upgrade svelte-adapter-uws to 0.6.0-next.97 or newer, or remove authorizeDelivery.'
-		);
-	}
+	_requireCapability(platform);
 	const helpers = _getCtxHelpers(platform);
 	platform.authorizeDelivery((/** @type {any} */ ws, /** @type {any} */ frame) => {
 		const kind = frame.kind;

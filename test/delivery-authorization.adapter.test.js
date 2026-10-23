@@ -33,13 +33,16 @@ afterEach(async () => {
 
 /** @param {(ctx: any, delivery: any) => any} [authorize] @param {any} [options] */
 async function start(authorize = policy, options, { init = true, open = true } = {}) {
-	const hooks = api.realtime({ authorizeDelivery: authorize, ...(options ? { deliveryAuthorizationOptions: options } : {}) });
+	// The handler delegates to the current hooks, the way the dev server
+	// runs a reloaded hooks.ws module for later events.
+	let hooks = api.realtime({ authorizeDelivery: authorize, ...(options ? { deliveryAuthorizationOptions: options } : {}) });
 	const ids = [];
 	const sockets = new Map();
-	const { init: initHook, ...rest } = hooks;
 	server = await createTestServer({ handler: {
-		...rest,
-		...(init ? { init: initHook } : {}),
+		...(init ? { init: (ctx) => hooks.init(ctx) } : {}),
+		message: (ws, ctx) => hooks.message(ws, ctx),
+		close: (ws, ctx) => hooks.close(ws, ctx),
+		unsubscribe: (ws, topic, ctx) => hooks.unsubscribe(ws, topic, ctx),
 		open(ws, ctx) {
 			const id = ids.shift();
 			ws.getUserData().id = id;
@@ -49,6 +52,8 @@ async function start(authorize = policy, options, { init = true, open = true } =
 	} });
 	return {
 		sockets,
+		/** @param {any} next */
+		reload(next) { hooks = next; },
 		/** @param {string} id */
 		async connect(id) {
 			ids.push(id);
@@ -81,13 +86,22 @@ async function subscribe(client, eventId) {
 }
 
 describe('delivery authorization on any adapter', () => {
-	it('closes a connection with 1011 when the app exports neither init nor open', async () => {
+	it('installs from the first message when the app exports neither init nor open', async () => {
 		const { connect } = await start(policy, undefined, { init: false, open: false });
 		grant('victim', 'e8');
 		const client = await connect('victim');
 		client.ws.send(JSON.stringify({ rpc: 'scan/log', id: 'unguarded', args: ['e8'], stream: true }));
-		await vi.waitFor(() => expect(client.closeCode).toBe(1011));
-		expect(client.frames.some((frame) => frame.event === 'unguarded')).toBe(false);
+		if (!NATIVE) {
+			await vi.waitFor(() => expect(client.closeCode).toBe(1011));
+			expect(client.frames.some((frame) => frame.event === 'unguarded')).toBe(false);
+			return;
+		}
+		await vi.waitFor(() => expect(client.frames.some((frame) => frame.event === 'unguarded' && frame.data?.ok === true)).toBe(true));
+		expect(client.closeCode).toBeNull();
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.unguarded'));
+		revoke('victim');
+		server.platform.publish('scans:e8', 'created', { id: 'unguarded-after' });
+		await vi.waitFor(() => expect(client.closeCode).toBe(REFUSED));
 	});
 
 	it('keeps the first policy when a later realtime() call configures none', async () => {
@@ -248,8 +262,8 @@ describe.skipIf(!NATIVE)('delivery authorization on the adapter policy (requires
 	});
 
 	it('lets a later realtime() call replace the running policy, as a dev reload does', async () => {
-		const { connect } = await start(() => true);
-		api.realtime({ authorizeDelivery: policy });
+		const { connect, reload } = await start(() => true);
+		reload(api.realtime({ authorizeDelivery: policy }));
 		grant('victim', 'e9');
 		const victim = await connect('victim');
 		await subscribe(victim, 'e9');
@@ -257,6 +271,19 @@ describe.skipIf(!NATIVE)('delivery authorization on the adapter policy (requires
 		server.platform.publish('scans:e9', 'created', { id: 'reloaded-after' });
 		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
 		expect(has(victim, 'reloaded-after')).toBe(false);
+		expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.replaced'));
+	});
+
+	it('keeps deciding with the running policy when another realtime() call is never mounted', async () => {
+		const { connect } = await start();
+		api.realtime({ authorizeDelivery: () => true });
+		grant('victim', 'e10');
+		const victim = await connect('victim');
+		await subscribe(victim, 'e10');
+		revoke('victim');
+		server.platform.publish('scans:e10', 'created', { id: 'unmounted-after' });
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(has(victim, 'unmounted-after')).toBe(false);
 	});
 
 	it('passes the adapter its own option validation', async () => {

@@ -15,19 +15,23 @@ without `init` the policy is installed by the first connection's `open` hook.
 If it cannot be installed, every connection is closed with 1011 and a
 `delivery-authorization.unavailable` error is logged once. When neither
 `init` nor `open` is exported, the first connection to reach realtime's
-`message`, `unsubscribe` or `close` hook installs the policy; that
-connection was open before any policy existed, so it is closed with 1011 and a
-`delivery-authorization.unguarded` error is logged once. Connections first seen
-after the install are covered. Frames the adapter sends to a connection before
+`message`, `unsubscribe` or `close` hook installs the policy. That connection
+was open before any policy existed and may already have received unchecked
+frames; it is served, and a `delivery-authorization.unguarded` error is logged
+once. Every frame after the install is checked. Frames the adapter sends to a connection before
 its first realtime hook (for example after a client subscribe frame) are
 checked only once the policy is installed, and without `init` the strict
 wire-subscribe check is armed at that point too: export `init`.
 
-The adapter runs one policy per worker. A later `realtime()` call with a
-policy replaces the function in place (a dev reload of `hooks.ws` does this),
-without reinstalling it; once installed, a call with different
-`deliveryAuthorizationOptions` throws, because the adapter's bounds are fixed.
-A `realtime()` call without `authorizeDelivery` leaves the policy in place.
+The adapter runs one policy per worker, and the hooks the adapter runs
+decide which one: the policy of the `realtime()` call whose `init`, `open`,
+`message`, `unsubscribe` or `close` hook ran last is active. A dev reload of
+`hooks.ws` therefore switches to the new policy without reinstalling it, and a
+`realtime()` call whose hooks are never mounted changes nothing. Each switch
+logs a `delivery-authorization.replaced` warning. The adapter's bounds are
+fixed once installed: hooks of a call with different
+`deliveryAuthorizationOptions` throw in `init` and close connections with 1011
+elsewhere.
 Without the option, nothing changes: subscription admission and native
 delivery behave as before.
 

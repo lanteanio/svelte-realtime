@@ -4471,7 +4471,7 @@ export function realtime(config) {
 	};
 	if (deliveryPolicy !== null) {
 		// Without init, the first connection hook installs the policy. open and
-		// message refuse to serve a connection the policy cannot cover;
+		// message refuse to serve a connection the policy cannot be installed for;
 		// unsubscribe and close still run their cleanup after closing it.
 		const policy = deliveryPolicy;
 		hooks.open = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform, policy, true)) return pushHooks.open(ws, ctx); };

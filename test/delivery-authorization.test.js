@@ -244,23 +244,55 @@ describe('delivery authorization configuration across realtime() calls', () => {
 	}
 	const socket = () => ({ ...mockWs({ id: 'scanner' }), ended: null, end(code) { this.ended = code; } });
 
-	it('lets the latest realtime() call replace the policy in place, as a dev reload does', async () => {
+	it('switches to a realtime() call only when the adapter runs its hooks', async () => {
 		vi.resetModules();
 		const api = await import('../src/server.js');
 		const seen = [];
+		const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		const hooks = api.realtime({ authorizeDelivery: () => { seen.push('first'); return true; }, authorizeWireSubscribe: false });
 		const platform = adapterPlatform();
 		hooks.init({ platform });
+		const frame = { kind: 'message', topic: 'scans:e1', event: 'e', data: null, binary: false };
+		// Another call that is never mounted changes nothing.
 		const reloaded = api.realtime({ authorizeDelivery: () => { seen.push('second'); return false; }, authorizeWireSubscribe: false });
 		api.realtime({ authorizeWireSubscribe: false });
-		// The reloaded hooks run against the same platform without reinstalling.
+		expect(platform.gate(socket(), frame)).toBe(true);
+		expect(warnings).not.toHaveBeenCalled();
+		// Running its hooks, as a reloaded hooks.ws does, switches without reinstalling.
 		const ws = socket();
 		reloaded.open(ws, { platform: Object.create(platform) });
 		expect(ws.ended).toBeNull();
 		expect(platform.installs).toBe(1);
-		expect(platform.gate(socket(), { kind: 'message', topic: 'scans:e1', event: 'e', data: null, binary: false })).toBe(false);
-		expect(seen).toEqual(['second']);
-		expect(() => api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { timeoutMs: 10 } })).toThrow('different options');
+		expect(platform.gate(socket(), frame)).toBe(false);
+		expect(seen).toEqual(['first', 'second']);
+		expect(warnings).toHaveBeenCalledTimes(1);
+		expect(warnings).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.replaced'));
+		// The first call's hooks switch back.
+		hooks.message(socket(), { platform: Object.create(platform), data: new ArrayBuffer(0) });
+		expect(platform.gate(socket(), frame)).toBe(true);
+		expect(warnings).toHaveBeenCalledTimes(2);
+		warnings.mockRestore();
+	});
+
+	it('installs with the options of the call whose hooks ran first and refuses other options afterwards', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const early = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { timeoutMs: 10 }, authorizeWireSubscribe: false });
+		const mounted = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { timeoutMs: 20 }, authorizeWireSubscribe: false });
+		const platform = adapterPlatform();
+		let installedOptions;
+		platform.authorizeDelivery = (callback, options) => { platform.installs++; platform.gate = callback; installedOptions = options; };
+		mounted.init({ platform });
+		expect(installedOptions).toEqual({ timeoutMs: 20 });
+		const ws = socket();
+		early.open(ws, { platform: Object.create(platform) });
+		expect(ws.ended).toBe(1011);
+		expect(platform.installs).toBe(1);
+		expect(() => early.init({ platform })).toThrow('different options');
+		errors.mockRestore();
+		warnings.mockRestore();
 	});
 
 	it('serves connections first seen after an init that installed while connections were open', async () => {
@@ -274,7 +306,7 @@ describe('delivery authorization configuration across realtime() calls', () => {
 		expect(ws.ended).toBeNull();
 	});
 
-	it('installs from close and unsubscribe hooks and closes the connection that was open before the install', async () => {
+	it('installs from close and unsubscribe hooks and serves the connection that was open before the install', async () => {
 		vi.resetModules();
 		const api = await import('../src/server.js');
 		const hooks = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
@@ -284,7 +316,7 @@ describe('delivery authorization configuration across realtime() calls', () => {
 		const stranger = socket();
 		hooks.unsubscribe(stranger, 'scans:e1', { platform: view });
 		expect(platform.installs).toBe(1);
-		expect(stranger.ended).toBe(1011);
+		expect(stranger.ended).toBeNull();
 		// Connections first seen after the install are covered.
 		const late = socket();
 		hooks.message(late, { platform: view, data: new ArrayBuffer(0) });
