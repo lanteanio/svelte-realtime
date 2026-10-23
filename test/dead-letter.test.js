@@ -17,7 +17,6 @@ import {
 import { monotonicNow, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
 import { state, _webhookOutById } from '../src/server/state.js';
-import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 
 const adminFor = (requires) => /** @type {any} */ (realtime({ admin: { requires } })).admin;
 
