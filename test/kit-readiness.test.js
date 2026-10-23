@@ -29,7 +29,7 @@ describe('Kit fixture readiness ownership', () => {
 			});
 		} finally { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); }
 	});
-	async function identityServer(respond) {
+	async function identityServer(respond, port = 0) {
 		const requests = [];
 		const server = createHttpServer((req, res) => {
 			requests.push(req.url);
@@ -37,7 +37,7 @@ describe('Kit fixture readiness ownership', () => {
 			res.writeHead(body ? 200 : 404, { 'content-type': 'application/json' });
 			res.end(JSON.stringify(body ?? {}));
 		});
-		server.listen(0, '127.0.0.1');
+		server.listen(port, '127.0.0.1');
 		await once(server, 'listening');
 		return { origin: 'http://127.0.0.1:' + server.address().port, requests, close: () => new Promise(resolve => server.close(resolve)) };
 	}
@@ -60,6 +60,30 @@ describe('Kit fixture readiness ownership', () => {
 			try {
 				await waitForFixture({ child, origin: server.origin, token, timeoutMs: 1000 });
 				expect(server.requests).toEqual(['/readiness']);
+			} finally { await server.close(); }
+		});
+	});
+	it('keeps waiting through a refused port and a listener that closes, until the fixture binds', async () => {
+		// Vite 8 listens on the port for a moment to check that it is free, then
+		// initializes before it binds for real.
+		await pendingChild(async child => {
+			const token = randomUUID();
+			const probe = createServer(socket => socket.destroy());
+			probe.listen(0, '127.0.0.1');
+			await once(probe, 'listening');
+			const port = probe.address().port;
+			await new Promise(resolve => probe.close(resolve));
+			const waiting = waitForFixture({ child, origin: 'http://127.0.0.1:' + port, token, timeoutMs: 10000 });
+			await new Promise(resolve => setTimeout(resolve, 200));
+			const check = createServer(socket => socket.destroy());
+			check.listen(port, '127.0.0.1');
+			await once(check, 'listening');
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await new Promise(resolve => check.close(resolve));
+			const server = await identityServer(req => req.url === '/readiness' ? { pid: child.pid, token } : null, port);
+			try {
+				await waiting;
+				expect(server.requests.at(-1)).toBe('/readiness');
 			} finally { await server.close(); }
 		});
 	});
