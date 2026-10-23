@@ -14,7 +14,8 @@ import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE,
  * @returns {string}
  */
 export function _generateClientStubs(filePath, modulePath, dir, reconcileIntervalMs) {
-	const source = _liveSource(_readCached(filePath), `${dir}/${modulePath}`);
+	// Declarations are found in `scan` and read from `source` (see _liveSource).
+	const { scan, text: source, publicMarked } = _liveSource(_readCached(filePath), `${dir}/${modulePath}`);
 
 	/** @type {string[]} */
 	const lines = [];
@@ -45,8 +46,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// alongside the `// realtime-allow-public` comment to suppress the
 	// "no _guard" build-time warning.
 	let hasPublicExport = false;
-	PUBLIC_EXPORT_RE.lastIndex = 0;
-	if (PUBLIC_EXPORT_RE.exec(source) !== null) {
+	if (publicMarked) {
 		hasPublicExport = true;
 	}
 	const hasPublicComment = PUBLIC_COMMENT_RE.test(source);
@@ -54,7 +54,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// (validated/lock/idempotent/rateLimit/public) all emit the same __rpc line.
 	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, PUBLIC_EXPORT_RE, VOLATILE_EXPORT_RE]) {
 		re.lastIndex = 0;
-		while ((match = re.exec(source)) !== null) {
+		while ((match = re.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (exportedNames.has(name)) continue;
@@ -66,7 +66,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect live.stream() exports - check for dynamic vs static topic
 	STREAM_EXPORT_RE.lastIndex = 0;
-	while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
+	while ((match = STREAM_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		exportedNames.add(name);
@@ -85,7 +85,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect live.channel() exports - treated as streams on the client
 	CHANNEL_EXPORT_RE.lastIndex = 0;
-	while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
+	while ((match = CHANNEL_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -103,13 +103,13 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect guard
 	GUARD_EXPORT_RE.lastIndex = 0;
-	if (GUARD_EXPORT_RE.exec(source) !== null) {
+	if (GUARD_EXPORT_RE.exec(scan) !== null) {
 		hasGuard = true;
 	}
 
 	// Detect live.binary() exports
 	BINARY_EXPORT_RE.lastIndex = 0;
-	while ((match = BINARY_EXPORT_RE.exec(source)) !== null) {
+	while ((match = BINARY_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -121,7 +121,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect live.upload() exports
 	UPLOAD_EXPORT_RE.lastIndex = 0;
-	while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+	while ((match = UPLOAD_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -133,7 +133,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect live.derived() exports (treated as streams on the client)
 	DERIVED_EXPORT_RE.lastIndex = 0;
-	while ((match = DERIVED_EXPORT_RE.exec(source)) !== null) {
+	while ((match = DERIVED_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -157,7 +157,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// subpath. Runs before the room/multiplayer loops and claims the name.
 	let smoothRuntimeImported = false;
 	SMOOTH_EXPORT_RE.lastIndex = 0;
-	while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+	while ((match = SMOOTH_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -208,7 +208,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// room/multiplayer loops and claims the name.
 	let docRuntimeImported = false;
 	DOC_EXPORT_RE.lastIndex = 0;
-	while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+	while ((match = DOC_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		const kind = match[2];
 		if (!/^\w+$/.test(name)) continue;
@@ -250,7 +250,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// duplicate import declaration.
 	let mpRuntimeImported = false;
 	MULTIPLAYER_EXPORT_RE.lastIndex = 0;
-	while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+	while ((match = MULTIPLAYER_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -414,7 +414,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// (and the lobby-browser `rooms()` view when the room opts into enumeration).
 	let roomsRuntimeImported = false;
 	ROOM_EXPORT_RE.lastIndex = 0;
-	while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+	while ((match = ROOM_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -459,26 +459,26 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// flat live.webhook(), live.webhooks.inbound(), and live.webhooks.outbound().
 	for (const re of [WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE]) {
 		re.lastIndex = 0;
-		while ((match = re.exec(source)) !== null) {
+		while ((match = re.exec(scan)) !== null) {
 			exportedNames.add(match[1]);
 		}
 	}
 
 	// Mark cron exports as known (they are server-only, no client stub needed)
 	CRON_EXPORT_RE.lastIndex = 0;
-	while ((match = CRON_EXPORT_RE.exec(source)) !== null) {
+	while ((match = CRON_EXPORT_RE.exec(scan)) !== null) {
 		exportedNames.add(match[1]);
 	}
 
 	// Mark effect exports as known (server-only, no client stub needed)
 	EFFECT_EXPORT_RE.lastIndex = 0;
-	while ((match = EFFECT_EXPORT_RE.exec(source)) !== null) {
+	while ((match = EFFECT_EXPORT_RE.exec(scan)) !== null) {
 		exportedNames.add(match[1]);
 	}
 
 	// Detect live.aggregate() exports (treated as streams on the client)
 	AGGREGATE_EXPORT_RE.lastIndex = 0;
-	while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+	while ((match = AGGREGATE_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -506,7 +506,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 
 	// Detect live.flag() exports (readable set-merge stream on the client)
 	FLAG_EXPORT_RE.lastIndex = 0;
-	while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+	while ((match = FLAG_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -519,7 +519,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// Dev warnings for non-live exports
 	const allExportRe = /export\s+(?:const|function|let|var|class)\s+(\w+)/g;
 	allExportRe.lastIndex = 0;
-	while ((match = allExportRe.exec(source)) !== null) {
+	while ((match = allExportRe.exec(scan)) !== null) {
 		const name = match[1];
 		if (name === '_guard' || exportedNames.has(name)) continue;
 		if (name.startsWith('_')) {
@@ -535,13 +535,13 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	}
 
 	// Warn about exports with non-path-safe names
-	_warnUnsafeExports(source, `${dir}/${modulePath}`, exportedNames);
+	_warnUnsafeExports(scan, `${dir}/${modulePath}`, exportedNames);
 
 	if (exportedNames.size === 0 && !hasGuard) {
 		// Only warn "no live exports" if the file truly has none --
 		// don't emit this when exports exist but were skipped due to invalid names
 		// (those already got their own warning from _warnUnsafeExports).
-		const hasAnyLiveExport = /export\s+const\s+[\w$]+\s*=\s*live[\s.(]/g.test(source);
+		const hasAnyLiveExport = /export\s+const\s+[\w$]+\s*=\s*live[\s.(]/g.test(scan);
 		if (!hasAnyLiveExport) {
 			console.warn(
 				`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports\n  See: https://svti.me/start`

@@ -111,4 +111,55 @@ describe('commented and quoted live exports', () => {
 		}
 		expect(warns.some((w) => w.includes('_guard'))).toBe(false);
 	});
+
+	it('reads values that contain the word export as written', () => {
+		setup({
+			'values.js': [
+				"import { live, guard } from 'svelte-realtime/server';",
+				'export const _guard = guard(() => {});',
+				"export const features = live.flag('features:export', false);",
+				// Declaration-shaped text inside a value: found in the scan view,
+				// read from the source as written.
+				"export const odd = live.flag('export default', 0);",
+				"export const rows = live.stream('rows', async () => [], { key: 'export', merge: 'crud' });",
+				'export const label = live(async (ctx, o) => `${o.export} export ${`export const x = 1`}`);',
+				''
+			].join('\n'),
+			'typed.ts': [
+				"import { live, guard } from 'svelte-realtime/server';",
+				'export const _guard = guard(() => {});',
+				"export const mode = live(async (ctx): Promise<'export' | 'import'> => 'export');",
+				''
+			].join('\n')
+		});
+		const plugin = createPlugin();
+		const client = code(plugin.load('\0live:values', { ssr: false }));
+		const registry = code(plugin.load('\0live:__registry', { ssr: true }));
+		const dts = _generateTypeDeclarations(liveDir, 'src/live');
+		expect(registry).toContain('__registerFlag("features:export", false)');
+		expect(registry).toContain('__registerFlag("export default", 0)');
+		expect(client).toContain('"key":"export"');
+		expect(client).toContain('export const label = __rpc("values/label")');
+		expect(dts).toContain("'export' | 'import'");
+		for (const out of [client, registry, dts]) expect(out).not.toContain('_xport');
+	});
+
+	it('warns once when a live export is read as string text at the start of a line', () => {
+		setup({
+			'misread.js': [
+				"import { live } from 'svelte-realtime/server';",
+				'const note = `',
+				'export const ghost = live(async () => 1);',
+				'`;',
+				'export const real = live.public(async () => 2);',
+				''
+			].join('\n')
+		});
+		const plugin = createPlugin();
+		const { value: client, warns } = captureWarns(() => code(plugin.load('\0live:misread', { ssr: false })));
+		captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
+		expect(client).toContain('export const real = __rpc(');
+		expect(client).not.toMatch(/\bghost\b/);
+		expect(warns.filter((w) => w.includes("'ghost' looks like a live export"))).toHaveLength(1);
+	});
 });

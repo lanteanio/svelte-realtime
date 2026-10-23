@@ -129,7 +129,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
-- The Vite plugin ignores live exports inside comments and strings. Before, a commented-out declaration such as `// export const old = live.public(fn)` still got a client stub, a registry entry and a declaration, and a commented-out `_guard` counted as the module's guard.
+- The Vite plugin ignores live exports inside comments and strings. Before, a commented-out declaration such as `// export const old = live.public(fn)` still got a client stub, a registry entry and a declaration, and a commented-out `_guard` counted as the module's guard. Values that merely contain the word, such as a `'features:export'` topic or a `key: 'export'` option, are read as written. A live export read as text at the start of a line inside a string or template, more likely an unbalanced quote above it, is reported once.
 
 - The Vite plugin generates a stream store, SSR stub, registration and declaration for a stream wrapped in `live.public`, `live.gate` or `live.scoped`, the same as for the stream itself. Before, `live.public(live.stream(...))`, `live.public(live.channel(...))`, `live.public(live.derived(...))`, `live.public(live.flag(...))` and `live.public(live.aggregate(...))` got an RPC stub that the server refuses, and `live.gate(predicate, live.stream(...))` and `live.scoped(...)` around a stream were not generated at all. `live.gate` or `live.scoped` around `live.derived`, `live.aggregate` or `live.flag` fails the build with a message naming the export.
 

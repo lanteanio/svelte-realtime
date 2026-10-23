@@ -14,7 +14,8 @@ import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE,
  */
 export function _generateSsrStubs(filePath, modulePath) {
 	const normalized = filePath.split(sep).join(posix.sep);
-	const source = _liveSource(_readCached(filePath), filePath);
+	// Declarations are found in `scan` and read from `source` (see _liveSource).
+	const { scan, text: source } = _liveSource(_readCached(filePath), filePath);
 
 	/** @type {string[]} */
 	const storeNames = [];
@@ -43,7 +44,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 	];
 	for (const [re, apiName] of _streamApiByRe) {
 		re.lastIndex = 0;
-		while ((match = re.exec(source)) !== null) {
+		while ((match = re.exec(scan)) !== null) {
 			const name = match[1];
 			storeNames.push(name);
 			if (_isDynamicExport(source, name, apiName)) dynamicNames.add(name);
@@ -54,13 +55,13 @@ export function _generateSsrStubs(filePath, modulePath) {
 	// factory-shaped), and the registry registers the same `module/name`
 	// direct-call path streams use, so `.load()` hydration works as-is.
 	FLAG_EXPORT_RE.lastIndex = 0;
-	while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+	while ((match = FLAG_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		storeNames.push(name);
 	}
 	AGGREGATE_EXPORT_RE.lastIndex = 0;
-	while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+	while ((match = AGGREGATE_EXPORT_RE.exec(scan)) !== null) {
 		const aggName = match[1];
 		const windowKeys = _extractAggregateWindows(source, aggName);
 		if (windowKeys && windowKeys.length > 0) {
@@ -77,7 +78,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 	// crashes because the source module's `board` export is the server-side
 	// roomExport (with __dataStream / __presenceStream) and lacks `data`.
 	ROOM_EXPORT_RE.lastIndex = 0;
-	while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+	while ((match = ROOM_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		rooms.push({ name, info: _extractRoomInfo(source, name) });
@@ -90,7 +91,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 	/** @type {Array<{ name: string, info: ReturnType<typeof _extractMultiplayerInfo> }>} */
 	const multiplayers = [];
 	MULTIPLAYER_EXPORT_RE.lastIndex = 0;
-	while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+	while ((match = MULTIPLAYER_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		multiplayers.push({ name, info: _extractMultiplayerInfo(source, name) });
@@ -103,7 +104,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 	/** @type {string[]} */
 	const smooths = [];
 	SMOOTH_EXPORT_RE.lastIndex = 0;
-	while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+	while ((match = SMOOTH_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		smooths.push(name);
@@ -115,7 +116,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 	/** @type {Array<{ name: string, kind: string }>} */
 	const docs = [];
 	DOC_EXPORT_RE.lastIndex = 0;
-	while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+	while ((match = DOC_EXPORT_RE.exec(scan)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		docs.push({ name, kind: match[2] });

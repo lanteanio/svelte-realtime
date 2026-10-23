@@ -1,5 +1,5 @@
 // @ts-check
-import { _skipNonCode } from './scanner.js';
+import { _skipNonCode, _locate } from './scanner.js';
 
 /**
  * Extract thrown LiveError codes from source for typed error unions.
@@ -46,7 +46,7 @@ export function _extractFunctionSignatureFor(source, name, liveCall, callbackArg
 	const startPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*${liveCall}\\s*\\(`
 	);
-	const startMatch = startPattern.exec(source);
+	const startMatch = _locate(startPattern, source);
 	if (!startMatch) return fallback;
 
 	const afterOpen = startMatch.index + startMatch[0].length;
@@ -87,7 +87,7 @@ export function _extractStreamReturnType(source, name) {
 	const startPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(`
 	);
-	const startMatch = startPattern.exec(source);
+	const startMatch = _locate(startPattern, source);
 	if (!startMatch) return 'any';
 
 	const afterOpen = startMatch.index + startMatch[0].length;
@@ -154,7 +154,7 @@ export function _isDynamicExport(source, name, apiName) {
 	const pattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*${apiName}\\s*\\(`
 	);
-	const m = pattern.exec(source);
+	const m = _locate(pattern, source);
 	if (!m) return false;
 	const afterOpen = m.index + m[0].length;
 	if (!_isFirstArgFunction(source, afterOpen)) return false;
@@ -250,7 +250,7 @@ export function _extractDynamicFactoryParams(source, name, apiName) {
 	const pattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*${apiName}\\s*\\(`
 	);
-	const m = pattern.exec(source);
+	const m = _locate(pattern, source);
 	if (!m) return fallback;
 	const afterOpen = m.index + m[0].length;
 	const argStart = _findNthArgStart(source, afterOpen, 0);

@@ -1,5 +1,5 @@
 // @ts-check
-import { _skipNonCode, _readStringLiteral } from './scanner.js';
+import { _skipNonCode, _readStringLiteral, _hideNonCodeExports, _rememberScan, _locate } from './scanner.js';
 import { _MULTIPLAYER_NAMESPACE_MEMBERS } from '../shared/multiplayer-members.js';
 import { validateFunctionTimeout } from '../shared/function-timeout.js';
 
@@ -470,7 +470,7 @@ export function _extractStreamOptions(source, name) {
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(\\s*(['"\`])([^'"\`]+)\\1`,
 		's'
 	);
-	const topicMatch = topicPattern.exec(source);
+	const topicMatch = _locate(topicPattern, source);
 
 	let rest;
 	if (topicMatch) {
@@ -480,7 +480,7 @@ export function _extractStreamOptions(source, name) {
 		const openPattern = new RegExp(
 			`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(`
 		);
-		const openMatch = openPattern.exec(source);
+		const openMatch = _locate(openPattern, source);
 		if (!openMatch) return opts;
 		rest = source.slice(openMatch.index + openMatch[0].length);
 	}
@@ -515,7 +515,7 @@ export function _extractFlagDecl(source, name) {
 	const openPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.flag\\s*\\(`
 	);
-	const openMatch = openPattern.exec(source);
+	const openMatch = _locate(openPattern, source);
 	if (!openMatch) return null;
 	let i = openMatch.index + openMatch[0].length;
 	while (i < source.length && /\s/.test(source[i])) i++;
@@ -612,7 +612,7 @@ export function _extractChannelOptions(source, name) {
 	const pattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(`
 	);
-	const match = pattern.exec(source);
+	const match = _locate(pattern, source);
 	if (!match) return opts;
 
 	const startIdx = match.index + match[0].length;
@@ -1259,7 +1259,7 @@ export function _extractAggregateWindows(source, name) {
 	const startPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.aggregate\\s*\\(`
 	);
-	const startMatch = startPattern.exec(source);
+	const startMatch = _locate(startPattern, source);
 	if (!startMatch) return null;
 	const after = source.slice(startMatch.index + startMatch[0].length);
 	const optionsBody = _extractLastOptions(after);
@@ -1283,7 +1283,7 @@ export function _extractRoomInfo(source, name) {
 	const startPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.room\\s*\\(`
 	);
-	const startMatch = startPattern.exec(source);
+	const startMatch = _locate(startPattern, source);
 	if (!startMatch) return info;
 
 	const view = _configArgument(source, source.slice(startMatch.index + startMatch[0].length));
@@ -1324,7 +1324,7 @@ export function _extractMultiplayerInfo(source, name) {
 	const startPattern = new RegExp(
 		`export\\s+const\\s+${name}\\s*=\\s*live\\.multiplayer\\s*\\(`
 	);
-	const startMatch = startPattern.exec(source);
+	const startMatch = _locate(startPattern, source);
 
 	const info = {
 		dataOpts: { merge: 'crud', key: 'id' },
@@ -1418,25 +1418,22 @@ const _STREAM_KIND_RE = /^live\.(stream|channel|derived|aggregate|flag)\s*\(/;
 const _WRAPPER_CALL_RE = /^live\.(public|gate|scoped)\s*\(/;
 
 /**
- * Rewrite each `export const name = live.public|gate|scoped(..., live.<stream kind>(...))`
- * so the declaration reads `export const name = live.<stream kind>(...)`. Line
- * breaks are kept so positions in messages stay right. `live.public` leaves a
- * `realtime-allow-public` comment, which carries its module-wide meaning.
+ * The ranges to blank so each `export const name = live.public|gate|scoped(...,
+ * live.<stream kind>(...))` reads `export const name = live.<stream kind>(...)`.
  * `live.gate` and `live.scoped` wrap the stream function itself, which a
  * derived, aggregate or flag export cannot be registered through, so those
  * fail the build.
- * @param {string} source
+ * @param {string} scan - the source with non-code declarations hidden
  * @param {string} [file]
- * @returns {string}
+ * @returns {Array<[number, number]>}
  */
-function _unwrapStreamWrappers(source, file) {
-	if (!source.includes('live.public') && !source.includes('live.gate') && !source.includes('live.scoped')) return source;
-	const blank = (/** @type {string} */ text) => text.replace(/[^\n]/g, ' ');
-	let out = '';
-	let last = 0;
+function _streamWrapperCuts(scan, file) {
+	/** @type {Array<[number, number]>} */
+	const all = [];
+	if (!scan.includes('live.public') && !scan.includes('live.gate') && !scan.includes('live.scoped')) return all;
 	_WRAPPER_EXPORT_RE.lastIndex = 0;
 	let m;
-	scan: while ((m = _WRAPPER_EXPORT_RE.exec(source)) !== null) {
+	next: while ((m = _WRAPPER_EXPORT_RE.exec(scan)) !== null) {
 		const name = m[1];
 		/** @type {string[]} */
 		const wrappers = [];
@@ -1444,24 +1441,24 @@ function _unwrapStreamWrappers(source, file) {
 		const cuts = [];
 		let pos = m.index + m[0].lastIndexOf('live.');
 		for (;;) {
-			const w = _WRAPPER_CALL_RE.exec(source.slice(pos, pos + 24));
+			const w = _WRAPPER_CALL_RE.exec(scan.slice(pos, pos + 24));
 			if (!w) break;
 			const open = pos + w[0].length;
-			let innerStart = _skipBlank(source, open);
+			let innerStart = _skipBlank(scan, open);
 			if (w[1] !== 'public') {
-				const predEnd = _expressionEnd(source, open);
-				if (source[predEnd] !== ',') continue scan;
-				innerStart = _skipBlank(source, predEnd + 1);
+				const predEnd = _expressionEnd(scan, open);
+				if (scan[predEnd] !== ',') continue next;
+				innerStart = _skipBlank(scan, predEnd + 1);
 			}
-			const innerEnd = _expressionEnd(source, innerStart);
+			const innerEnd = _expressionEnd(scan, innerStart);
 			let close = innerEnd;
-			if (source[close] === ',') close = _skipBlank(source, close + 1);
-			if (source[close] !== ')') continue scan;
+			if (scan[close] === ',') close = _skipBlank(scan, close + 1);
+			if (scan[close] !== ')') continue next;
 			wrappers.push(w[1]);
 			cuts.push([pos, innerStart], [innerEnd, close + 1]);
 			pos = innerStart;
 		}
-		const kind = _STREAM_KIND_RE.exec(source.slice(pos, pos + 32));
+		const kind = _STREAM_KIND_RE.exec(scan.slice(pos, pos + 32));
 		if (!kind) continue;
 		const wrapping = wrappers.find((w) => w !== 'public');
 		if (wrapping && kind[1] !== 'stream' && kind[1] !== 'channel') {
@@ -1470,64 +1467,52 @@ function _unwrapStreamWrappers(source, file) {
 				`Export the live.${kind[1]}() itself and gate access with the module _guard.\n  See: https://svti.me/streams`
 			);
 		}
-		cuts.sort((x, y) => x[0] - y[0]);
-		for (const [from, to] of cuts) {
-			out += source.slice(last, from) + blank(source.slice(from, to));
-			last = to;
-		}
-		if (wrappers.includes('public')) out += ' /* realtime-allow-public */';
+		all.push(...cuts);
 	}
-	return last === 0 ? source : out + source.slice(last);
+	return all.sort((x, y) => x[0] - y[0]);
+}
+
+/**
+ * Blank `cuts` with spaces, keeping line breaks, so every offset stays put.
+ * @param {string} s
+ * @param {Array<[number, number]>} cuts
+ * @returns {string}
+ */
+function _applyCuts(s, cuts) {
+	if (cuts.length === 0) return s;
+	let out = '';
+	let last = 0;
+	for (const [from, to] of cuts) {
+		out += s.slice(last, from) + s.slice(from, to).replace(/[^\n]/g, ' ');
+		last = to;
+	}
+	return out + s.slice(last);
 }
 
 // - Live source ---------------------------------------------------------------
 
-const _EXPORT_WORD_RE = /\bexport\b/g;
+const _PUBLIC_EXPORT_RE = /export\s+const\s+\w+\s*=\s*live\.public\s*\(/;
 
 /**
- * Hide every `export` keyword that sits inside a comment or a string, so no
- * export scanner reads a commented-out or quoted declaration. The keyword is
- * replaced by a same-length non-keyword; nothing else changes, and nothing
- * is scanned when the source has no `export` at all.
- * @param {string} source
- * @returns {string}
- */
-function _hideNonCodeExports(source) {
-	/** @type {number[]} */
-	const words = [];
-	_EXPORT_WORD_RE.lastIndex = 0;
-	let m;
-	while ((m = _EXPORT_WORD_RE.exec(source)) !== null) words.push(m.index);
-	if (words.length === 0) return source;
-	/** @type {number[]} */
-	const hidden = [];
-	const lastWord = words[words.length - 1];
-	let w = 0;
-	for (let i = 0; i <= lastWord; i++) {
-		const end = _skipNonCode(source, i);
-		if (end < 0) continue;
-		while (w < words.length && words[w] < i) w++;
-		while (w < words.length && words[w] <= end) hidden.push(words[w++]);
-		i = end;
-	}
-	if (hidden.length === 0) return source;
-	let out = '';
-	let at = 0;
-	for (const index of hidden) {
-		out += source.slice(at, index) + '_xport';
-		at = index + 6;
-	}
-	return out + source.slice(at);
-}
-
-/**
- * The source every live-module scanner reads: declarations inside comments
- * and strings hidden, and streams wrapped in `live.public` / `live.gate` /
- * `live.scoped` read as the streams they wrap.
+ * The two views of a live module every scanner reads, of the same length so an
+ * offset found in one is the same place in the other:
+ * - `scan`: declarations inside comments and strings hidden. Scanners use it
+ *   only to find declarations and read their names.
+ * - `text`: the source as written. Values, options, topics and types are read
+ *   from it, at the offsets found in `scan` (see `_locate`).
+ * In both, a stream wrapped in `live.public` / `live.gate` / `live.scoped` reads
+ * as the stream it wraps. `publicMarked` says whether the module exports a
+ * `live.public(...)`, wrapped stream or not, which suppresses the missing-guard
+ * warning.
  * @param {string} source
  * @param {string} [file]
- * @returns {string}
+ * @returns {{ scan: string, text: string, publicMarked: boolean }}
  */
 export function _liveSource(source, file) {
-	return _unwrapStreamWrappers(_hideNonCodeExports(source), file);
+	const hidden = _hideNonCodeExports(source, file);
+	const cuts = _streamWrapperCuts(hidden, file);
+	const scan = _applyCuts(hidden, cuts);
+	const text = _applyCuts(source, cuts);
+	_rememberScan(text, scan);
+	return { scan, text, publicMarked: _PUBLIC_EXPORT_RE.test(hidden) };
 }

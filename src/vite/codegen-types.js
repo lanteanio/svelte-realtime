@@ -61,7 +61,8 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = _liveSource(readSource(filePath), `${dir}/${rel}`);
+		// Declarations are found in `scan` and read from `source` (see _liveSource).
+		const { scan, text: source } = _liveSource(readSource(filePath), `${dir}/${rel}`);
 		const isTS = filePath.endsWith('.ts');
 
 		/** @type {string[]} */
@@ -75,7 +76,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// Detect live() exports
 		let match;
 		LIVE_EXPORT_RE.lastIndex = 0;
-		while ((match = LIVE_EXPORT_RE.exec(source)) !== null) {
+		while ((match = LIVE_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (isTS) {
@@ -88,7 +89,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Public markers produce the same client RPC shape as live().
 		PUBLIC_EXPORT_RE.lastIndex = 0;
-		while ((match = PUBLIC_EXPORT_RE.exec(source)) !== null) {
+		while ((match = PUBLIC_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			const sig = isTS
@@ -99,7 +100,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.validated() exports - extract real types for TS
 		VALIDATED_EXPORT_RE.lastIndex = 0;
-		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
+		while ((match = VALIDATED_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			// Only add if not already detected by LIVE_EXPORT_RE
@@ -127,7 +128,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.stream() exports
 		STREAM_EXPORT_RE.lastIndex = 0;
-		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
+		while ((match = STREAM_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			needsStreamStore = true;
@@ -155,7 +156,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.channel() exports (same shape as streams)
 		CHANNEL_EXPORT_RE.lastIndex = 0;
-		while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
+		while ((match = CHANNEL_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -177,7 +178,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.derived() exports (read-only stream, static or dynamic)
 		DERIVED_EXPORT_RE.lastIndex = 0;
-		while ((match = DERIVED_EXPORT_RE.exec(source)) !== null) {
+		while ((match = DERIVED_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -199,7 +200,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.aggregate() exports (read-only stream)
 		AGGREGATE_EXPORT_RE.lastIndex = 0;
-		while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+		while ((match = AGGREGATE_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -220,7 +221,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.flag() exports (readable set-merge stream)
 		FLAG_EXPORT_RE.lastIndex = 0;
-		while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+		while ((match = FLAG_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -231,7 +232,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.binary() exports
 		BINARY_EXPORT_RE.lastIndex = 0;
-		while ((match = BINARY_EXPORT_RE.exec(source)) !== null) {
+		while ((match = BINARY_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -241,7 +242,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.upload() exports
 		UPLOAD_EXPORT_RE.lastIndex = 0;
-		while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+		while ((match = UPLOAD_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -252,7 +253,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.rateLimit() exports - extract real types for TS
 		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
-		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
+		while ((match = RATE_LIMIT_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -269,7 +270,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// live.lock(keyOrConfig, fn), so the function-signature extractor
 		// reads from arg index 1.
 		LOCK_EXPORT_RE.lastIndex = 0;
-		while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
+		while ((match = LOCK_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -284,7 +285,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.idempotent() exports - inner handler at arg index 1.
 		IDEMPOTENT_EXPORT_RE.lastIndex = 0;
-		while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
+		while ((match = IDEMPOTENT_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -302,7 +303,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// attached by the __rpc(...) factory itself, so the generated stub
 		// types as the plain RPC signature; users get the method at runtime.
 		VOLATILE_EXPORT_RE.lastIndex = 0;
-		while ((match = VOLATILE_EXPORT_RE.exec(source)) !== null) {
+		while ((match = VOLATILE_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -318,7 +319,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// Detect live.smooth() exports - the namespace carries the send paths
 		// and the smooth(...) factory returning the predicted view.
 		SMOOTH_EXPORT_RE.lastIndex = 0;
-		while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+		while ((match = SMOOTH_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -329,7 +330,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// Detect CRDT document exports - the namespace carries the send paths
 		// and a factory (named after the kind) returning the replica view.
 		DOC_EXPORT_RE.lastIndex = 0;
-		while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+		while ((match = DOC_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			const kind = match[2];
 			handledNames.add(name);
@@ -343,7 +344,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		// connection-status view and the cursor methods. Runs before the room
 		// branch and claims the name so the room branch skips it.
 		MULTIPLAYER_EXPORT_RE.lastIndex = 0;
-		while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+		while ((match = MULTIPLAYER_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -362,7 +363,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 		// Detect live.room() exports
 		ROOM_EXPORT_RE.lastIndex = 0;
-		while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+		while ((match = ROOM_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
@@ -372,7 +373,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 		}
 
 		// Warn about exports with non-path-safe names (after all valid names collected)
-		_warnUnsafeExports(source, `${dir}/${rel}`, handledNames);
+		_warnUnsafeExports(scan, `${dir}/${rel}`, handledNames);
 
 		if (exports.length > 0) {
 			// JSON.stringify the module name like every other codegen

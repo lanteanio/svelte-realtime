@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, relative, sep, posix } from 'path';
 import { _readCached } from './source-cache.js';
 import { _runtimeExports } from './hooks-exports.js';
-import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports } from './scanner.js';
+import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports, _locate } from './scanner.js';
 import { _extractAggregateWindows, _extractFlagDecl, _liveSource } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
 
@@ -246,7 +246,8 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = _liveSource(_readCached(filePath), `${dir}/${rel}`);
+		// Declarations are found in `scan` and read from `source` (see _liveSource).
+		const { scan, text: source } = _liveSource(_readCached(filePath), `${dir}/${rel}`);
 		const normalizedPath = filePath.split(sep).join(posix.sep);
 
 		const _importPath = JSON.stringify(normalizedPath);
@@ -261,7 +262,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// (public/validated/lock/idempotent/rateLimit/volatile).
 		for (const re of [LIVE_EXPORT_RE, PUBLIC_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, VOLATILE_EXPORT_RE]) {
 			re.lastIndex = 0;
-			while ((match = re.exec(source)) !== null) {
+			while ((match = re.exec(scan)) !== null) {
 				const name = match[1];
 				if (!/^\w+$/.test(name)) continue;
 				if (registered.has(name)) continue;
@@ -272,7 +273,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.stream() exports
 		STREAM_EXPORT_RE.lastIndex = 0;
-		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
+		while ((match = STREAM_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
@@ -281,7 +282,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 			const topicPattern = new RegExp(
 				`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`
 			);
-			const topicMatch = topicPattern.exec(source);
+			const topicMatch = _locate(topicPattern, source);
 			if (topicMatch) {
 				const topic = topicMatch[1];
 				if (topic.startsWith('__')) {
@@ -301,13 +302,13 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register guard
 		GUARD_EXPORT_RE.lastIndex = 0;
-		if (GUARD_EXPORT_RE.exec(source) !== null) {
+		if (GUARD_EXPORT_RE.exec(scan) !== null) {
 			lines.push(`__registerGuard(${JSON.stringify(rel)}, ${_lazy('_guard')});`);
 		}
 
 		// Register live.binary() exports
 		BINARY_EXPORT_RE.lastIndex = 0;
-		while ((match = BINARY_EXPORT_RE.exec(source)) !== null) {
+		while ((match = BINARY_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -318,7 +319,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.upload() exports
 		UPLOAD_EXPORT_RE.lastIndex = 0;
-		while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+		while ((match = UPLOAD_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -329,7 +330,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register cron jobs
 		CRON_EXPORT_RE.lastIndex = 0;
-		while ((match = CRON_EXPORT_RE.exec(source)) !== null) {
+		while ((match = CRON_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			lines.push(`__registerCron(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
@@ -337,7 +338,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.derived() exports
 		DERIVED_EXPORT_RE.lastIndex = 0;
-		while ((match = DERIVED_EXPORT_RE.exec(source)) !== null) {
+		while ((match = DERIVED_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -350,7 +351,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Register live.smooth() exports - the command and sync send paths
 		// resolve lazily to the export's attached handlers.
 		SMOOTH_EXPORT_RE.lastIndex = 0;
-		while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+		while ((match = SMOOTH_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -366,7 +367,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Register CRDT document exports - the sync, update, and close send
 		// paths resolve lazily to the export's attached handlers.
 		DOC_EXPORT_RE.lastIndex = 0;
-		while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+		while ((match = DOC_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -384,7 +385,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Running before the room loop and marking the name means the room loop
 		// (which guards on registered) skips it - never double-registered.
 		MULTIPLAYER_EXPORT_RE.lastIndex = 0;
-		while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+		while ((match = MULTIPLAYER_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -405,7 +406,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.room() exports - register sub-streams and actions lazily
 		ROOM_EXPORT_RE.lastIndex = 0;
-		while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+		while ((match = ROOM_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -433,7 +434,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// registration (the app calls handler.handle(req) itself).
 		for (const re of [WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE]) {
 			re.lastIndex = 0;
-			while ((match = re.exec(source)) !== null) {
+			while ((match = re.exec(scan)) !== null) {
 				registered.add(match[1]);
 			}
 		}
@@ -441,7 +442,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Outbound webhooks ARE registered server-side (they watch source topics
 		// and fire on publish, like effects); still no client stub.
 		WEBHOOK_OUTBOUND_EXPORT_RE.lastIndex = 0;
-		while ((match = WEBHOOK_OUTBOUND_EXPORT_RE.exec(source)) !== null) {
+		while ((match = WEBHOOK_OUTBOUND_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -452,7 +453,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.channel() exports (treated like streams)
 		CHANNEL_EXPORT_RE.lastIndex = 0;
-		while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
+		while ((match = CHANNEL_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -462,7 +463,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 			const channelTopicPattern = new RegExp(
 				`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`
 			);
-			const channelTopicMatch = channelTopicPattern.exec(source);
+			const channelTopicMatch = _locate(channelTopicPattern, source);
 			if (channelTopicMatch) {
 				_maybeWarnUnregistered(channelTopicMatch[1], rel, 'live.channel');
 			}
@@ -470,7 +471,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.effect() exports
 		EFFECT_EXPORT_RE.lastIndex = 0;
-		while ((match = EFFECT_EXPORT_RE.exec(source)) !== null) {
+		while ((match = EFFECT_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -481,7 +482,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register live.aggregate() exports
 		AGGREGATE_EXPORT_RE.lastIndex = 0;
-		while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+		while ((match = AGGREGATE_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -513,7 +514,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// .get() reflects cluster-latest sets from boot without waiting for the
 		// flag module's first local import.
 		FLAG_EXPORT_RE.lastIndex = 0;
-		while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+		while ((match = FLAG_EXPORT_RE.exec(scan)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
@@ -529,7 +530,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Warn about exports with non-path-safe names (pass registered to avoid
 		// double-warning for names already handled above)
-		_warnUnsafeExports(source, `${dir}/${rel}`, registered);
+		_warnUnsafeExports(scan, `${dir}/${rel}`, registered);
 	}
 
 	return lines.join('\n') + '\n';

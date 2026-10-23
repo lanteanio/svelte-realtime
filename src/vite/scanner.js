@@ -464,3 +464,153 @@ export function _parseArrowReturnTemplate(body, start) {
 	}
 	return { pattern: lit.pattern, end: endIdx };
 }
+
+// - Declarations outside code -------------------------------------------------
+
+// `export` where it starts a declaration. A value such as 'features:export',
+// `{ key: 'export' }` or `${o.export}` is not one and is never touched.
+const _EXPORT_DECL_RE = /\bexport(?=\s+(?:const|let|var|function|class|async|default|type|interface|enum)\b|\s*[{*])/g;
+const _LIVE_DECL_AFTER_RE = /^export\s+const\s+([\w$]+)\s*=\s*live\b/;
+
+/**
+ * Comment, string and template-text ranges of `s` up to `limit`, in order, as
+ * [start, end, kind] with kind 'c' for a comment and 's' for string text. The
+ * code inside a template's `${...}` is not a range.
+ * @param {string} s
+ * @param {number} limit
+ * @returns {Array<[number, number, string]>}
+ */
+function _nonCodeRanges(s, limit) {
+	/** @type {Array<[number, number, string]>} */
+	const out = [];
+	for (let i = 0; i <= limit && i < s.length; i++) {
+		if (s[i] === '`') { i = _templateRanges(s, i, out); continue; }
+		const end = _skipNonCode(s, i);
+		if (end < 0) continue;
+		out.push([i, end, s[i] === '/' && (s[i + 1] === '/' || s[i + 1] === '*') ? 'c' : 's']);
+		i = end;
+	}
+	return out;
+}
+
+/**
+ * Push the text ranges of the template literal opened at `i`, and the ranges
+ * inside its `${...}` code; return the index of its closing backtick.
+ * @param {string} s
+ * @param {number} i
+ * @param {Array<[number, number, string]>} out
+ * @returns {number}
+ */
+function _templateRanges(s, i, out) {
+	let start = i;
+	for (let j = i + 1; j < s.length; j++) {
+		const c = s[j];
+		if (c === '\\') { j++; continue; }
+		if (c === '`') { out.push([start, j, 's']); return j; }
+		if (c === '$' && s[j + 1] === '{') {
+			out.push([start, j - 1, 's']);
+			let depth = 0;
+			for (j += 2; j < s.length; j++) {
+				if (s[j] === '`') { j = _templateRanges(s, j, out); continue; }
+				const skip = _skipNonCode(s, j);
+				if (skip >= 0) {
+					out.push([j, skip, s[j] === '/' && (s[j + 1] === '/' || s[j + 1] === '*') ? 'c' : 's']);
+					j = skip;
+					continue;
+				}
+				if (s[j] === '{') depth++;
+				else if (s[j] === '}') { if (depth === 0) break; depth--; }
+			}
+			start = j + 1;
+		}
+	}
+	out.push([start, s.length - 1, 's']);
+	return s.length - 1;
+}
+
+/** @type {Set<string>} */
+const _warnedHiddenDecls = new Set();
+
+/**
+ * Hide each declaration-starting `export` that sits inside a comment or
+ * string text, by replacing it with `_xport` (same length, so offsets keep).
+ * Nothing is scanned when the source has no such `export`. A live export
+ * hidden as string text at the start of its line is more likely a quote the
+ * scanner misread than a quoted declaration, so it is reported once.
+ * @param {string} source
+ * @param {string} [file]
+ * @returns {string}
+ */
+export function _hideNonCodeExports(source, file) {
+	/** @type {number[]} */
+	const words = [];
+	_EXPORT_DECL_RE.lastIndex = 0;
+	let m;
+	while ((m = _EXPORT_DECL_RE.exec(source)) !== null) words.push(m.index);
+	if (words.length === 0) return source;
+	const ranges = _nonCodeRanges(source, words[words.length - 1]);
+	/** @type {number[]} */
+	const hidden = [];
+	let r = 0;
+	for (const at of words) {
+		while (r < ranges.length && ranges[r][1] < at) r++;
+		if (r >= ranges.length || ranges[r][0] > at) continue;
+		hidden.push(at);
+		if (ranges[r][2] === 's' && (at === 0 || source[at - 1] === '\n')) {
+			const decl = _LIVE_DECL_AFTER_RE.exec(source.slice(at, at + 200));
+			const key = (file || '') + '\0' + (decl ? decl[1] : '');
+			if (decl && !_warnedHiddenDecls.has(key)) {
+				_warnedHiddenDecls.add(key);
+				console.warn(
+					`[svelte-realtime] ${file ? file + ': ' : ''}'${decl[1]}' looks like a live export but is read as text inside a string or template, so it gets no client stub. ` +
+					`If it is a real export, look above it for an unbalanced quote or backtick.`
+				);
+			}
+		}
+	}
+	if (hidden.length === 0) return source;
+	let out = '';
+	let last = 0;
+	for (const at of hidden) {
+		out += source.slice(last, at) + '_xport';
+		last = at + 6;
+	}
+	return out + source.slice(last);
+}
+
+/** @type {Map<string, string>} */
+const _scanViews = new Map();
+const _SCAN_VIEW_CAP = 256;
+
+/**
+ * Remember the scan view `_liveSource` built for `text`, so `_locate` reads the
+ * same one.
+ * @param {string} text
+ * @param {string} scan
+ */
+export function _rememberScan(text, scan) {
+	if (_scanViews.size >= _SCAN_VIEW_CAP) _scanViews.delete(/** @type {string} */ (_scanViews.keys().next().value));
+	_scanViews.set(text, scan);
+}
+
+/**
+ * Find `re` in the scan view of `text` (declarations in comments and strings
+ * hidden), then read the match from `text` itself at that offset, so captured
+ * values are the source as written.
+ * @param {RegExp} re
+ * @param {string} text
+ * @returns {RegExpExecArray | null}
+ */
+export function _locate(re, text) {
+	let scan = _scanViews.get(text);
+	if (scan === undefined) {
+		scan = _hideNonCodeExports(text);
+		_rememberScan(text, scan);
+	}
+	re.lastIndex = 0;
+	const found = re.exec(scan);
+	if (!found || scan === text) return found;
+	const sticky = new RegExp(re.source, re.flags.replace(/[gy]/g, '') + 'y');
+	sticky.lastIndex = found.index;
+	return sticky.exec(text) || found;
+}
