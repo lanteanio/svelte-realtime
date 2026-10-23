@@ -259,6 +259,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The dev server pre-bundles `svelte-realtime/client` and `svelte-realtime/devtools` when they are installed under `node_modules` and dependency discovery is on, so the first page load of a new project is no longer reloaded once per discovered entry. A reload during that first navigation could fail to fetch the SvelteKit client entry. A linked or excluded `svelte-realtime` stays served from source, so every client module shares one instance.
 
+- A `svelte-realtime` linked from outside `node_modules` no longer reloads the first dev page on a cold Vite cache. The dev server pre-bundles the `svelte-adapter-uws` client entries the realtime client imports (`svelte-adapter-uws/client` and `svelte-adapter-uws/plugins/smooth/random`) when both the app and the linked package resolve them from `node_modules`, instead of discovering them on the first page load. The linked package itself stays served from source, and an excluded entry or disabled discovery is left alone.
+
 - The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
 
 ### Security
