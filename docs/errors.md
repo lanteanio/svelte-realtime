@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 125 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 126 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -731,6 +731,13 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Kind: legacy console prefix
 - Searchable message prefixes: <code>[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=</code>
 - Owning sources: [src/server/push.js](../src/server/push.js)
+
+<a id="diagnostic-console-9e540d8d5e31baa9"></a>
+### <code>console-9e540d8d5e31baa9</code>
+
+- Kind: legacy console prefix
+- Searchable message prefixes: <code>[svelte-realtime] Live handlers are still loading after </code>
+- Owning sources: [src/vite/plugin.js](../src/vite/plugin.js)
 
 <a id="diagnostic-console-a176ab3d1aa19353"></a>
 ### <code>console-a176ab3d1aa19353</code>
