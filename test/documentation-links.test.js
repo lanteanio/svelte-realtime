@@ -89,5 +89,6 @@ describe('documentation link gates', () => {
 		expect(read).toEqual([moved]);
 		expect(checkMainSnapshot(recorded, moved, tree({ paths: [...recorded.paths, 'src/new.js'], anchors: recorded.anchors }))).toMatchObject({ ok: false });
 		expect(checkMainSnapshot(recorded, moved, tree({ paths: recorded.paths, anchors: { 'README.md': ['usage', 'install'] } }))).toMatchObject({ ok: false, detail: expect.stringMatching(/records origin\/main aaaaaaa but origin\/main is bbbbbbb/) });
+		expect(checkMainSnapshot(recorded, moved, () => { throw new Error('fatal: not a tree object'); })).toMatchObject({ ok: false, detail: expect.stringMatching(/origin\/main tree bbbbbbb is unreadable here; fetch it/) });
 	});
 });

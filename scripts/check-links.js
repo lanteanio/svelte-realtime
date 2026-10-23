@@ -499,7 +499,9 @@ function treeAt(commit) {
 export function checkMainSnapshot(recorded, liveCommit, readTree = treeAt) {
 	if (liveCommit === null) return { ok: true, detail: 'origin/main unavailable here - drift-checked on full clones' };
 	if (liveCommit === recorded.commit) return { ok: true, detail: 'matches origin/main' };
-	const live = readTree(liveCommit);
+	let live;
+	try { live = readTree(liveCommit); }
+	catch { return { ok: false, detail: `origin/main tree ${liveCommit.slice(0, 7)} is unreadable here; fetch it (git fetch origin main) and rerun.` }; }
 	const same = JSON.stringify(live.paths) === JSON.stringify(recorded.paths) && JSON.stringify(live.anchors) === JSON.stringify(recorded.anchors);
 	return same
 		? { ok: true, detail: `same paths and anchors as origin/main ${liveCommit.slice(0, 7)}` }

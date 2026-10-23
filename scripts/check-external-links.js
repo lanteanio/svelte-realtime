@@ -148,7 +148,11 @@ export function looksLikeSoft404(html) {
 	return candidates.some((candidate) => notFound.test(candidate));
 }
 
-/** First path segments on github.com that are site pages, not repository owners. */
+/**
+ * First path segments on github.com that are site pages, not repository owners.
+ * Best effort: GitHub does not publish this list, so a site page missing here is
+ * treated as a repository and its sign-in wall is accepted.
+ */
 const GITHUB_RESERVED_OWNERS = new Set([
 	'about', 'account', 'apps', 'codespaces', 'collections', 'dashboard', 'enterprise', 'enterprises',
 	'explore', 'features', 'issues', 'join', 'login', 'logout', 'marketplace', 'new', 'notifications',
