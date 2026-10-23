@@ -156,7 +156,10 @@ export default function svelteRealtime(options) {
 			if (name !== 'ssr') return;
 			// Vite 8 passes a context with the bundler version; Vite 6 passes none.
 			const key = this?.meta?.rolldownVersion || config.build?.rolldownOptions ? 'rolldownOptions' : 'rollupOptions';
-			const output = { external: config.build?.[key]?.external };
+			// Vite 8 reads rollupOptions only while rolldownOptions is unset, so
+			// returning rolldownOptions carries the legacy options along.
+			const legacy = key === 'rolldownOptions' && !config.build?.rolldownOptions ? config.build?.rollupOptions : undefined;
+			const output = legacy ? { ...legacy } : { external: config.build?.[key]?.external };
 			_externalizeRealtime(output);
 			// Vite 6 can share build options between environments. Return a new
 			// object so the SSR external list cannot leak into the client build.

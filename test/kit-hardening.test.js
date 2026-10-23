@@ -34,6 +34,21 @@ describe('build environment hardening', () => {
 		expect(selected.build.rollupOptions.external.some(value => value.test('svelte-realtime/server'))).toBe(true);
 		expect(selected.build.rolldownOptions).toBeUndefined();
 	});
+	it('carries legacy rollupOptions into rolldownOptions on Vite 8', () => {
+		const p = plugin('build');
+		const isOwn = id => id === 'own-native';
+		const config = { build: { rollupOptions: { external: isOwn, output: { banner: '// app' }, treeshake: false } } };
+		const selected = p.configEnvironment.call({ meta: { rolldownVersion: '1.0.0' } }, 'ssr', config);
+		// Vite 8 ignores rollupOptions once rolldownOptions is set, so every
+		// legacy option must move along with the external list.
+		const options = mergeConfig(config, selected).build.rolldownOptions;
+		expect(options.output).toEqual({ banner: '// app' });
+		expect(options.treeshake).toBe(false);
+		expect(options.external('own-native')).toBe(true);
+		expect(options.external('svelte-realtime/server')).toBe(true);
+		expect(options.external('other')).toBe(false);
+		expect(config.build.rollupOptions.external).toBe(isOwn);
+	});
 	it('uses Rollup when Vite calls the hook without a context', () => {
 		const p = plugin('build');
 		// Vite 6 invokes configEnvironment as a plain function.
