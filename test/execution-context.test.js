@@ -414,4 +414,34 @@ describe('reload bookkeeping for resumed subscribers', () => {
 		expect(refreshed).toHaveLength(1);
 		expect(refreshed[0].data).toEqual({ email: '[hidden]', n: 2 });
 	});
+
+	it('keeps the watcher a new subscriber registered while an earlier reload was still running', async () => {
+		const gate = deferred();
+		let gated = true;
+		const reloads = [];
+		env.register('feed', {
+			watched: live.stream('race:feed', async ctx => {
+				if (ctx.rerun) {
+					reloads.push(actor());
+					if (gated) await gate.promise;
+				}
+				return { from: 'watched' };
+			}, { merge: 'set', invalidateOn: 'race:control' }),
+			plain: live.stream('race:feed', async () => ({ from: 'plain' }), { merge: 'set' }),
+			touch: live(ctx => ctx.publish('race:control', 'changed', {}))
+		});
+		const alice = env.connect({ id: 'alice' });
+		await alice.subscribe('feed/watched').waitFor(v => v?.from === 'watched');
+		await env.connect({ id: 'carol' }).subscribe('feed/plain').waitFor(v => v?.from === 'plain');
+		const publisher = env.connect({ id: 'publisher' });
+		await publisher.call('feed/touch');
+		await vi.waitFor(() => expect(reloads).toEqual(['alice']));
+		alice.disconnect();
+		await env.connect({ id: 'dave' }).subscribe('feed/watched').waitFor(v => v?.from === 'watched');
+		gated = false;
+		gate.resolve();
+		await new Promise(resolve => setImmediate(resolve));
+		await publisher.call('feed/touch');
+		await vi.waitFor(() => expect(reloads).toEqual(['alice', 'dave']));
+	});
 });

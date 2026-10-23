@@ -679,9 +679,10 @@ async function _reportReloadFailure(failure, run, topic) {
 
 /**
  * Broadcast a reload result as `refreshed` on the stream's own topic,
- * applying the stream's init transform and redactor, then the topic's
- * redactor exactly as `ctx.publish` would. A topic shared by two streams
- * thus redacts a reload the same way whichever stream ran it.
+ * applying the running stream's init transform and redactor, then the
+ * topic's redactor through the same lookup `ctx.publish` uses (skipped when
+ * it is the stream's own). A reload on a topic shared by two streams is
+ * therefore never redacted less than a live publish, and can be redacted more.
  *
  * @param {any} fn
  * @param {string} topic
@@ -760,6 +761,24 @@ function _unregisterInvalidationWatch(topic, fn) {
 	}
 }
 
+/**
+ * Remove one invalidation watcher object, if it is still registered.
+ * @param {{ topic: string, fn: any }} watcher
+ */
+function _removeInvalidationWatcher(watcher) {
+	const patterns = watcher.fn.__streamInvalidateOn;
+	if (!patterns) return;
+	const scope = _invalidationScope(watcher.topic);
+	for (const p of patterns) {
+		const key = scope + ' ' + p;
+		const entry = _topicInvalidationWatch.get(key);
+		if (!entry) continue;
+		const idx = entry.watchers.indexOf(watcher);
+		if (idx >= 0) entry.watchers.splice(idx, 1);
+		if (entry.watchers.length === 0) _topicInvalidationWatch.delete(key);
+	}
+}
+
 /** Reset the per-topic invalidation registry. Tests only. @internal */
 export function _resetInvalidationWatch() {
 	_topicInvalidationWatch.clear();
@@ -790,8 +809,10 @@ async function _invalidationReload(watcher) {
 		await _reportReloadFailure(failure, run, watcher.topic);
 	} finally {
 		watcher.reloading = false;
-		// Nobody left to reload for: drop the watcher rather than keep it.
-		if (watcher.bindings.size === 0) _unregisterInvalidationWatch(watcher.topic, watcher.fn);
+		// Nobody left to reload for: drop this watcher rather than keep it. By
+		// identity, since a leave during the await may already have removed it
+		// and a new subscriber registered a fresh one for the same stream.
+		if (watcher.bindings.size === 0) _removeInvalidationWatcher(watcher);
 	}
 }
 
