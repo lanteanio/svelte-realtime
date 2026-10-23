@@ -93,11 +93,26 @@ The named checks let mutation runs distinguish an assertion failure from a
 startup or dependency failure.
 
 The matrix lists checks that fail because of the installed svelte-adapter-uws
-version, each with the adapter version and the adapter behaviour that causes
-it. A run that fails only those checks is reported as a known adapter failure,
-together with the checks it did not reach; the matrix still exits nonzero for
-any other failure. An entry applies only to its adapter version, and a known
-failure that passes is printed so the entry can be removed.
+version. Each entry names the adapter version, the runs that reproduce it, the
+checks it covers and an error signature: assertions comparing HTTP state with
+WebSocket state carry the text `state split between HTTP and WebSocket`, so a
+failure of the same check for another reason is still a failure. A matching
+failure is reported as a known adapter failure and the run continues with every
+remaining check; an entry that leaves the server unusable restarts it on the
+same port first, and the report lists those restarts. The matrix exits nonzero
+for any other failure, and prints entries that did not reproduce so they can be
+narrowed or removed. With svelte-adapter-uws 0.6.0-next.96 the entries are:
+
+- Kit 3 development with a wrapped or omitted adapter entry: the dev server and
+  the WebSocket handler load separate module instances, so the HTTP and
+  WebSocket comparisons and the reload checks of those runs fail. Assertions
+  that WebSocket handlers follow a reload carry the text `WebSocket handlers did
+  not follow the reload`.
+- Kit 3 development: after a route edit reloads the SSR runner, the adapter does
+  not import the WebSocket handler again; the run restarts the server and
+  continues. It reproduces on some runs, not all.
+- Kit 2 and Kit 3 development: after `src/hooks.ws.js` is deleted and created
+  again, the adapter keeps serving the previous handler on most runs.
 
 The scaffolder smoke uses a loopback npm registry to serve candidate archives.
 All other packages resolve from the normal npm registry, and strict peer

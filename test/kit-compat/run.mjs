@@ -29,15 +29,16 @@ assert.ok(adapterMode === 'default' || (kit === '3' && mode === 'dev'), 'Adapter
 const viteMajor = option('--vite', 'locked');
 assert.ok(['locked', '5'].includes(viteMajor), '--vite must be 5');
 assert.ok(viteMajor === 'locked' || kit === '2', '--vite 5 requires Kit 2');
-// Checks the matrix expects to fail on the installed adapter, passed as
-// --known-adapter-failure <stop|continue>:<check name>. They are reported as
-// such; "continue" lets the run go on, "stop" ends it like any failure.
-const knownFailures = new Map();
-args.forEach((arg, index) => {
-	if (arg !== '--known-adapter-failure') return;
-	const [after, name] = args[index + 1].split(/:(.*)/s);
-	assert.ok(['stop', 'continue'].includes(after) && name, '--known-adapter-failure needs stop:<check> or continue:<check>');
-	knownFailures.set(name, after);
+// Checks the matrix expects to fail on the installed adapter, passed as JSON
+// in --known-adapter-failures: [{ checks, signature, restart }]. A failure is
+// known only when its check is listed (or checks is null for any check) and
+// its error matches the signature. "restart" starts a fresh server after the
+// failure, because the adapter left this one in a state later checks cannot
+// use. Every check still runs.
+const knownFailures = JSON.parse(option('--known-adapter-failures', '[]')).map(entry => {
+	assert.ok(entry.checks === null || (Array.isArray(entry.checks) && entry.checks.length), 'A known adapter failure names its checks or null');
+	assert.ok(typeof entry.signature === 'string' && entry.signature, 'A known adapter failure needs an error signature');
+	return { ...entry, signature: new RegExp(entry.signature) };
 });
 const driveCase = option('--drive-case', 'as-invoked');
 assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
@@ -76,6 +77,17 @@ const readinessToken = randomUUID();
 const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_SESSION: readinessToken, KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
 // The server masks a call to an unregistered path as FORBIDDEN by default.
 const UNREGISTERED = 'FORBIDDEN';
+// Every assertion that compares HTTP state with WebSocket state carries this
+// text, so a known adapter failure is matched by what failed, not just where.
+const SPLIT = 'state split between HTTP and WebSocket';
+// Likewise for assertions that the WebSocket handlers follow a reload.
+const RELOAD = 'WebSocket handlers did not follow the reload';
+// A page store must show the count HTTP reads. Playwright keeps a custom
+// expect message out of the error text, so the signature is added here.
+async function showsHttpCount(page, count) {
+	try { await expect(page.getByTestId('counter')).toHaveText(String(count)); }
+	catch (error) { throw new Error(SPLIT + ': a page store differs from the HTTP count\n' + error.message, { cause: error }); }
+}
 // A dev reload closes sockets with 1012; the client reconnects after its
 // jittered backoff (3 s base), so stores need longer than the 5 s default.
 const expect = baseExpect.configure({ timeout: 20000 });
@@ -100,11 +112,12 @@ async function check(name, fn) {
 		report.checks.push({ name, status: 'passed' });
 		console.log('PASS ' + name);
 	} catch (error) {
-		const known = knownFailures.get(name);
-		report.checks.push({ name, status: known ? 'known-adapter-failure' : 'failed', error: error.stack || String(error) });
-		if (!known) throw error;
+		const text = error.stack || String(error);
+		const known = knownFailures.findIndex(entry => (entry.checks === null || entry.checks.includes(name)) && entry.signature.test(text));
+		report.checks.push({ name, status: known < 0 ? 'failed' : 'known-adapter-failure', known: known < 0 ? undefined : known, error: text });
+		if (known < 0) throw error;
 		console.log('KNOWN ADAPTER FAILURE ' + name);
-		if (known === 'stop') throw Object.assign(error, { knownAdapterFailure: true });
+		if (knownFailures[known].restart) await restartServer(name);
 	}
 }
 
@@ -128,9 +141,15 @@ async function availablePort() {
 	return port;
 }
 
+// Close codes of server-initiated closes, so a report shows how a dev reload
+// ends existing connections (the client warns only on unexpected codes).
+report.serverCloseCodes = [];
 async function connectSocket(origin) {
+	if (socket) socket.closedByRunner = true;
 	socket?.terminate();
-	socket = new WebSocket(origin.replace('http:', 'ws:') + '/ws', { headers: { Origin: origin } });
+	const opened = new WebSocket(origin.replace('http:', 'ws:') + '/ws', { headers: { Origin: origin } });
+	opened.on('close', code => { if (!opened.closedByRunner) report.serverCloseCodes.push(code); });
+	socket = opened;
 	await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
 }
 
@@ -160,9 +179,37 @@ function rpc(name, args = []) {
 	});
 }
 
+let origin;
+let launch;
+let pages = [];
+async function stopChild() {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return;
+	const exited = once(child, 'exit');
+	child.kill();
+	const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+	try { await exited; } finally { clearTimeout(timer); }
+}
+// Start a fresh server on the same port after a known adapter failure left the
+// running one unusable, and reload the pages onto it.
+async function restartServer(after) {
+	report.restarts ??= [];
+	report.restarts.push(after);
+	console.log('RESTART after ' + after);
+	if (socket) socket.closedByRunner = true;
+	socket?.terminate();
+	await stopChild();
+	child = start(...launch);
+	await waitForFixture({ child, origin, token: readinessToken });
+	await connectSocket(origin);
+	for (const page of pages) {
+		await page.reload();
+		await page.waitForFunction(() => window.compat);
+	}
+}
+
 try {
 	const port = await availablePort();
-	const origin = 'http://127.0.0.1:' + port;
+	origin = 'http://127.0.0.1:' + port;
 	if (mode === 'production') {
 		await check('production build', async () => {
 			const buildDirectory = path.resolve(fixture, 'build');
@@ -175,10 +222,11 @@ try {
 			assert.equal(code, 0, output);
 			await readFile(path.join(fixture, 'build', 'index.js'));
 		});
-		child = start(['build/index.js'], { HOST: '127.0.0.1', PORT: String(port), ORIGIN: origin });
+		launch = [['build/index.js'], { HOST: '127.0.0.1', PORT: String(port), ORIGIN: origin }];
 	} else {
-		child = start([vite, '--force', '--host', '127.0.0.1', '--port', String(port), '--strictPort']);
+		launch = [[vite, '--force', '--host', '127.0.0.1', '--port', String(port), '--strictPort']];
 	}
+	child = start(...launch);
 	await check('server startup', () => waitForFixture({ child, origin, token: readinessToken }));
 	if (driveCase !== 'as-invoked') {
 		await check('Vite and SvelteKit spell the root differently', () => {
@@ -200,7 +248,7 @@ try {
 	const context = await browser.newContext();
 	const pageErrors = [];
 	const frames = { sent: [], received: [] };
-	const pages = [await context.newPage(), await context.newPage()];
+	pages = [await context.newPage(), await context.newPage()];
 	const navigatedAt = new Map();
 	for (const page of pages) {
 		page.setDefaultTimeout(15000);
@@ -234,7 +282,7 @@ try {
 	await check('HTTP and WebSocket share state', async () => {
 		const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 		assert.equal(response.status, 200);
-		assert.deepEqual(await response.json(), { count: 2 });
+		assert.deepEqual(await response.json(), { count: 2 }, SPLIT + ': HTTP reads another count');
 	});
 	await check('devtools runtime', async () => {
 		for (const page of pages) {
@@ -282,12 +330,12 @@ try {
 				}
 				await pause(100);
 			}
-			assert.equal(added?.ok, true, JSON.stringify(added) || reconnectError?.message);
-			assert.equal(added.data, 'replacement');
+			assert.equal(added?.ok, true, RELOAD + ': ' + (JSON.stringify(added) || reconnectError?.message));
+			assert.equal(added.data, 'replacement', RELOAD);
 			const removed = await rpc('removed');
-			assert.equal(removed.ok, false, JSON.stringify(removed));
-			assert.equal(removed.code, UNREGISTERED);
-			assert.equal((await rpc('echo', ['changed'])).data.label, 'updated');
+			assert.equal(removed.ok, false, RELOAD + ': ' + JSON.stringify(removed));
+			assert.equal(removed.code, UNREGISTERED, RELOAD);
+			assert.equal((await rpc('echo', ['changed'])).data.label, 'updated', RELOAD);
 		});
 		await check('live stores after HMR', async () => {
 			// A full SSR graph reload may recreate module-scoped state. All
@@ -297,15 +345,15 @@ try {
 			const baseline = (await response.json()).count;
 			assert.equal(typeof baseline, 'number');
 			for (const page of pages) {
-				await expect(page.getByTestId('counter')).toHaveText(String(baseline));
+				await showsHttpCount(page, baseline);
 				await page.waitForFunction(() => window.compat);
 			}
 			const count = await pages[0].evaluate(() => window.compat.increment(3));
-			assert.equal(count, baseline + 3);
+			assert.equal(count, baseline + 3, SPLIT + ': the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count });
+			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
 		});
 		await check('one registry reload per live-file save', () => {
 			// Vite can report one save once per spelling of the file's path.
@@ -342,15 +390,15 @@ try {
 			const baseline = (await baselineResponse.json()).count;
 			assert.equal(typeof baseline, 'number');
 			for (const page of pages) {
-				await expect(page.getByTestId('counter')).toHaveText(String(baseline));
+				await showsHttpCount(page, baseline);
 				await page.waitForFunction(() => window.compat);
 			}
 			const count = await pages[0].evaluate(() => window.compat.increment(5));
-			assert.equal(count, baseline + 5);
+			assert.equal(count, baseline + 5, SPLIT + ': the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count });
+			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
 		});
 	}
 	if (hmr) {
@@ -365,7 +413,7 @@ try {
 				} catch (error) { if (socket.readyState === WebSocket.OPEN) throw error; }
 				await pause(100);
 			}
-			throw new Error('RPC did not reach expected state: ' + name + ' ' + JSON.stringify(result));
+			throw new Error(RELOAD + ': RPC did not reach expected state: ' + name + ' ' + JSON.stringify(result));
 		}
 		// Vite 5 answers a new or removed live file with a full page reload.
 		// Drive a page only once neither the file event nor a navigation is recent.
@@ -385,13 +433,13 @@ try {
 			assert.equal(response.status, 200);
 			const baseline = (await response.json()).count;
 			assert.equal(typeof baseline, 'number');
-			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(baseline));
+			for (const page of pages) await showsHttpCount(page, baseline);
 			const count = await pages[0].evaluate(() => window.compat.increment(1));
-			assert.equal(count, baseline + 1);
+			assert.equal(count, baseline + 1, SPLIT + ': the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count });
+			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
 			return count;
 		}
 		await check('new live files share HTTP and WebSocket state', async () => {
@@ -422,32 +470,44 @@ try {
 				} catch (error) { lastError = error; }
 				await pause(200);
 			}
-			throw new Error('A new connection did not reach the expected state: ' + name + ' ' + (JSON.stringify(result) ?? lastError?.message));
+			throw new Error(RELOAD + ': a new connection did not reach the expected state: ' + name + ' ' + (JSON.stringify(result) ?? lastError?.message));
 		}
+		// The adapter closes connections when it reloads the hooks, which can
+		// land after the reload a check waited for, so each call may reconnect.
 		async function registryAnswers(label) {
-			const echoed = await rpc('echo', ['hooks']);
-			assert.equal(echoed.ok, true, JSON.stringify(echoed));
-			assert.deepEqual(echoed.data, { value: 'hooks', token: 'fixture-secret', label });
-			const removed = await rpc('removed');
-			assert.equal(removed.code, UNREGISTERED, JSON.stringify(removed));
-			assert.equal((await rpc('added')).data, 'replacement');
+			const echoed = await freshRpc('echo', result => result.ok === true, ['hooks']);
+			assert.deepEqual(echoed.data, { value: 'hooks', token: 'fixture-secret', label }, RELOAD);
+			const removed = await freshRpc('removed', result => result.ok === false);
+			assert.equal(removed.code, UNREGISTERED, RELOAD + ': ' + JSON.stringify(removed));
+			assert.equal((await freshRpc('added', result => result.ok === true)).data, 'replacement', RELOAD);
 		}
+		// The label the live module answers with once the checks above have run.
+		let liveLabel = 'updated';
 		await check('broken live modules recover without splitting state', async () => {
 			const working = await readFile(liveFile, 'utf8');
 			assert.equal(working.split("label: 'updated'").length, 2, 'Repair anchor must occur once');
+			// A broken save keeps the handlers that are loaded; load this one first.
+			await freshRpc('echo', result => result.ok === true && result.data.label === 'updated', ['hooks']);
 			const broken = output.length;
 			const brokenAt = Date.now();
 			await writeFile(liveFile, working + '\nexport const broken = live(() => {;\n');
-			const deadline = Date.now() + 15000;
-			while (Date.now() < deadline && !/HMR failed for src\/live\/counter/.test(output.slice(broken))) await pause(100);
-			assert.match(output.slice(broken), /HMR failed for src\/live\/counter/, 'The broken save did not report a failed reload');
-			// The previous handlers keep serving while the module is broken.
-			await freshRpc('echo', result => result.ok === true && result.data.label === 'updated', ['hooks']);
-			await sharedStores(brokenAt);
+			try {
+				const deadline = Date.now() + 15000;
+				while (Date.now() < deadline && !/HMR failed for src\/live\/counter/.test(output.slice(broken))) await pause(100);
+				assert.match(output.slice(broken), /HMR failed for src\/live\/counter/, 'The broken save did not report a failed reload');
+				// The previous handlers keep serving while the module is broken.
+				await freshRpc('echo', result => result.ok === true && result.data.label === 'updated', ['hooks']);
+				await sharedStores(brokenAt);
+			} catch (error) {
+				// Later checks start from the working module, not the broken one.
+				await writeFile(liveFile, working);
+				throw error;
+			}
 			const repairedAt = Date.now();
 			await writeFile(liveFile, working.replace("label: 'updated'", "label: 'repaired'"));
 			await freshRpc('echo', result => result.ok === true && result.data.label === 'repaired', ['hooks']);
 			await registryAnswers('repaired');
+			liveLabel = 'repaired';
 			await sharedStores(repairedAt);
 		});
 		const hooksAnchor = "return { id: 'compatibility-test' };";
@@ -459,7 +519,7 @@ try {
 			const editedAt = Date.now();
 			await writeFile(hooksFile, source.replace(hooksAnchor, "return { id: 'compatibility-test-edited' };"));
 			await freshRpc('connection', result => result.ok === true && result.data === 'compatibility-test-edited');
-			await registryAnswers('updated');
+			await registryAnswers(liveLabel);
 			await sharedStores(editedAt);
 		});
 		await check('deleted and recreated hooks.ws restore live handlers and shared state', async () => {
@@ -473,7 +533,7 @@ try {
 			const recreatedAt = Date.now();
 			await writeFile(hooksFile, originalHooks.toString('utf8').replace(hooksAnchor, "return { id: 'compatibility-test-recreated' };"));
 			await freshRpc('connection', result => result.ok === true && result.data === 'compatibility-test-recreated');
-			await registryAnswers('updated');
+			await registryAnswers(liveLabel);
 			await sharedStores(recreatedAt);
 		});
 	}
@@ -483,23 +543,22 @@ try {
 	});
 	if (hmr) await check('HMR emits no Cloudflare Tunnel warning', () => {
 		assert.doesNotMatch(output, /Cloudflare-Tunnel|Set-Cookie on 101|svti\.me\/cf-cookies/i);
+		// A restart close the client treats as expected is 1001 or 1012.
+		const unexpected = report.serverCloseCodes.filter(code => code !== 1001 && code !== 1012);
+		assert.deepEqual(unexpected, [], 'Server closes used codes the client warns about: ' + report.serverCloseCodes.join(', '));
 	});
 	report.status = report.checks.some(entry => entry.status === 'known-adapter-failure') ? 'known-adapter-failure' : 'passed';
 } catch (error) {
-	report.status = error.knownAdapterFailure ? 'known-adapter-failure' : 'failed';
+	report.status = 'failed';
 	report.error = error.stack || String(error);
 	console.error(report.error + '\n' + output);
-	if (!error.knownAdapterFailure) process.exitCode = 1;
+	process.exitCode = 1;
 } finally {
 	try {
 		await browser?.close();
+		if (socket) socket.closedByRunner = true;
 		socket?.terminate();
-		if (child && child.exitCode === null) {
-			const exited = once(child, 'exit');
-			child.kill();
-			const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
-			try { await exited; } finally { clearTimeout(timer); }
-		}
+		await stopChild();
 	} finally {
 		if (originalSource) {
 			await unlink(liveFile + '.next').catch(error => {
