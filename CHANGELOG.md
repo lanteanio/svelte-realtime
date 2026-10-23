@@ -241,6 +241,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - On Windows, live handlers and SvelteKit routes share one instance of each server module when the working directory's drive letter is lowercase. Vite 8 resolves its root with an uppercase drive letter, which loaded live modules a second time in development and in production builds.
 
+- On macOS, a `$live` import spelled with different letter case than its file resolves to the file's own spelling, as on Windows, so it no longer loads a second instance of the module.
+
 - One live file save reloads the handlers once, even when Vite reports it under two path spellings or as several events. A repeated event for a write whose reload failed reloads it again, and a later save of unchanged content still reloads.
 
 - An error while the dev server handles an added or removed live file is logged instead of rejecting the watcher listener.

@@ -24,8 +24,10 @@ export function _respellUnder(dir, file, separator = sep) {
 
 /**
  * Keep the configured root spelling while using the directory entries' names
- * below it. Windows accepts differently cased imports, but caches, RPC paths
- * and virtual module IDs must agree with the file names used by the registry.
+ * below it. Windows and macOS (case-insensitive by default) accept differently
+ * cased imports, but caches, RPC paths and virtual module IDs must agree with
+ * the file names used by the registry. An exact entry name wins, so a
+ * case-sensitive volume keeps distinct files apart.
  * Reading entries preserves symlink paths instead of changing their identity.
  * A deleted path keeps its reported suffix so unlink can still invalidate it.
  * @param {string} dir
@@ -34,7 +36,7 @@ export function _respellUnder(dir, file, separator = sep) {
  */
 export function _canonicalLiveFile(dir, file) {
 	const owned = _respellUnder(dir, file);
-	if (owned === null || process.platform !== 'win32') return owned;
+	if (owned === null || (process.platform !== 'win32' && process.platform !== 'darwin')) return owned;
 	const prefix = dir.endsWith(sep) ? dir : dir + sep;
 	const parts = owned.slice(prefix.length).split(sep);
 	let current = dir;
