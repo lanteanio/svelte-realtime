@@ -1,5 +1,6 @@
 // @ts-check
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, realpathSync } from 'fs';
+import { createRequire } from 'module';
 import { resolve, relative, dirname, sep, posix } from 'path';
 
 const VIRTUAL_PREFIX = '\0live:';
@@ -9,6 +10,10 @@ const REGISTRY_ID = '\0live:__registry';
 const REGISTRY_PUBLIC_ID = '/@svelte-realtime-registry';
 const DEVTOOLS_PUBLIC_ID = '/@svelte-realtime-devtools';
 const DEVTOOLS_ID = '\0live-devtools';
+// Every generated $live client module imports this entry point, and no other.
+const CLIENT_ID = 'svelte-realtime/client';
+// The entry points the DEVTOOLS_ID module imports.
+const DEVTOOLS_DEPS = [CLIENT_ID, 'svelte-realtime/devtools'];
 const SERVER_PUBLIC_ID = '/@svelte-realtime-server';
 const SERVER_ID = '\0live-server';
 const LIVE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\s*\(/g;
@@ -739,6 +744,9 @@ export default function svelteRealtime(options) {
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
+			if (isDev && config.optimizeDeps) {
+				_includeGeneratedDeps(config.root, config.optimizeDeps, !!config.resolve?.preserveSymlinks, devtools ? DEVTOOLS_DEPS : [CLIENT_ID]);
+			}
 			_fileCache.clear();
 				_codeCache.clear();
 				_warnedExports.clear();
@@ -1065,6 +1073,72 @@ function _loadServerModule(server, id) {
 
 function _serverModuleGraph(server) {
 	return _serverEnvironment(server)?.moduleGraph ?? server.moduleGraph;
+}
+
+/**
+ * Add the realtime entry points that only generated client modules import to
+ * the client's dependency optimization, so Vite optimizes them before the
+ * first page load. Vite's dependency scan skips virtual modules, so it would
+ * meet them only when the warmup or the browser requests those modules,
+ * optimize again and possibly reload every open page. Vite never discovers a
+ * package it resolves outside node_modules or one that is excluded, and with
+ * discovery off it optimizes only what it is told to, so those setups are left
+ * as configured. Called with the resolved client options, after every config
+ * and configEnvironment hook has adjusted them.
+ * @param {string} root
+ * @param {{ include?: string[], exclude?: string[], noDiscovery?: boolean, disabled?: boolean | 'build' | 'dev' }} optimizeDeps
+ * @param {boolean} preserveSymlinks
+ * @param {readonly string[]} ids
+ */
+function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids) {
+	if (optimizeDeps.noDiscovery || optimizeDeps.disabled === true || optimizeDeps.disabled === 'dev') return;
+	const exclude = optimizeDeps.exclude ?? [];
+	if (exclude.includes('svelte-realtime')) return;
+	let entry;
+	try {
+		entry = realpathSync(createRequire(resolve(root, 'package.json')).resolve(CLIENT_ID));
+	} catch {
+		return;
+	}
+	// Vite follows a link to its target unless preserveSymlinks keeps the
+	// path it found, which is then inside node_modules unless the root's own
+	// package is svelte-realtime and resolves to itself through its exports.
+	const own = preserveSymlinks ? _nearestPackage(root) : undefined;
+	const installed = preserveSymlinks
+		? !(own?.name === 'svelte-realtime' && own.exports) && _hasNodeModulesCopy(root)
+		: /[\\/]node_modules[\\/]/.test(entry);
+	if (!installed) return;
+	const include = (optimizeDeps.include ??= []);
+	for (const id of ids) {
+		if (!exclude.includes(id) && !include.includes(id)) include.push(id);
+	}
+}
+
+/** The package.json nearest to dir, looking upward. */
+function _nearestPackage(dir) {
+	for (;;) {
+		const file = resolve(dir, 'package.json');
+		if (existsSync(file)) {
+			try {
+				return JSON.parse(readFileSync(file, 'utf8'));
+			} catch {
+				return undefined;
+			}
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+}
+
+/** Whether a node_modules/svelte-realtime exists in dir or above, where Vite looks. */
+function _hasNodeModulesCopy(dir) {
+	for (;;) {
+		if (existsSync(resolve(dir, 'node_modules', 'svelte-realtime', 'package.json'))) return true;
+		const parent = dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
 }
 
 /** Insert once without buffering a streamed page or splitting UTF-8 characters. */

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, utimesSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, utimesSync, symlinkSync } from 'fs';
 import { resolve } from 'path';
 import svelteRealtime from '../vite.js';
 
@@ -862,7 +862,7 @@ export function upgrade() { return {}; }
 	});
 });
 
-// - resolveId: /@svelte-realtime-registry ------------------------
+// - resolveId: /@svelte-realtime-registry ------------------------------------
 
 describe('resolveId (registry URL)', () => {
 	it('resolves /@svelte-realtime-registry to the registry virtual module', () => {
@@ -941,7 +941,7 @@ describe('registry co-location transform', () => {
 	});
 });
 
-// - config hook --------------------------------------------------
+// - config hook --------------------------------------------------------------
 
 describe('config hook', () => {
 	it('injects registry when input is an object', () => {
@@ -987,6 +987,161 @@ describe('config hook', () => {
 		const config = { build: { rollupOptions: { input: { index: 'src/index.js' } } } };
 		plugin.config(config, { command: 'build' });
 		expect(config.build.rollupOptions.input['__live-registry']).toBeUndefined();
+	});
+});
+
+describe('dependency optimization for generated modules', () => {
+	afterEach(teardown);
+
+	const CLIENT = 'svelte-realtime/client';
+	const DEPS = [CLIENT, 'svelte-realtime/devtools'];
+	const { exports } = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf8'));
+	const literals = code => [...code.matchAll(/(['"`])((?:(?!\1)[^\\]|\\.)*)\1/g)].map(m => m[2]);
+	const specifiers = code => [...code.matchAll(/\b(?:from|import)\s*\(?\s*(['"])([^'"]+)\1/g)].map(m => m[2]);
+
+	// Each test gets an app root of its own: Node caches resolutions and
+	// package.json reads per path for the life of the process.
+	let appRoot;
+	let appCount = 0;
+	beforeEach(() => {
+		appRoot = resolve(testRoot, 'app-' + process.pid + '-' + ++appCount);
+		mkdirSync(appRoot, { recursive: true });
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'app', private: true }));
+	});
+
+	function installRealtime(dir) {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports }));
+		writeFileSync(resolve(dir, 'client.js'), '');
+		writeFileSync(resolve(dir, 'devtools.js'), '');
+	}
+	const installed = () => installRealtime(resolve(appRoot, 'node_modules/svelte-realtime'));
+	function link(target, path) {
+		mkdirSync(resolve(path, '..'), { recursive: true });
+		symlinkSync(target, path, 'junction');
+	}
+
+	// Vite hands configResolved the client's resolved optimizeDeps, after every
+	// config and configEnvironment hook has adjusted it. Returns its final include.
+	function resolveWith(options = {}, optimizeDeps = {}, config = {}) {
+		const resolved = { include: [], ...optimizeDeps };
+		svelteRealtime({ dir: 'src/live', ...options })
+			.configResolved({ root: appRoot, build: {}, command: 'serve', optimizeDeps: resolved, ...config });
+		return resolved.include;
+	}
+
+	it('optimizes the entry points generated modules import before the first page load', () => {
+		installed();
+		expect(resolveWith()).toEqual(DEPS);
+	});
+
+	it('optimizes the client entry point with devtools disabled', () => {
+		installed();
+		expect(resolveWith({ devtools: false })).toEqual([CLIENT]);
+	});
+
+	it('lists every entry point the devtools module imports', () => {
+		const plugin = svelteRealtime({ dir: 'src/live' });
+		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
+		expect(literals(plugin.load('\0live-devtools', {})).sort()).toEqual(DEPS);
+	});
+
+	it('generates client modules that import nothing but the client entry point', () => {
+		setup({ 'chat.js': [
+			"import { live } from 'svelte-realtime/server';",
+			'export const send = live(async () => {});',
+			"export const messages = live.stream('chat', async () => []);",
+			"export const notifications = live.channel('notifications');",
+			"export const totals = live.derived(['chat'], async () => 0);",
+			"export const avatar = live.upload(async (ctx) => 'ok');",
+			"export const frame = live.binary(async (ctx, buffer) => 'ok');",
+			''
+		].join('\n') });
+		const code = createPlugin().load('\0live:chat', { ssr: false });
+		for (const name of ['send', 'messages', 'notifications', 'totals', 'avatar', 'frame']) expect(code).toContain(name);
+		expect([...new Set(specifiers(code))]).toEqual([CLIENT]);
+	});
+
+	it('keeps the entries already listed and adds none twice', () => {
+		installed();
+		expect(resolveWith({}, { include: ['other', CLIENT] })).toEqual(['other', CLIENT, 'svelte-realtime/devtools']);
+	});
+
+	it('adds nothing to a build', () => {
+		installed();
+		expect(resolveWith({}, {}, { command: 'build' })).toEqual([]);
+	});
+
+	it('optimizes the installed copy under a root named svelte-realtime without exports', () => {
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'svelte-realtime', private: true }));
+		installed();
+		expect(resolveWith()).toEqual(DEPS);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual(DEPS);
+	});
+
+	it('leaves the root\'s own svelte-realtime package to be served from source', () => {
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports }));
+		writeFileSync(resolve(appRoot, 'client.js'), '');
+		installed();
+		expect(resolveWith()).toEqual([]);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual([]);
+	});
+
+	it('leaves a linked svelte-realtime to be served from source', () => {
+		const target = resolve(appRoot, 'linked/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('optimizes a linked svelte-realtime when Vite preserves symlinks', () => {
+		const target = resolve(appRoot, 'linked/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual(DEPS);
+	});
+
+	it('optimizes a pnpm install, which links into node_modules/.pnpm', () => {
+		const target = resolve(appRoot, 'node_modules/.pnpm/svelte-realtime@0.5.15/node_modules/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		expect(resolveWith()).toEqual(DEPS);
+	});
+
+	it('follows a package replaced by a link while the process runs', () => {
+		installed();
+		expect(resolveWith()).toEqual(DEPS);
+		rmSync(resolve(appRoot, 'node_modules/svelte-realtime'), { recursive: true, force: true });
+		const target = resolve(appRoot, 'linked/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('adds nothing when the client entry point does not resolve', () => {
+		const dir = resolve(appRoot, 'node_modules/svelte-realtime');
+		installRealtime(dir);
+		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports: { './devtools': './devtools.js' } }));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('keeps entry points the user excluded out of the list', () => {
+		installed();
+		expect(resolveWith({}, { exclude: ['svelte-realtime'] })).toEqual([]);
+		expect(resolveWith({}, { exclude: [CLIENT] })).toEqual(['svelte-realtime/devtools']);
+	});
+
+	it('adds nothing when dependency discovery is off in the resolved config', () => {
+		installed();
+		expect(resolveWith({}, { noDiscovery: true })).toEqual([]);
+		expect(resolveWith({}, { disabled: true })).toEqual([]);
+		expect(resolveWith({}, { disabled: 'dev' })).toEqual([]);
+		expect(resolveWith({}, { disabled: 'build' })).toEqual(DEPS);
+	});
+
+	it('adds nothing through the config hook', () => {
+		installed();
+		expect(svelteRealtime({ dir: 'src/live' }).config({ root: appRoot }, { command: 'serve' })).toBeUndefined();
 	});
 });
 
@@ -1241,7 +1396,7 @@ export const inbox = live.stream(
 	});
 });
 
-// - path traversal -----------------------------------------------
+// - path traversal -----------------------------------------------------------
 
 describe('path traversal prevention', () => {
 	afterEach(teardown);
