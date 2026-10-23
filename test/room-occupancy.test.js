@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { live } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 
-const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+const joined = (...streams) => Promise.all(streams.map(s => s.waitFor(v => v !== undefined)));
 let env;
 let connections;
 afterEach(() => {
@@ -37,10 +37,11 @@ describe('live.room lobby occupancy read', () => {
 		const alice = connect({ id: 'a', name: 'Alice', email: 'alice@example.com' });
 		const bob = connect({ id: 'b', name: 'Bob', email: 'bob@example.com' });
 		const carol = connect({ id: 'c', name: 'Carol', email: 'carol@example.com' });
-		alice.subscribe('chat/room/__data', 'general');
-		bob.subscribe('chat/room/__data', 'general');
-		carol.subscribe('chat/room/__data', 'random');
-		await settle();
+		await joined(
+			alice.subscribe('chat/room/__data', 'general'),
+			bob.subscribe('chat/room/__data', 'general'),
+			carol.subscribe('chat/room/__data', 'random')
+		);
 
 		const viewer = connect({ id: 'v', name: 'Viewer' });
 		const snapshot = await viewer.call('chat/room/__roomsSync');
@@ -51,7 +52,7 @@ describe('live.room lobby occupancy read', () => {
 		expect(JSON.stringify(snapshot)).not.toMatch(/Alice|Bob|Carol|example\.com/);
 
 		const lobby = viewer.subscribe('chat/room/__rooms');
-		await settle();
+		await lobby.waitFor(v => Array.isArray(v));
 		expect(byTopic(lobby.value)['chat:general'].count).toBe(2);
 	});
 
@@ -59,17 +60,16 @@ describe('live.room lobby occupancy read', () => {
 		const connect = setup();
 		const alice = connect({ id: 'a', name: 'Alice' });
 		const bob = connect({ id: 'b', name: 'Bob' });
-		alice.subscribe('chat/room/__data', 'general');
-		bob.subscribe('chat/room/__data', 'random');
-		await settle();
+		await joined(alice.subscribe('chat/room/__data', 'general'), bob.subscribe('chat/room/__data', 'random'));
 
 		const viewer = connect({ id: 'v', name: 'Viewer' });
 		expect(byTopic(await viewer.call('chat/room/__roomsSync'))['chat:random'].count).toBe(1);
 
 		bob.disconnect();
-		await settle();
-		const after = byTopic(await viewer.call('chat/room/__roomsSync'));
-		expect(after['chat:random']).toBeUndefined();
-		expect(after['chat:general'].count).toBe(1);
+		await vi.waitFor(async () => {
+			const after = byTopic(await viewer.call('chat/room/__roomsSync'));
+			expect(after['chat:random']).toBeUndefined();
+			expect(after['chat:general'].count).toBe(1);
+		});
 	});
 });
