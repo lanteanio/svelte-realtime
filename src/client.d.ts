@@ -253,6 +253,10 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 * with no call made), then asyncOp is called, so the request it sends is
 	 * on the wire before any subscriber sees the change; the change then
 	 * shows synchronously, before `mutate` returns.
+	 * Store subscribers must not throw. One that throws is reported through
+	 * `reportError` and does not fail the mutate, which settles as its call
+	 * did; Svelte's stores stop notifying after a subscriber throws, so the
+	 * page's stores stay stale until it reloads.
 	 * On success, returns the asyncOp's result and leaves the store as-is
 	 * (the server's confirming event will reconcile via the merge strategy).
 	 * On failure, the optimistic change is rolled back and the rejection
