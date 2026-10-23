@@ -2409,7 +2409,7 @@ The default in-process lock allows 1000 queued callers per key. Further callers 
 
 ### Bounded wait with `maxWaitMs`
 
-Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'` (plus `.key` and `.maxWaitMs` fields for observability).
+Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'`. The server-side `LiveError` also carries `.key` and `.maxWaitMs` for observability; those fields do not reach the client.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const settleInvoice = live.lock(
