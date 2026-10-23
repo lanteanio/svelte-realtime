@@ -34,27 +34,52 @@ import { beginDeliveryAdmission, endDeliveryAdmission } from './delivery-authori
 const textDecoder = new TextDecoder();
 
 /**
+ * Load failures already reported, keyed by path, each holding the error
+ * messages seen. A module whose import fails keeps failing on every call, so
+ * the diagnostic fires once per distinct failure instead of once per frame. A
+ * successful load clears the path, so a later breakage reports again.
+ * @type {Map<string, Set<string>>}
+ */
+const _reportedLoadFailures = new Map();
+const _LOAD_FAILURE_REPORT_CAP = 256;
+
+/**
  * Resolve the live function a call names. A module that fails to load (a
  * syntax error saved in development, a module whose top level throws) answers
  * the call as an internal error instead of rejecting outside the caller's
  * error handling. The entry stays lazy, so a later call loads it again.
  * @param {string} path
  * @param {string | undefined} requestId
+ * @param {{ onError?: Function } | undefined} options
+ * @param {() => any} buildCtx - Builds the call context for `onError`
  * @returns {Promise<{ fn: Function | null, failure?: undefined } | { fn?: undefined, failure: { ok: false, code: string, error: string } }>}
  */
-async function _resolveForCall(path, requestId) {
+async function _resolveForCall(path, requestId, options, buildCtx) {
 	try {
-		return { fn: await _resolveRegistryEntry(path) };
+		const fn = await _resolveRegistryEntry(path);
+		if (_reportedLoadFailures.size !== 0) _reportedLoadFailures.delete(path);
+		return { fn };
 	} catch (err) {
-		emitOperationalEvent({
-			source: 'svelte-realtime',
-			component: 'server.rpc',
-			event: 'rpc.module.load-failed',
-			severity: 'error',
-			dataClass: 'application',
-			message: 'A live module failed to load; the call received an internal error.',
-			attributes: { path, requestId, error: diagnosticError(err), help: 'https://svti.me/errors' }
-		});
+		if (options?.onError) {
+			try { options.onError(path, err, buildCtx()); } catch {}
+		}
+		const message = err instanceof Error ? err.message : String(err);
+		let seen = _reportedLoadFailures.get(path);
+		if (!seen?.has(message)) {
+			if (_reportedLoadFailures.size < _LOAD_FAILURE_REPORT_CAP) {
+				if (!seen) { seen = new Set(); _reportedLoadFailures.set(path, seen); }
+				if (seen.size < _LOAD_FAILURE_REPORT_CAP) seen.add(message);
+			}
+			emitOperationalEvent({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.module.load-failed',
+				severity: 'error',
+				dataClass: 'application',
+				message: 'A live module failed to load; the call received an internal error.',
+				attributes: { path, requestId, error: diagnosticError(err), help: 'https://svti.me/errors' }
+			});
+		}
 		return { failure: { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' } };
 	}
 }
@@ -728,26 +753,39 @@ async function _executeRpc(ws, msg, platform, options) {
  * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
  */
 export async function _executeVolatileRpc(ws, msg, platform, options) {
-	if (_IS_DEV) {
-		const path = msg.rpc;
-		// A load failure is reported by the call below.
-		const fn = await _resolveRegistryEntry(path).catch(() => null);
-		if (fn && !_hasVolatileMarker(fn) && !_volatileWarnSet.has(path)) {
-			if (_volatileWarnSet.size < _VOLATILE_WARN_CAP) _volatileWarnSet.add(path);
-			console.warn(formatDiagnostic({
-				source: 'svelte-realtime',
-				component: 'server.rpc',
-				event: 'rpc.volatile.unmarked',
-				severity: 'warn',
-				message: 'A fire-and-forget call reached a handler that is not marked live.volatile(); errors will be silently dropped.',
-				attributes: { path, help: 'https://svti.me/volatile' }
-			}));
-		}
-	}
+	const path = msg.rpc;
+	// A lazy entry is checked after the call has loaded it, so a module that
+	// fails to load is imported once per call, not twice.
+	const entry = _IS_DEV ? registry.get(path) : null;
+	const checkAfter = _IS_DEV && (!entry || !!(/** @type {any} */ (entry).__lazy));
+	if (entry && !checkAfter) _warnUnmarkedVolatile(path, entry);
 	/** @type {any} */ (msg).id = randomUuid();
 	/** @type {any} */ (msg).__volatile = true;
 	await _executeSingleRpc(ws, /** @type {any} */ (msg), platform, options);
 	// No _respond - fire-and-forget contract.
+	if (checkAfter) {
+		const fn = registry.get(path);
+		if (fn && !/** @type {any} */ (fn).__lazy) _warnUnmarkedVolatile(path, fn);
+	}
+}
+
+/**
+ * Warn once per path when a fire-and-forget call reaches a handler that is not
+ * marked `live.volatile()`. Development only.
+ * @param {string} path
+ * @param {Function} fn
+ */
+function _warnUnmarkedVolatile(path, fn) {
+	if (_hasVolatileMarker(fn) || _volatileWarnSet.has(path)) return;
+	if (_volatileWarnSet.size < _VOLATILE_WARN_CAP) _volatileWarnSet.add(path);
+	console.warn(formatDiagnostic({
+		source: 'svelte-realtime',
+		component: 'server.rpc',
+		event: 'rpc.volatile.unmarked',
+		severity: 'warn',
+		message: 'A fire-and-forget call reached a handler that is not marked live.volatile(); errors will be silently dropped.',
+		attributes: { path, help: 'https://svti.me/volatile' }
+	}));
 }
 
 /**
@@ -1408,7 +1446,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	if (!_isLazyResolved()) await _resolveAllLazy();
 
 	const args = rawArgs || [];
-	const resolved = await _resolveForCall(path, requestId);
+	const resolved = await _resolveForCall(path, requestId, options, () => _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId));
 	if (resolved.failure) {
 		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
 		return { id, ...resolved.failure };
@@ -1596,7 +1634,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
-	const resolved = await _resolveForCall(path, requestId);
+	const resolved = await _resolveForCall(path, requestId, options, () => _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), null, null, requestId));
 	if (resolved.failure) {
 		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
 		_respond(ws, platform, id, resolved.failure, requestId, path);

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { live, __register, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { live, __register, __registerFlag, _activateDerived, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
 import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { mockWs } from './helpers/mock-ws.js';
@@ -61,6 +61,71 @@ describe('live modules that fail to load', () => {
 	});
 });
 
+/** A lazy registry entry that runs `steps` in order, one per load. */
+function scripted(steps) {
+	let attempts = 0;
+	const loader = async () => steps[Math.min(attempts++, steps.length - 1)]();
+	loader.__lazy = true;
+	return { loader, attempts: () => attempts };
+}
+
+describe('reporting live module load failures', () => {
+	it('passes every failure to onError and reports each distinct failure once', async () => {
+		const events = [];
+		cleanups.push(setOperationalEventSink(record => events.push(record)));
+		const fail = message => () => { throw new SyntaxError(message); };
+		const entry = scripted([fail('first'), fail('first'), () => live(() => 'ok'), fail('first')]);
+		__register('reported/echo', entry.loader);
+		const errors = [];
+		const onError = (path, error, ctx) => errors.push({ path, message: error.message, user: ctx.user.id });
+		const ws = mockWs({ id: 'member' });
+		const platform = mockPlatform();
+		const loadFailures = () => events.filter(record => record.event === 'rpc.module.load-failed').length;
+
+		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'a', args: [] }), platform, { onError });
+		await flush();
+		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'b', args: [] }), platform, { onError });
+		await flush();
+		expect(errors).toEqual([
+			{ path: 'reported/echo', message: 'first', user: 'member' },
+			{ path: 'reported/echo', message: 'first', user: 'member' }
+		]);
+		expect(loadFailures()).toBe(1);
+
+		// A successful load caches the handler; a later failure of the same
+		// path, after it is registered lazily again, reports again.
+		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'c', args: [] }), platform, { onError });
+		await flush();
+		expect(platform.sent.find(item => item.data?.id === 'c').data).toMatchObject({ ok: true, data: 'ok' });
+		__register('reported/echo', entry.loader);
+		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'd', args: [] }), platform, { onError });
+		await flush();
+		expect(loadFailures()).toBe(2);
+		expect(errors).toHaveLength(3);
+	});
+
+	it('loads a lazy module once per fire-and-forget call and still warns about an unmarked handler', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		cleanups.push(() => warn.mockRestore());
+		cleanups.push(setOperationalEventSink(() => {}));
+		const failing = scripted([() => { throw new SyntaxError('broken'); }]);
+		__register('volatile/broken', failing.loader);
+		const unmarked = scripted([() => live(() => undefined)]);
+		__register('volatile/unmarked', unmarked.loader);
+		const ws = mockWs({ id: 'member' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, frame({ rpc: 'volatile/broken', args: [] }), platform);
+		await flush();
+		expect(failing.attempts()).toBe(1);
+
+		handleRpc(ws, frame({ rpc: 'volatile/unmarked', args: [] }), platform);
+		await flush();
+		expect(unmarked.attempts()).toBe(1);
+		expect(warn.mock.calls.filter(args => /not marked live\.volatile/.test(String(args[0])))).toHaveLength(1);
+	});
+});
+
 describe('a development reload that fails', () => {
 	it('restores the previous handlers without keeping what the failed reload registered', async () => {
 		__register('hmr/kept', live(() => 'kept'));
@@ -78,5 +143,24 @@ describe('a development reload that fails', () => {
 		const partial = platform.sent.find(item => item.data?.id === 'partial').data;
 		expect(partial.ok).toBe(false);
 		expect(['NOT_FOUND', 'FORBIDDEN', 'UNAUTHENTICATED']).toContain(partial.code);
+	});
+	it.each([
+		['registers nothing', () => {}],
+		['registers the flag again before the edited module fails', () => __registerFlag('flag:hmr-kept', 'idle')]
+	])('keeps flags following cluster sets when the failed reload %s', async (_label, failedReload) => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		__registerFlag('flag:hmr-kept', 'idle');
+		const flag = live.flag('flag:hmr-kept', 'idle');
+		const snapshot = _prepareHmr();
+		failedReload();
+		_restoreHmr(snapshot);
+
+		platform.publish('flag:hmr-kept', 'set', 'active');
+		await flush();
+		expect(flag.get()).toBe('active');
+		platform.publish('flag:hmr-kept', 'set', 'idle');
+		await flush();
+		expect(flag.get()).toBe('idle');
 	});
 });

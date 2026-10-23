@@ -3673,6 +3673,7 @@ export function _prepareHmr() {
 		effects: new Map(effectRegistry),
 		aggregates: new Map(aggregateRegistry),
 		smooth: new Map(_smoothTopics),
+		flags: [..._flagWatchers.keys()],
 		hadCron: _cronTimerActive(),
 		declaredCoalesce: new Map(_declaredCoalesce),
 		declaredCoalescePattern: new Map(_declaredCoalescePattern),
@@ -3843,6 +3844,10 @@ export function _restoreHmr(snap) {
 			_smoothTopics.set(k, v);
 		}
 	}
+
+	// Reinstall the flag watchers. They bind to the value cells, which survive
+	// HMR, so a restored flag keeps following inbound sets.
+	if (snap.flags) for (const topic of snap.flags) _installFlagWatcher(topic);
 }
 
 // live.webhook bridges an external HTTP webhook into a topic; the body lives in

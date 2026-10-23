@@ -79,7 +79,7 @@ it('serializes add, unlink and ordinary edits through the same registry queue', 
 		if (++imports === 1) await held;
 		return {};
 	});
-	const first =server.watcher.listeners('add')[0](join(liveDir, 'one.js'));
+	const first = server.watcher.listeners('add')[0](join(liveDir, 'one.js'));
 	await flush();
 	const removed = server.watcher.listeners('unlink')[0](join(liveDir, 'two.js'));
 	const changed = plugin.handleHotUpdate({ file: join(liveDir, 'chat.js'), server });
