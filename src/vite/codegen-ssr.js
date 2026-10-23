@@ -10,12 +10,13 @@ import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE,
  * Re-exports everything from the real module, and adds .load() wrappers for streams.
  * @param {string} filePath
  * @param {string} modulePath
+ * @param {string} [dir] - the live directory, for messages
  * @returns {string}
  */
-export function _generateSsrStubs(filePath, modulePath) {
+export function _generateSsrStubs(filePath, modulePath, dir = 'src/live') {
 	const normalized = filePath.split(sep).join(posix.sep);
 	// Declarations are found in `scan` and read from `source` (see _liveSource).
-	const { scan, text: source } = _liveSource(_readCached(filePath), filePath);
+	const { scan, text: source } = _liveSource(_readCached(filePath), `${dir}/${modulePath}`);
 
 	/** @type {string[]} */
 	const storeNames = [];

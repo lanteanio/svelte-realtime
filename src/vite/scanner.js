@@ -528,15 +528,13 @@ function _templateRanges(s, i, out) {
 	return s.length - 1;
 }
 
-/** @type {Set<string>} */
-const _warnedHiddenDecls = new Set();
-
 /**
  * Hide each declaration-starting `export` that sits inside a comment or
  * string text, by replacing it with `_xport` (same length, so offsets keep).
  * Nothing is scanned when the source has no such `export`. A live export
  * hidden as string text at the start of its line is more likely a quote the
- * scanner misread than a quoted declaration, so it is reported once.
+ * scanner misread than a quoted declaration, so it is reported once per
+ * module and name (only when `file` names the module, as `_liveSource` does).
  * @param {string} source
  * @param {string} [file]
  * @returns {string}
@@ -556,11 +554,12 @@ export function _hideNonCodeExports(source, file) {
 		while (r < ranges.length && ranges[r][1] < at) r++;
 		if (r >= ranges.length || ranges[r][0] > at) continue;
 		hidden.push(at);
-		if (ranges[r][2] === 's' && (at === 0 || source[at - 1] === '\n')) {
+		if (file && ranges[r][2] === 's' && (at === 0 || source[at - 1] === '\n')) {
 			const decl = _LIVE_DECL_AFTER_RE.exec(source.slice(at, at + 200));
-			const key = (file || '') + '\0' + (decl ? decl[1] : '');
-			if (decl && !_warnedHiddenDecls.has(key)) {
-				_warnedHiddenDecls.add(key);
+			// Shares the unsafe-export warning set, so it is cleared with it.
+			const key = 'hidden-export\0' + file.replace(/\\/g, '/') + '\0' + (decl ? decl[1] : '');
+			if (decl && !_warnedExports.has(key)) {
+				_warnedExports.add(key);
 				console.warn(
 					`[svelte-realtime] ${file ? file + ': ' : ''}'${decl[1]}' looks like a live export but is read as text inside a string or template, so it gets no client stub. ` +
 					`If it is a real export, look above it for an unbalanced quote or backtick.`
@@ -596,7 +595,8 @@ export function _rememberScan(text, scan) {
 /**
  * Find `re` in the scan view of `text` (declarations in comments and strings
  * hidden), then read the match from `text` itself at that offset, so captured
- * values are the source as written.
+ * values are the source as written. A match the source does not repeat at
+ * that offset is no match: a value never comes from the scan view.
  * @param {RegExp} re
  * @param {string} text
  * @returns {RegExpExecArray | null}
@@ -612,5 +612,5 @@ export function _locate(re, text) {
 	if (!found || scan === text) return found;
 	const sticky = new RegExp(re.source, re.flags.replace(/[gy]/g, '') + 'y');
 	sticky.lastIndex = found.index;
-	return sticky.exec(text) || found;
+	return sticky.exec(text);
 }

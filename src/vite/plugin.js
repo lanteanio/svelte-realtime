@@ -150,7 +150,7 @@ export default function svelteRealtime(options) {
 
 				let code;
 				if (ssr) {
-					code = _generateSsrStubs(filePath, modulePath);
+					code = _generateSsrStubs(filePath, modulePath, dir);
 				} else {
 					code = _generateClientStubs(filePath, modulePath, dir, reconcileIntervalMs);
 					const runeError = _runeSubpathError(code, modulePath, svelteVersion);

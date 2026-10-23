@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import svelteRealtime from '../src/vite.js';
 import { _fileCache, _codeCache, _warnedExports } from '../src/vite/source-cache.js';
 import { _generateTypeDeclarations } from '../src/vite/codegen-types.js';
+import { _locate, _rememberScan } from '../src/vite/scanner.js';
 
 const testRoot = resolve(import.meta.dirname, '__fixtures_commented_exports__');
 const liveDir = resolve(testRoot, 'src/live');
@@ -156,10 +157,35 @@ describe('commented and quoted live exports', () => {
 			].join('\n')
 		});
 		const plugin = createPlugin();
-		const { value: client, warns } = captureWarns(() => code(plugin.load('\0live:misread', { ssr: false })));
-		captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
+		const { value: client, warns } = captureWarns(() => {
+			const out = code(plugin.load('\0live:misread', { ssr: false }));
+			plugin.load('\0live:misread', { ssr: true });
+			plugin.load('\0live:__registry', { ssr: true });
+			_generateTypeDeclarations(liveDir, 'src/live');
+			return out;
+		});
 		expect(client).toContain('export const real = __rpc(');
 		expect(client).not.toMatch(/\bghost\b/);
-		expect(warns.filter((w) => w.includes("'ghost' looks like a live export"))).toHaveLength(1);
+		const misread = warns.filter((w) => w.includes('looks like a live export'));
+		expect(misread).toHaveLength(1);
+		expect(misread[0]).toContain("src/live/misread: 'ghost'");
+
+		// Cleared with the other export warnings, so a new build warns again.
+		_warnedExports.clear();
+		_codeCache.clear();
+		const again = captureWarns(() => createPlugin().load('\0live:misread', { ssr: false })).warns;
+		expect(again.filter((w) => w.includes('looks like a live export'))).toHaveLength(1);
+	});
+
+	it('_locate finds a match in the scan view but reads it only from the source', () => {
+		// Same length, different text at the found offset: no match, rather
+		// than a value taken from the scan view.
+		_rememberScan('x = live.fla9(1)', 'x = live.flag(1)');
+		expect(_locate(/live\.flag\((\d)\)/, 'x = live.fla9(1)')).toBeNull();
+		_rememberScan('y = live.flag(2)', 'y = live.flag(2)');
+		expect(_locate(/live\.flag\((\d)\)/, 'y = live.flag(2)')?.[1]).toBe('2');
+		_rememberScan("const a = 'export const b = 1'; z = live.flag(3)", "const a = '_xport const b = 1'; z = live.flag(3)");
+		const m = _locate(/'([^']*)'/, "const a = 'export const b = 1'; z = live.flag(3)");
+		expect(m?.[1]).toBe('export const b = 1');
 	});
 });
