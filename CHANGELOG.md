@@ -32,6 +32,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** Server and client from this release for credits; a client from this release falls back to the previous format once per connection against an older server, and an older client that overflows the queue fails with `FLOW_BACKPRESSURE`.
   - **Compatibility:** Additive; `FLOW_BACKPRESSURE` now fails only a sender that ignores its credit.
   - **Detail:** [Added engineering detail](#added).
+- **Added: delivery authorization.** `realtime({ authorizeDelivery })` re-checks current access for every message to every recipient, including relayed, queued and replayed frames, stream snapshots and server requests, so a subscriber whose role, assignment or session was revoked stops receiving data and its connection closes.
+  - **Affects:** Applications whose access can change while a subscription is open.
+  - **Action:** None unless you opt in; configure the policy on every worker to use it.
+  - **Requires:** svelte-adapter-uws 0.6.0-next.97 or newer; with an older adapter a configured policy fails startup.
+  - **Compatibility:** Additive and off by default; publishes walk every local connection while a policy is installed.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: tenant-scoped erasure.** When a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store is configured, `live.forget(userId, opts)` now requires `opts.tenantId` and rejects with `INVALID_REQUEST` before purging anything, instead of silently erasing the untenanted scope and reporting success for a call that named no tenant.
   - **Affects:** Multi-tenant applications and applications with a durable erasure or dead-letter store.
   - **Action:** Pass `tenantId`, or an explicit `null` for the untenanted scope, on every `live.forget` call.
@@ -90,6 +96,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Streams expose a `pending` store that turns true only once an attach has taken longer than `pendingDelay` (100 ms by default, `0` for immediate), so a quick load never flashes a spinner. Connection status and errors stay immediate.
 
 - `live.metrics()` registers `svelte_realtime_webhook_dead_letter_failures_total`, counting failed webhook deliveries whose dead-letter write threw or rejected. Each one also emits the `webhook.dead-letter.persist-failed` operational event, so an empty dead-letter store can be told apart from a store that lost records.
+
+- `realtime({ authorizeDelivery })` installs a per-recipient delivery policy on the adapter (`platform.authorizeDelivery`). It receives the live context and a frozen descriptor with `kind` (`message`, `replay`, `snapshot`, `request`), wire `topic` (`null` for requests), `event`, `data`, `binary`, and the admitting stream's `rpc` and frozen `args`. RPC, upload and protocol responses pass without a check. See [delivery authorization](docs/delivery-authorization.md).
+
+- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws.
 
 ### Changed
 

@@ -4842,9 +4842,72 @@ export function getPlatform(): Platform | null;
 export function publish(topic: string, event: string, data?: unknown, options?: unknown): void;
 
 /**
+ * One outbound message as `realtime({ authorizeDelivery })` sees it. The
+ * object is frozen (its `data` is not). Branch on `kind` first.
+ */
+export interface RealtimeDelivery {
+	/**
+	 * `message` for publishes and sends, `replay` for replayed frames
+	 * (including a stream's replay response), `snapshot` for a stream's
+	 * initial data inside its RPC response, `request` for a
+	 * `platform.request` frame.
+	 */
+	kind: 'message' | 'replay' | 'snapshot' | 'request';
+	/**
+	 * Wire topic, including any tenant prefix; replay is shown under the
+	 * topic it replays. `null` for a request, which is addressed to one
+	 * socket: decide it on `event` and `data`.
+	 */
+	topic: string | null;
+	/** Event name, or null for a binary frame, a snapshot, or an envelope that names none. */
+	event: string | null;
+	/** Parsed payload; undefined for a binary frame. */
+	data: unknown;
+	binary: boolean;
+	/** RPC path of the stream that admitted `topic` on this connection, or null (raw subscriptions, requests). */
+	rpc: string | null;
+	/** Frozen copy of that stream's validated arguments, or null. */
+	args: readonly unknown[] | null;
+}
+
+/** Per-worker bounds for delivery authorization, validated by the adapter. */
+export interface RealtimeDeliveryAuthorizationOptions {
+	/**
+	 * Bytes a connection may hold while decisions are pending, counted with
+	 * the transport's unflushed bytes. Past the bound a frame is dropped, or
+	 * the connection closed with `closeOnBackpressureLimit`.
+	 * @default websocket.maxBackpressure (1 MiB)
+	 */
+	maxPendingBytes?: number;
+	/**
+	 * Longest a pending decision may take, in milliseconds (1 to 2147483647).
+	 * A slower decision closes the connection with 1011.
+	 * @default 5000
+	 */
+	timeoutMs?: number;
+}
+
+/**
  * Configuration accepted by `realtime()`.
  */
 export interface RealtimeConfig {
+	/**
+	 * Per-recipient delivery policy, re-run for every outbound message on
+	 * every worker: stream frames, derived output, stream snapshots, replay,
+	 * relayed and queued frames, signals and server requests. Read current
+	 * authoritative state here; only a literal `true` admits. A synchronous
+	 * answer delivers inline, a promise holds that connection's later frames
+	 * in order. A refusal closes the connection with 1013; a throw, a
+	 * non-boolean answer or a timeout closes it with 1011. RPC, upload and
+	 * protocol responses are not shown; their guards already ran.
+	 *
+	 * Requires svelte-adapter-uws 0.6.0-next.97 or newer: `init` throws when
+	 * the adapter has no `platform.authorizeDelivery`. Without this option
+	 * nothing changes. See docs/delivery-authorization.md.
+	 */
+	authorizeDelivery?: (ctx: LiveContext<any>, delivery: RealtimeDelivery) => boolean | PromiseLike<boolean>;
+	/** Bounds passed to the adapter's delivery policy. Requires `authorizeDelivery`. */
+	deliveryAuthorizationOptions?: RealtimeDeliveryAuthorizationOptions;
 	/**
 	 * Cluster bus. Pass `createPubSubBus(redis)` or any object exposing
 	 * `wrap(platform)` to enable cluster fan-out. Omit (or pass `null`)

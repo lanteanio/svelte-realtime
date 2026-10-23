@@ -123,6 +123,7 @@ export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 import { createShortCode } from './shared/short-code.js';
+import { installDeliveryAuthorization, forgetDeliverySubscription, validateDeliveryAuthorizationConfig } from './server/delivery-authorization.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers };
 
@@ -1124,6 +1125,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 	}
 	let remainingSubscribers = 0;
 	if (removedFromTopic) {
+		forgetDeliverySubscription(ws, topic);
 		const wsSet = _topicWsCounts.get(topic);
 		if (wsSet) {
 			// subscription.bookkeeping invariant: if owners.length hit 0 for
@@ -3920,6 +3922,7 @@ export function unsubscribe(ws, topic, { platform }) {
 }
 
 function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant) {
+	forgetDeliverySubscription(ws, topic);
 	const topicMap = _wsStreamOwners.get(ws);
 	if (!topicMap) return;
 	const owners = topicMap.get(topic);
@@ -3999,6 +4002,7 @@ const _firedUnsubscribes = new WeakMap();
  * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function close(ws, { platform, subscriptions }) {
+	forgetDeliverySubscription(ws);
 	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
@@ -4322,11 +4326,17 @@ export function publish(topic, event, data, options) {
  *   upgrade?: (...args: any[]) => any,
  *   onError?: (path: string, error: unknown) => void,
  *   privacySecret?: string,
+ *   authorizeDelivery?: (ctx: any, delivery: any) => unknown,
+ *   deliveryAuthorizationOptions?: { maxPendingBytes?: number, timeoutMs?: number },
  * }} [config]
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, authorizeDelivery, deliveryAuthorizationOptions } = cfg;
+
+	// Per-recipient delivery authorization (opt-in). Validated here; installed
+	// on the adapter in init, which fails when the adapter lacks the capability.
+	validateDeliveryAuthorizationConfig(authorizeDelivery, deliveryAuthorizationOptions);
 
 	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over
@@ -4435,6 +4445,7 @@ export function realtime(config) {
 					);
 				}
 			}
+			if (authorizeDelivery !== undefined) installDeliveryAuthorization(ctx.platform, authorizeDelivery, deliveryAuthorizationOptions);
 			setCronPlatform(ctx.platform);
 			_activateDerived(ctx.platform);
 		},

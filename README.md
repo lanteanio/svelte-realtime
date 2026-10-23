@@ -2191,6 +2191,10 @@ When a server-side subscribe denial fires (guard rejection, access predicate, ra
 
 Custom denial reasons returned from a server-side `subscribe` hook (e.g. `'KYC_PENDING'`) flow through verbatim as the `code` field. The same denial fans out to every stream subscribed to the topic.
 
+### Revoking access to open subscriptions
+
+Guards decide at subscribe time. When a role, assignment or session can be revoked while a stream stays open, add `realtime({ authorizeDelivery: (ctx, delivery) => ... })`: the policy runs for every outbound message to every recipient on every worker, sees the `kind`, wire `topic`, `event`, `data` and the admitting stream's `rpc` and `args`, and only a literal `true` delivers. A refusal closes that connection with 1013. It requires svelte-adapter-uws 0.6.0-next.97 or newer and fails startup without it. See [delivery authorization](docs/delivery-authorization.md).
+
 ---
 
 ## Multi-tenancy (`live.tenant`)

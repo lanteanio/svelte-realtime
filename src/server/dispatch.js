@@ -29,6 +29,7 @@ import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceCla
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol, _takeUploadCapAnnouncement } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
+import { rememberDeliverySubscription } from './delivery-authorization.js';
 
 const textDecoder = new TextDecoder();
 
@@ -878,6 +879,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		_respond(ws, platform, id, { attach: true, topic });
 	}
 	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+	rememberDeliverySubscription(ws, platform, topic, msg.rpc, streamArgs);
 	subscribedRef.topic = topic;
 
 	// Replay-topic + dynamic-piiRedact registration, performed only now that
