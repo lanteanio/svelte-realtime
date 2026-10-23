@@ -1,7 +1,7 @@
 // @ts-check
 import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
 import { createRequire } from 'module';
-import { relative, resolve, sep } from 'path';
+import { dirname, relative, resolve, sep } from 'path';
 import { _findLiveFiles } from './codegen-registry.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _runeSubpathError } from './svelte-version.js';
@@ -118,6 +118,41 @@ function importsResolve(file) {
 	return true;
 }
 
+/**
+ * The version of the package `name` that `file` belongs to, or null.
+ * @param {string} file
+ * @param {string} name
+ */
+function packageVersion(file, name) {
+	for (let dir = dirname(file); ; dir = dirname(dir)) {
+		const manifest = resolve(dir, 'package.json');
+		if (existsSync(manifest)) {
+			try {
+				const data = JSON.parse(readFileSync(manifest, 'utf8'));
+				if (data.name === name) return typeof data.version === 'string' ? data.version : null;
+			} catch {
+				return null;
+			}
+		}
+		if (dirname(dir) === dir) return null;
+	}
+}
+
+/**
+ * Whether `a` and `b` resolve `id` to the same file or to the same version
+ * of its package.
+ * @param {NodeJS.Require} a
+ * @param {NodeJS.Require} b
+ * @param {string} id
+ */
+function sameCopy(a, b, id) {
+	const fileA = realpathSync(a.resolve(id));
+	const fileB = realpathSync(b.resolve(id));
+	if (fileA === fileB) return true;
+	const version = packageVersion(fileA, packageName(id));
+	return version !== null && version === packageVersion(fileB, packageName(id));
+}
+
 /** @param {string} id */
 function packageName(id) {
 	const parts = id.split('/');
@@ -167,7 +202,8 @@ function excluded(exclude, id) {
  * Vite discovers when the browser requests them. Vite bundles the app's
  * resolution and hands it to every importer of the same id, so an entry is
  * added when the realtime source and the app both resolve it into
- * node_modules.
+ * node_modules and to the same file or package version; a different version
+ * is left to discovery.
  *
  * The packages generated modules import for the export kinds the app
  * declares are the app's own imports. A realtime subpath among them is added
@@ -200,7 +236,8 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 	const fromRealtime = createRequire(entry);
 	/** @param {string} id */
 	const sharedWithRealtime = (id) => resolvesInstalled(fromRealtime, id, preserveSymlinks)
-		&& resolvesInstalled(fromRoot, id, preserveSymlinks);
+		&& resolvesInstalled(fromRoot, id, preserveSymlinks)
+		&& sameCopy(fromRealtime, fromRoot, id);
 	/** @param {string} id */
 	const realtimeImports = (id) => {
 		try {

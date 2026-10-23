@@ -118,6 +118,25 @@ describe('dependency optimization for generated modules', () => {
 		expect(resolveWith({}, { exclude: ['svelte-realtime'] })).toEqual(ADAPTER);
 	});
 
+	it('optimizes the adapter entries when both sides install the same file', () => {
+		const target = linkedRealtime();
+		// Both resolve the app's copy, through the checkout's parent directories.
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.0.0-unversioned');
+		writeFileSync(resolve(appRoot, 'node_modules/svelte-adapter-uws/package.json'), JSON.stringify({
+			...JSON.parse(readFileSync(resolve(appRoot, 'node_modules/svelte-adapter-uws/package.json'), 'utf8')), version: undefined
+		}));
+		mkdirSync(resolve(target, 'node_modules'), { recursive: true });
+		expect(resolveWith()).toEqual(ADAPTER);
+	});
+
+	it('leaves the adapter entries to discovery when the linked package runs another adapter version', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'), '0.6.1');
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'), '0.6.0');
+		writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });");
+		expect(resolveWith()).toEqual([]);
+	});
+
 	it('leaves the adapter to be served from source where Vite would not optimize it', () => {
 		const target = linkedRealtime();
 		// The realtime checkout links the adapter from source.
