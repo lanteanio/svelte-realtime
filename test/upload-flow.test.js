@@ -731,15 +731,18 @@ describe('upload stream diagnostics', () => {
 		expect(ctx.uploadEnvelopes.find((e) => e.ok === false)).toMatchObject({ code: 'RATE_LIMITED', retryAfter: 1500, params: { limit: 3 } });
 	});
 
-	it('answers once with the middleware refusal even after the handler succeeded', async () => {
+	it('reports a middleware refusal that overtakes a running handler as rejected', async () => {
 		const ctx = await setup();
 		const sink = capture(ctx);
 		try {
-			let ran = false;
-			ctx.live.middleware(async (_mctx, next) => { await next(); return { ok: false, code: 'FORBIDDEN', error: 'after the fact' }; });
-			env.register('files', { save: ctx.live.upload(async () => { ran = true; return 1; }, { diagnostics: true }) });
-			await expect(ctx.__upload('files/save')(new Uint8Array(100))).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'after the fact' });
-			expect(ran).toBe(true);
+			let entered, finish;
+			const inHandler = new Promise((resolve) => { entered = resolve; });
+			const held = new Promise((resolve) => { finish = resolve; });
+			ctx.live.middleware(async (_mctx, next) => { next(); await inHandler; return { ok: false, code: 'FORBIDDEN', error: 'late' }; });
+			env.register('files', { save: ctx.live.upload(async () => { entered(); await held; return 1; }, { diagnostics: true }) });
+			await expect(ctx.__upload('files/save')(new Uint8Array(100))).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'late' });
+			finish();
+			await new Promise((resolve) => setTimeout(resolve, 10));
 			expect(ctx.uploadEnvelopes.filter((e) => 'ok' in e)).toHaveLength(1);
 			expect(endings(sink)).toEqual([
 				['upload.stream.started', undefined, undefined],

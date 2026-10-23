@@ -737,7 +737,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	let path = '';
 	/** @type {any} */ let ctx = null;
 	let handlerStarted = false;
-	/** @type {Promise<{ ok: true, data: any } | undefined> | null} */ let chainRun = null;
+	/** @type {Promise<void> | null} */ let chainRun = null;
 	/** @type {number | undefined} */ let refusalRetryAfter;
 	let refusedByMiddleware = false;
 	let chainFailed = false;
@@ -858,10 +858,18 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			}
 
 			handlerStarted = true;
-			return { ok: /** @type {const} */ (true), data: await fn(ctx, ...args) };
+			const result = await fn(ctx, ...args);
+			if (upload.phase !== 'settled') {
+				upload.phase = 'settled';
+				upload.recordOutcome('');
+				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
+				_respondUpload(ws, platform, streamId, { ok: true, data: result });
+			}
 		};
-		// The chain returns its answer instead of sending it, so the upload is
-		// answered once, here, after the middleware returns. The chain promise
+		// The handler's answer goes out as soon as it returns, so middleware
+		// work after next() (logging, cleanup) does not delay or change it. A
+		// middleware that does not wait for next() therefore races the chain:
+		// whichever settles the upload first answers, once. The chain promise
 		// is kept so a middleware that drops or swallows next() cannot leave
 		// the upload unanswered, or cleaned up under a running handler.
 		const middlewareResult = await _runWithMiddleware(ctx, () => {
@@ -870,23 +878,17 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			return chainRun;
 		});
 		if (upload.phase !== 'settled') {
-			// As on RPC the middleware's return value answers first: a failure
-			// envelope refuses with its code, even when the chain went on. Then
-			// the chain's own outcome stands, including a failure the middleware
-			// caught. A middleware that never called next() is a server bug.
+			// The middleware's return value answers first, as on RPC: a failure
+			// envelope refuses with its code. Otherwise the chain's own outcome
+			// stands, including a failure the middleware caught. A middleware
+			// that never called next() is a server bug.
 			if (middlewareResult && middlewareResult.ok === false && typeof middlewareResult.code === 'string') {
 				if (typeof middlewareResult.retryAfter === 'number' && Number.isFinite(middlewareResult.retryAfter)) refusalRetryAfter = middlewareResult.retryAfter;
 				refusedByMiddleware = true;
 				throw new LiveError(middlewareResult.code, typeof middlewareResult.error === 'string' ? middlewareResult.error : middlewareResult.code, middlewareResult);
 			}
 			if (!chainRun) throw new Error('middleware returned without calling next() and without a failure envelope');
-			const answer = await chainRun;
-			if (answer && upload.phase !== 'settled') {
-				upload.phase = 'settled';
-				upload.recordOutcome('');
-				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
-				_respondUpload(ws, platform, streamId, answer);
-			}
+			await chainRun;
 		}
 		upload.recordOutcome('');
 	} catch (err) {
@@ -935,7 +937,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	} finally {
 		// A chain the middleware did not wait for still owns the stream and its
 		// slot until it ends; the settle above aborted it if it was refused.
-		if (chainRun) await /** @type {Promise<any>} */ (chainRun).catch(() => {});
+		if (chainRun) await /** @type {Promise<void>} */ (chainRun).catch(() => {});
 		// Cancellation releases payload bytes immediately, but a still-running
 		// guard keeps its admission slot until it settles, preventing cancel/retry
 		// loops from starting unbounded asynchronous authorization work.
