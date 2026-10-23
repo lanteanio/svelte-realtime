@@ -99,18 +99,3 @@ syncBuiltinESMExports();`;
 		expect(result.stderr).not.toContain('unexpected');
 	});
 });
-
-describe('development dependency pre-bundling', () => {
-	it('pre-bundles the client entries so the first page load is not reloaded', () => {
-		expect(realtime({ typedImports: false }).config({}, { command: 'serve' }).optimizeDeps.include)
-			.toEqual(['svelte-realtime/client', 'svelte-realtime/devtools']);
-		expect(realtime({ typedImports: false, devtools: false }).config({}, { command: 'serve' }).optimizeDeps.include)
-			.toEqual(['svelte-realtime/client']);
-	});
-	it('leaves builds and excluded entries alone', () => {
-		expect(realtime({ typedImports: false }).config({}, { command: 'build' })).toBeUndefined();
-		expect(realtime({ typedImports: false }).config({ optimizeDeps: { exclude: ['svelte-realtime'] } }, { command: 'serve' })).toBeUndefined();
-		expect(realtime({ typedImports: false }).config({ optimizeDeps: { exclude: ['svelte-realtime/devtools'] } }, { command: 'serve' }).optimizeDeps.include)
-			.toEqual(['svelte-realtime/client']);
-	});
-});

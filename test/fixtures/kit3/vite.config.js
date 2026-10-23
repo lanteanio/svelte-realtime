@@ -11,7 +11,5 @@ export default defineConfig({
 		sveltekit(adapterMode === 'none' ? {} : { adapter: configuredAdapter }), uws(), realtime({ devtools: process.env.KIT_COMPAT_DEVTOOLS !== 'false' }),
 		{ name: 'kit-compat-root', configResolved(config) { if (process.env.KIT_COMPAT_REPORT_ROOT === 'true') console.log('[kit-compat] vite root ' + config.root); } }
 	],
-	resolve: { dedupe: ['svelte', 'svelte-adapter-uws'] },
-	// Optimize up front so a first page load never races a dependency reload.
-	optimizeDeps: { include: ['svelte-realtime/client', 'svelte-realtime/devtools'] }
+	resolve: { dedupe: ['svelte', 'svelte-adapter-uws'] }
 });

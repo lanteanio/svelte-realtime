@@ -4,7 +4,5 @@ import uws from 'svelte-adapter-uws/vite';
 import realtime from 'svelte-realtime/vite';
 export default defineConfig({
 	plugins: [sveltekit(), uws(), realtime({ devtools: process.env.KIT_COMPAT_DEVTOOLS !== 'false' })],
-	resolve: { dedupe: ['svelte', 'svelte-adapter-uws'] },
-	// Optimize up front so a first page load never races a dependency reload.
-	optimizeDeps: { include: ['svelte-realtime/client', 'svelte-realtime/devtools'] }
+	resolve: { dedupe: ['svelte', 'svelte-adapter-uws'] }
 });
