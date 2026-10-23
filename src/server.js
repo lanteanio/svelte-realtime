@@ -123,7 +123,7 @@ export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 import { createShortCode } from './shared/short-code.js';
-import { configureDeliveryAuthorization, ensureDeliveryAuthorization, guardDeliveryAuthorization, forgetDeliverySubscription } from './server/delivery-authorization.js';
+import { configureDeliveryAuthorization, ensureDeliveryAuthorization, guardDeliveryAuthorization, abandonDeliveryAuthorization, forgetDeliverySubscription } from './server/delivery-authorization.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers };
 
@@ -4337,7 +4337,7 @@ export function realtime(config) {
 	// Per-recipient delivery authorization (opt-in). Validated here and installed
 	// at the first capture point: init fails without the adapter capability, and
 	// an app without an init export has each connection closed instead.
-	configureDeliveryAuthorization(authorizeDelivery, deliveryAuthorizationOptions);
+	const deliveryPolicy = configureDeliveryAuthorization(authorizeDelivery, deliveryAuthorizationOptions);
 
 	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over
@@ -4446,9 +4446,19 @@ export function realtime(config) {
 					);
 				}
 			}
-			if (authorizeDelivery !== undefined) ensureDeliveryAuthorization(ctx.platform);
-			setCronPlatform(ctx.platform);
-			_activateDerived(ctx.platform);
+			if (deliveryPolicy === null) {
+				setCronPlatform(ctx.platform);
+				_activateDerived(ctx.platform);
+				return;
+			}
+			ensureDeliveryAuthorization(ctx.platform, deliveryPolicy);
+			try {
+				setCronPlatform(ctx.platform);
+				_activateDerived(ctx.platform);
+			} catch (error) {
+				abandonDeliveryAuthorization(ctx.platform);
+				throw error;
+			}
 		},
 		// Graceful shutdown: the adapter calls this once on SIGTERM, before it
 		// closes the listen socket and flushes the WebSockets. Drains in-flight
@@ -4459,11 +4469,14 @@ export function realtime(config) {
 			return _runShutdown(ctx);
 		},
 	};
-	if (authorizeDelivery !== undefined) {
-		// Fail closed at every connection entry point, so a policy is never
-		// silently skipped when the app does not export init.
-		hooks.open = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform)) return pushHooks.open(ws, ctx); };
-		hooks.message = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform)) return message(ws, ctx); };
+	if (deliveryPolicy !== null) {
+		// Fail closed at every connection hook, so a policy is never silently
+		// skipped when the app does not export init.
+		const policy = deliveryPolicy;
+		hooks.open = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform, policy, true)) return pushHooks.open(ws, ctx); };
+		hooks.message = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform, policy, false)) return message(ws, ctx); };
+		hooks.unsubscribe = (ws, topic, ctx) => { guardDeliveryAuthorization(ws, ctx?.platform, policy, false); return unsubscribe(ws, topic, ctx); };
+		hooks.close = (ws, ctx) => { guardDeliveryAuthorization(ws, ctx?.platform, policy, false); return pushHooks.close(ws, ctx); };
 	}
 	if (typeof upgradeFn === 'function') /** @type {any} */ (hooks).upgrade = upgradeFn;
 	// Admin / observability plane (opt-in, fail-closed): `admin: { requires }` adds

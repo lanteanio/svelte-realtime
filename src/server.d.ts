@@ -4870,7 +4870,11 @@ export interface RealtimeDelivery {
 	 * subscriptions and requests.
 	 */
 	rpc: string | null;
-	/** Copy of that stream's validated arguments (frozen plain data), or null. */
+	/**
+	 * Copy of that stream's validated arguments, or null: arrays and plain
+	 * objects frozen, Map, Set, Date and binary values copied per call,
+	 * functions and class instances by reference.
+	 */
 	args: readonly unknown[] | null;
 }
 
@@ -4906,9 +4910,11 @@ export interface RealtimeConfig {
 	 * protocol responses are not shown; their guards already ran.
 	 *
 	 * Requires svelte-adapter-uws 0.6.0-next.97 or newer: `init` throws when
-	 * the adapter has no `platform.authorizeDelivery`; without an `init` export
-	 * each connection is closed with 1011 instead. Without this option nothing
-	 * changes. See docs/delivery-authorization.md.
+	 * the adapter has no `platform.authorizeDelivery`. Export `init` or `open`
+	 * from the same call; a connection the policy cannot cover is closed with
+	 * 1011. One policy per process: another realtime() call naming a different
+	 * policy throws. Without this option nothing changes. See
+	 * docs/delivery-authorization.md.
 	 */
 	authorizeDelivery?: (ctx: LiveContext<any>, delivery: RealtimeDelivery) => boolean | PromiseLike<boolean>;
 	/** Bounds passed to the adapter's delivery policy. Requires `authorizeDelivery`. */

@@ -225,3 +225,152 @@ describe('delivery authorization in stream dispatch', () => {
 		expect(seen.map((frame) => frame.rpc)).toEqual(['scan/denied', 'scan/log']);
 	});
 });
+
+describe('delivery authorization configuration across realtime() calls', () => {
+	/** A platform whose adapter policy the test can drive. */
+	function adapterPlatform(connections = 0) {
+		const platform = mockPlatform();
+		platform.connections = connections;
+		platform.installs = 0;
+		platform.authorizeDelivery = (callback) => { platform.installs++; platform.gate = callback; };
+		return platform;
+	}
+	const socket = () => ({ ...mockWs({ id: 'scanner' }), ended: null, end(code) { this.ended = code; } });
+
+	it('keeps the policy of the realtime() call whose hooks install it', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const seen = [];
+		const policy = (_ctx, frame) => { seen.push(frame.topic); return true; };
+		const hooks = api.realtime({ authorizeDelivery: policy, authorizeWireSubscribe: false });
+		api.realtime({ authorizeWireSubscribe: false });
+		expect(() => api.realtime({ authorizeDelivery: () => true })).toThrow('a different delivery policy is already configured');
+		expect(() => api.realtime({ authorizeDelivery: policy, deliveryAuthorizationOptions: { timeoutMs: 10 } })).toThrow('a different delivery policy');
+		expect(() => api.realtime({ authorizeDelivery: policy, authorizeWireSubscribe: false })).not.toThrow();
+		const platform = adapterPlatform();
+		hooks.init({ platform });
+		expect(platform.installs).toBe(1);
+		platform.gate(socket(), { kind: 'message', topic: 'scans:e1', event: 'e', data: null, binary: false });
+		expect(seen).toEqual(['scans:e1']);
+	});
+
+	it('installs from close and unsubscribe hooks and closes connections realtime never opened', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const hooks = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const platform = adapterPlatform(1);
+		const view = Object.create(platform);
+		const stranger = socket();
+		hooks.unsubscribe(stranger, 'scans:e1', { platform: view });
+		expect(platform.installs).toBe(1);
+		expect(stranger.ended).toBe(1011);
+		const late = socket();
+		hooks.message(late, { platform: view, data: new ArrayBuffer(0) });
+		expect(late.ended).toBe(1011);
+		const opened = socket();
+		hooks.open(opened, { platform: view });
+		hooks.message(opened, { platform: view, data: new ArrayBuffer(0) });
+		expect(opened.ended).toBeNull();
+		expect(platform.installs).toBe(1);
+		expect(errors).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.unguarded'));
+		errors.mockRestore();
+	});
+
+	it('serves every connection when init installed the policy before any connection', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const hooks = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
+		const platform = adapterPlatform(0);
+		hooks.init({ platform });
+		platform.connections = 3;
+		const ws = socket();
+		hooks.message(ws, { platform: Object.create(platform), data: new ArrayBuffer(0) });
+		expect(ws.ended).toBeNull();
+		expect(platform.installs).toBe(1);
+	});
+
+	it('installs on the platform that owns authorizeDelivery, not on a view that inherits it', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const hooks = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
+		const platform = adapterPlatform(0);
+		const middle = Object.create(platform);
+		middle.publish = () => true;
+		const view = Object.create(middle);
+		const first = socket(), second = socket();
+		hooks.open(first, { platform: view });
+		hooks.open(second, { platform: Object.create(platform) });
+		expect(platform.installs).toBe(1);
+		expect(first.ended).toBeNull();
+		expect(second.ended).toBeNull();
+	});
+});
+
+describe('delivery authorization argument ownership', () => {
+	it('keeps a __proto__ key in arguments as data and never as the prototype', () => {
+		const seen = [];
+		const { env, ws, gate } = setup((_ctx, frame) => { seen.push(frame); return true; });
+		const args = JSON.parse('[{"__proto__": {"orgId": "victim"}, "eventId": "e1"}]');
+		rememberDeliverySubscription(ws, env.platform, 'scans:e1', 'scan/log', args);
+		gate({ topic: 'scans:e1', event: 'created', data: 1 });
+		const [first] = seen[0].args;
+		expect(Object.getPrototypeOf(first)).toBe(Object.prototype);
+		expect(first.orgId).toBeUndefined();
+		expect(Object.prototype.hasOwnProperty.call(first, '__proto__')).toBe(true);
+		expect(first.eventId).toBe('e1');
+	});
+
+	it('passes class instances by reference without freezing the application object', () => {
+		const seen = [];
+		const { env, ws, gate } = setup((_ctx, frame) => { seen.push(frame); return true; });
+		class Scope { #org = 'acme'; get org() { return this.#org; } }
+		const scope = new Scope();
+		rememberDeliverySubscription(ws, env.platform, 'scans:e1', 'scan/log', [scope]);
+		gate({ topic: 'scans:e1', event: 'created', data: 1 });
+		expect(seen[0].args[0]).toBe(scope);
+		expect(seen[0].args[0].org).toBe('acme');
+		expect(Object.isFrozen(scope)).toBe(false);
+	});
+});
+
+describe('delivery authorization with concurrent admissions of one topic', () => {
+	it('names the topic by the admitted stream when a concurrent admission is refused first', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const seen = [];
+		const platform = mockPlatform();
+		let gate;
+		platform.authorizeDelivery = (callback) => { gate = callback; };
+		const hooks = api.realtime({ authorizeDelivery: (_ctx, frame) => { seen.push(frame.rpc); return true; }, authorizeWireSubscribe: false });
+		hooks.init({ platform });
+		const ws = mockWs({ id: 'scanner' });
+		api.__register('scan/denied', api.live.stream((_ctx, e) => 'scans:' + e, async () => []));
+		api.__register('scan/log', api.live.stream((_ctx, e) => 'scans:' + e, async () => []));
+		const subscribe = platform.subscribe;
+		const pending = [];
+		platform.subscribe = (socket, topic) => new Promise((resolve) => pending.push({ resolve, socket, topic }));
+		api.handleRpc(ws, toArrayBuffer({ rpc: 'scan/denied', id: 'a', args: ['e1'], stream: true }), platform);
+		api.handleRpc(ws, toArrayBuffer({ rpc: 'scan/log', id: 'b', args: ['e1'], stream: true }), platform);
+		await vi.waitFor(() => expect(pending).toHaveLength(2));
+		const [first, second] = pending;
+		first.resolve('FORBIDDEN');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		second.resolve(subscribe(second.socket, second.topic));
+		await vi.waitFor(() => expect(['a', 'b'].every((id) => platform.sent.some((row) => row.event === id))).toBe(true));
+		const admitted = platform.sent.find((row) => row.event === 'a' || row.event === 'b' ? row.data.ok === true : false);
+		expect(platform.sent.filter((row) => row.data?.ok === false && row.data.code === 'FORBIDDEN')).toHaveLength(1);
+		gate(ws, { kind: 'message', topic: 'scans:e1', event: 'created', data: null, binary: false });
+		expect(seen.at(-1)).toBe(admitted.event === 'a' ? 'scan/denied' : 'scan/log');
+	});
+});
+
+describe('delivery authorization cost without a policy', () => {
+	it('hands the adapter the plain hooks when no policy is configured', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const hooks = api.realtime({});
+		expect(hooks.message).toBe(api.message);
+		expect(hooks.unsubscribe).toBe(api.unsubscribe);
+	});
+});

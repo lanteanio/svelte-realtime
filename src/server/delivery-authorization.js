@@ -15,20 +15,26 @@ import { _buildCtx, _getCtxHelpers } from './ctx.js';
 import { formatDiagnostic } from '../shared/diagnostic.js';
 
 /**
- * @typedef {{ rpc: string, args: readonly unknown[], copy: boolean }} Admission
- * @typedef {{ live: Map<string, Admission>, retired: Map<string, Admission> }} SocketAdmissions
+ * @typedef {{ rpc: string, args: readonly unknown[], copy: boolean, confirmed: boolean, token: object | null }} Admission
+ * @typedef {{ live: Map<string, Admission>, retired: Map<string, Admission>, inflight: Map<string, number> }} SocketAdmissions
+ * @typedef {{ authorize: (ctx: any, delivery: any) => unknown, options: any }} DeliveryPolicy
+ * @typedef {{ policy: DeliveryPolicy, early: boolean }} Installation
  */
 
 /** @type {WeakMap<object, SocketAdmissions>} */
 const subscriptions = new WeakMap();
-/** @type {WeakSet<object>} */
-const configured = new WeakSet();
+/** Installation per platform object the policy was installed on. @type {WeakMap<object, Installation>} */
+const installations = new WeakMap();
+/** Installed owner found for a connection-level platform view, so hooks skip the walk. @type {WeakMap<object, object>} */
+const resolved = new WeakMap();
+/** Sockets realtime's open hook saw after the policy was installed. @type {WeakSet<object>} */
+const vetted = new WeakSet();
 /** Whether a policy is configured or installed in this process; keeps every other path free. */
 let anyConfigured = false;
-/** @type {{ authorize: (ctx: any, delivery: any) => unknown, options: any } | null} */
-let pending = null;
+/** The one policy realtime() configured in this process. @type {DeliveryPolicy | null} */
+let configuredPolicy = null;
 /** @type {WeakSet<object>} */
-const unavailableReported = new WeakSet();
+const reported = new WeakSet();
 
 /**
  * Admissions kept per socket after their stream left. The adapter decides a
@@ -44,10 +50,18 @@ const RETIRED_PER_SOCKET = 64;
  */
 const RESPONSE_TOPICS = new Set(['__rpc', '__upload', '__realtime']);
 
+/** @param {any} value */
+function _isPlain(value) {
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
 /**
- * Copy a value without invoking accessors. Functions and symbols are kept by
- * reference; cycles are preserved. Marks `state.mutable` when the copy holds
- * values freezing cannot protect (Map, Set, Date, binary data).
+ * Copy admitted arguments without invoking accessors. Arrays and plain
+ * objects are copied with their own enumerable data properties (defined, so
+ * a `__proto__` key stays a key); Map, Set, Date and binary values are copied
+ * and mark `state.mutable`, because freezing cannot protect them. Functions,
+ * symbols and other class instances are kept by reference. Cycles are kept.
  * @param {any} value
  * @param {Map<any, any>} seen
  * @param {{ mutable: boolean }} state
@@ -57,53 +71,53 @@ function _copy(value, seen, state) {
 	if (value === null || typeof value !== 'object') return value;
 	const known = seen.get(value);
 	if (known !== undefined) return known;
-	if (ArrayBuffer.isView(value)) {
+	let copy;
+	if (Array.isArray(value)) copy = [];
+	else if (_isPlain(value)) copy = Object.create(Object.getPrototypeOf(value));
+	else if (ArrayBuffer.isView(value)) {
 		state.mutable = true;
-		const copy = value instanceof DataView
+		copy = value instanceof DataView
 			? new DataView(new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice().buffer)
 			: typeof Buffer === 'function' && Buffer.isBuffer(value) ? Buffer.from(value)
 				: new (/** @type {any} */ (value).constructor)(value);
 		seen.set(value, copy);
 		return copy;
-	}
-	if (value instanceof ArrayBuffer) {
+	} else if (value instanceof ArrayBuffer) {
 		state.mutable = true;
-		const copy = value.slice(0);
+		copy = value.slice(0);
 		seen.set(value, copy);
 		return copy;
-	}
-	if (value instanceof Date) {
+	} else if (value instanceof Date) {
 		state.mutable = true;
-		const copy = new Date(value.getTime()); // determinism-allow: copies an existing instant, reads no clock
+		copy = new Date(value.getTime()); // determinism-allow: copies an existing instant, reads no clock
 		seen.set(value, copy);
 		return copy;
-	}
-	if (value instanceof Map) {
+	} else if (value instanceof Map) {
 		state.mutable = true;
-		const copy = new Map();
+		copy = new Map();
 		seen.set(value, copy);
 		for (const [k, v] of value) copy.set(_copy(k, seen, state), _copy(v, seen, state));
 		return copy;
-	}
-	if (value instanceof Set) {
+	} else if (value instanceof Set) {
 		state.mutable = true;
-		const copy = new Set();
+		copy = new Set();
 		seen.set(value, copy);
 		for (const v of value) copy.add(_copy(v, seen, state));
 		return copy;
-	}
-	const copy = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+	} else return value;
 	seen.set(value, copy);
 	for (const key of Reflect.ownKeys(value)) {
 		const descriptor = Object.getOwnPropertyDescriptor(value, key);
-		if (descriptor && descriptor.enumerable && 'value' in descriptor) copy[key] = _copy(descriptor.value, seen, state);
+		if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) continue;
+		Object.defineProperty(copy, key, { value: _copy(descriptor.value, seen, state), enumerable: true, writable: true, configurable: true });
 	}
 	return copy;
 }
 
-/** @param {any} value */
+/** Freeze copied arrays and plain objects; values kept by reference stay the app's. @param {any} value */
 function _freezeDeep(value) {
 	if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+	if (!Array.isArray(value) && !_isPlain(value)) return value;
 	Object.freeze(value);
 	for (const key of Reflect.ownKeys(value)) _freezeDeep(value[key]);
 	return value;
@@ -112,7 +126,7 @@ function _freezeDeep(value) {
 /**
  * Own an admitted argument tuple: loaders may mutate their input after
  * admission. Plain data is frozen once and shared by every policy call;
- * values freezing cannot protect are copied again for each call.
+ * values freezing cannot protect are copied again when a call reads them.
  * @param {unknown} args
  * @returns {{ args: readonly unknown[], copy: boolean }}
  */
@@ -122,10 +136,26 @@ function _admit(args) {
 	return state.mutable ? { args: owned, copy: true } : { args: _freezeDeep(owned), copy: false };
 }
 
-/** @param {Admission | undefined} admission */
-function _argsFor(admission) {
-	if (admission === undefined) return null;
-	return admission.copy ? _copy(admission.args, new Map(), { mutable: false }) : admission.args;
+/**
+ * The frozen descriptor a policy call receives. Arguments that need a fresh
+ * copy are copied once, on first read.
+ * @param {Record<string, unknown>} fields
+ * @param {Admission | undefined} source
+ */
+function _descriptor(fields, source) {
+	const delivery = /** @type {any} */ (fields);
+	delivery.rpc = source?.rpc ?? null;
+	if (source === undefined || !source.copy) {
+		delivery.args = source?.args ?? null;
+	} else {
+		/** @type {any} */
+		let copy;
+		Object.defineProperty(delivery, 'args', {
+			enumerable: true,
+			get() { return copy ??= _copy(source.args, new Map(), { mutable: false }); }
+		});
+	}
+	return Object.freeze(delivery);
 }
 
 /**
@@ -149,74 +179,152 @@ export function validateDeliveryAuthorizationConfig(authorize, options) {
 	}
 }
 
+/** @param {any} a @param {any} b */
+function _sameOptions(a, b) {
+	if (a === b) return true;
+	const left = Object.entries(a ?? {}), right = b ?? {};
+	return left.length === Object.keys(right).length && left.every(([key, value]) => Object.is(right[key], value));
+}
+
 /**
- * Record the realtime() policy so every capture point can install it on the
- * worker's platform, whether or not the app exports the init hook.
+ * Validate and register the policy of one realtime() call. The adapter
+ * holds one policy per worker, so a second realtime() call naming a
+ * different policy is refused; the same policy again is accepted. Returns
+ * the policy the call's hooks install, or null without one.
  * @param {unknown} authorize
  * @param {unknown} options
+ * @returns {DeliveryPolicy | null}
  */
 export function configureDeliveryAuthorization(authorize, options) {
 	validateDeliveryAuthorizationConfig(authorize, options);
-	if (authorize === undefined) { pending = null; return; }
-	pending = { authorize: /** @type {any} */ (authorize), options };
+	if (authorize === undefined) return null;
+	if (configuredPolicy !== null) {
+		if (configuredPolicy.authorize !== authorize || !_sameOptions(configuredPolicy.options, options)) {
+			throw new Error('[svelte-realtime] realtime({ authorizeDelivery }): a different delivery policy is already configured in this process; configure one policy in one realtime() call');
+		}
+		return configuredPolicy;
+	}
+	configuredPolicy = { authorize: /** @type {any} */ (authorize), options };
 	anyConfigured = true;
+	return configuredPolicy;
 }
 
-/** @param {any} platform */
-function _isInstalled(platform) {
-	for (let owner = platform; owner; owner = Object.getPrototypeOf(owner)) if (configured.has(owner)) return true;
+/**
+ * The platform object that owns `authorizeDelivery`: the adapter hands hooks
+ * a per-connection view inheriting from it.
+ * @param {any} platform
+ */
+function _owner(platform) {
+	for (let owner = platform; owner && owner !== Object.prototype; owner = Object.getPrototypeOf(owner)) {
+		if (Object.prototype.hasOwnProperty.call(owner, 'authorizeDelivery')) return owner;
+	}
+	return platform;
+}
+
+/** @param {any} platform @returns {Installation | undefined} */
+function _installationOf(platform) {
+	const known = resolved.get(platform);
+	if (known !== undefined) {
+		const found = installations.get(known);
+		if (found !== undefined) return found;
+	}
+	for (let owner = platform; owner && owner !== Object.prototype; owner = Object.getPrototypeOf(owner)) {
+		const found = installations.get(owner);
+		if (found !== undefined) { resolved.set(platform, owner); return found; }
+	}
+	return undefined;
+}
+
+/**
+ * Forget an installation made by an init that then failed: the adapter drops
+ * the policy of a failed init before retrying it, so the retry installs again.
+ * @param {any} platform
+ */
+export function abandonDeliveryAuthorization(platform) {
+	installations.delete(_owner(platform));
+}
+
+/**
+ * Install a realtime() call's policy on this platform unless it already has
+ * one. Throws when the adapter lacks the capability or another policy is
+ * installed there.
+ * @param {any} platform
+ * @param {DeliveryPolicy} policy
+ * @returns {Installation}
+ */
+export function ensureDeliveryAuthorization(platform, policy) {
+	const existing = _installationOf(platform);
+	if (existing !== undefined) {
+		if (existing.policy !== policy) throw new Error('[svelte-realtime] realtime({ authorizeDelivery }): this platform already runs a different delivery policy');
+		return existing;
+	}
+	const owner = _owner(platform);
+	const connections = /** @type {any} */ (owner)?.connections;
+	installDeliveryAuthorization(owner, policy.authorize, policy.options);
+	const installation = { policy, early: connections === 0 };
+	installations.set(owner, installation);
+	return installation;
+}
+
+/** @param {any} platform @param {string} event @param {string} message @param {Record<string, unknown>} attributes */
+function _reportOnce(platform, event, message, attributes) {
+	const key = platform ? _owner(platform) : reported;
+	if (reported.has(key)) return;
+	reported.add(key);
+	console.error(formatDiagnostic({
+		source: 'svelte-realtime',
+		component: 'server.delivery-authorization',
+		event,
+		severity: 'error',
+		message,
+		attributes: { closeCode: 1011, ...attributes }
+	}));
+}
+
+/** @param {any} ws */
+function _end(ws) {
+	try { ws.end(1011, 'Delivery authorization unavailable'); } catch {}
+}
+
+/**
+ * Connection-level capture point used by every realtime() hook. Installs the
+ * policy when init did not, and ends with 1011, before realtime serves it,
+ * a connection the policy cannot cover: the adapter lacks the capability, or
+ * the connection opened before the policy existed without passing
+ * realtime's open hook, so frames may have reached it unchecked.
+ * @param {any} ws
+ * @param {any} platform
+ * @param {DeliveryPolicy} policy
+ * @param {boolean} opening whether this is realtime's open hook
+ * @returns {boolean} whether the connection may be served
+ */
+export function guardDeliveryAuthorization(ws, platform, policy, opening) {
+	let installation = platform ? _installationOf(platform) : undefined;
+	if (installation === undefined || installation.policy !== policy) {
+		try {
+			installation = ensureDeliveryAuthorization(platform, policy);
+		} catch (error) {
+			_reportOnce(platform, 'delivery-authorization.unavailable',
+				'A delivery policy is configured but could not be installed; connections are closed.',
+				{ error: error instanceof Error ? error.message : String(error) });
+			_end(ws);
+			return false;
+		}
+	}
+	if (installation.early || vetted.has(ws)) return true;
+	if (opening) { vetted.add(ws); return true; }
+	_reportOnce(platform, 'delivery-authorization.unguarded',
+		'A connection reached realtime before its delivery policy was installed; export init or open from realtime(). The connection is closed.',
+		{});
+	_end(ws);
 	return false;
 }
 
-/**
- * The adapter hands hooks a per-connection view inheriting from the worker
- * platform; install on that base so the policy's ctx.platform is the base.
- * @param {any} platform
- */
-function _base(platform) {
-	const proto = Object.getPrototypeOf(platform);
-	return proto && proto !== Object.prototype && typeof proto.authorizeDelivery === 'function' ? proto : platform;
-}
-
-/**
- * Install the configured policy on this platform unless it already has it.
- * Throws when the adapter lacks the capability.
- * @param {any} platform
- */
-export function ensureDeliveryAuthorization(platform) {
-	if (pending === null || !platform || _isInstalled(platform)) return;
-	installDeliveryAuthorization(_base(platform), pending.authorize, pending.options);
-}
-
-/**
- * Connection-level capture point for apps that do not export the init hook:
- * install the policy, or end the connection with 1011 before realtime
- * serves it when the policy cannot be installed.
- * @param {any} ws
- * @param {any} platform
- * @returns {boolean} whether the connection may be served
- */
-export function guardDeliveryAuthorization(ws, platform) {
-	if (pending === null) return true;
-	try {
-		ensureDeliveryAuthorization(platform);
-		return true;
-	} catch (error) {
-		const base = platform ? _base(platform) : null;
-		if (base && !unavailableReported.has(base)) {
-			unavailableReported.add(base);
-			console.error(formatDiagnostic({
-				source: 'svelte-realtime',
-				component: 'server.delivery-authorization',
-				event: 'delivery-authorization.unavailable',
-				severity: 'error',
-				message: 'A delivery policy is configured but could not be installed; connections are closed.',
-				attributes: { closeCode: 1011, error: error instanceof Error ? error.message : String(error) }
-			}));
-		}
-		try { ws.end(1011, 'Delivery authorization unavailable'); } catch {}
-		return false;
-	}
+/** @param {object} ws */
+function _admissions(ws) {
+	let admissions = subscriptions.get(ws);
+	if (!admissions) { admissions = { live: new Map(), retired: new Map(), inflight: new Map() }; subscriptions.set(ws, admissions); }
+	return admissions;
 }
 
 /**
@@ -228,13 +336,56 @@ export function guardDeliveryAuthorization(ws, platform) {
  */
 export function rememberDeliverySubscription(ws, _platform, topic, rpc, args) {
 	if (!anyConfigured) return false;
-	let admissions = subscriptions.get(ws);
-	if (!admissions) { admissions = { live: new Map(), retired: new Map() }; subscriptions.set(ws, admissions); }
+	const admissions = _admissions(ws);
 	if (admissions.live.has(topic)) return false;
 	admissions.retired.delete(topic);
 	const { args: owned, copy } = _admit(args);
-	admissions.live.set(topic, { rpc, args: owned, copy });
+	admissions.live.set(topic, { rpc, args: owned, copy, confirmed: true, token: null });
 	return true;
+}
+
+/**
+ * Start a stream admission: attribute the topic before the adapter can
+ * deliver on it. Pass the returned token to .
+ * @param {object} ws @param {string} topic @param {string} rpc @param {any[]} args
+ * @returns {object | undefined}
+ */
+export function beginDeliveryAdmission(ws, topic, rpc, args) {
+	if (!anyConfigured) return undefined;
+	const admissions = _admissions(ws);
+	admissions.inflight.set(topic, (admissions.inflight.get(topic) ?? 0) + 1);
+	const token = {};
+	if (!admissions.live.has(topic)) {
+		admissions.retired.delete(topic);
+		const { args: owned, copy } = _admit(args);
+		admissions.live.set(topic, { rpc, args: owned, copy, confirmed: false, token });
+	}
+	return token;
+}
+
+/**
+ * Finish a stream admission. The first admitted stream names the topic,
+ * replacing an attribution recorded by an attempt that was not admitted; a
+ * refusal drops an unconfirmed attribution once no admission of the topic
+ * is in flight.
+ * @param {object} ws @param {string} topic @param {string} rpc @param {any[]} args @param {boolean} admitted @param {object | undefined} token
+ */
+export function endDeliveryAdmission(ws, topic, rpc, args, admitted, token) {
+	if (!anyConfigured || token === undefined) return;
+	const admissions = _admissions(ws);
+	const left = (admissions.inflight.get(topic) ?? 1) - 1;
+	if (left > 0) admissions.inflight.set(topic, left);
+	else admissions.inflight.delete(topic);
+	const admission = admissions.live.get(topic);
+	if (admitted) {
+		if (admission?.confirmed) return;
+		if (admission !== undefined && admission.token === token) { admission.confirmed = true; return; }
+		admissions.retired.delete(topic);
+		const { args: owned, copy } = _admit(args);
+		admissions.live.set(topic, { rpc, args: owned, copy, confirmed: true, token });
+	} else if (admission !== undefined && !admission.confirmed && left === 0) {
+		admissions.live.delete(topic);
+	}
 }
 
 /**
@@ -320,23 +471,18 @@ export function installDeliveryAuthorization(platform, authorize, options) {
 			const ctx = _buildCtx(ws.getUserData(), ws, platform, helpers, null);
 			return _every((reply) => {
 				if (!_isStreamReply(reply)) return true;
-				const source = _admissionOf(ws, reply.topic);
-				return authorize(ctx, Object.freeze({
+				return authorize(ctx, _descriptor({
 					kind: reply.replay === true ? 'replay' : 'snapshot',
-					topic: reply.topic, event: null, data: reply.data, binary: false,
-					rpc: source?.rpc ?? null, args: _argsFor(source)
-				}));
+					topic: reply.topic, event: null, data: reply.data, binary: false
+				}, _admissionOf(ws, reply.topic)));
 			}, replies, 0);
 		}
 		// A request is addressed to one socket and carries no topic.
 		const named = typeof topic === 'string' ? topic : null;
-		const source = named === null ? undefined : _admissionOf(ws, named);
 		const ctx = _buildCtx(ws.getUserData(), ws, platform, helpers, null);
-		return authorize(ctx, Object.freeze({
-			kind, topic: named, event: frame.event ?? null, data: frame.data, binary: frame.binary === true,
-			rpc: source?.rpc ?? null, args: _argsFor(source)
-		}));
+		return authorize(ctx, _descriptor({
+			kind, topic: named, event: frame.event ?? null, data: frame.data, binary: frame.binary === true
+		}, named === null ? undefined : _admissionOf(ws, named)));
 	}, options);
-	configured.add(platform);
 	anyConfigured = true;
 }

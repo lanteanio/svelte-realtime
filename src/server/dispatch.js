@@ -29,7 +29,7 @@ import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceCla
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol, _takeUploadCapAnnouncement } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
-import { rememberDeliverySubscription, forgetDeliverySubscription } from './delivery-authorization.js';
+import { beginDeliveryAdmission, endDeliveryAdmission } from './delivery-authorization.js';
 
 const textDecoder = new TextDecoder();
 
@@ -834,8 +834,8 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// `live.room({ guard })`) remain the stream-RPC access checks.
 	// Attribute the topic before the adapter can deliver on it: a frame
 	// published as soon as the subscribe takes effect reaches the delivery
-	// policy with this stream's rpc and args. A refused admission retires it.
-	const _attributed = rememberDeliverySubscription(ws, platform, topic, msg.rpc, streamArgs);
+	// policy with this stream's rpc and args. A refused admission drops it.
+	const _admission = beginDeliveryAdmission(ws, topic, msg.rpc, streamArgs);
 	let _subscribeDenial = null;
 	try {
 		if (typeof platform.subscribe === 'function') {
@@ -852,11 +852,11 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			_subscribeDenial = _subscribeTracked(ws, topic);
 		}
 	} catch {
-		if (_attributed) forgetDeliverySubscription(ws, topic);
+		endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, false, _admission);
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
-	if (_subscribeDenial && _attributed) forgetDeliverySubscription(ws, topic);
+	endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, !_subscribeDenial, _admission);
 	if (_subscribeDenial === 'CONNECTION_CLOSED') {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };

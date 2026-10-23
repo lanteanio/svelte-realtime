@@ -13,7 +13,6 @@ import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 import { _derivedScope, _matchesDerivedScope } from './derived-topic.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
-import { ensureDeliveryAuthorization } from './delivery-authorization.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -303,9 +302,6 @@ const _activatedPlatforms = new WeakSet();
  */
 export function _ensureWrap(platform) {
 	if (!platform) return;
-	// A configured delivery policy installs at the first capture point. A
-	// platform that cannot take it is closed per connection by the hooks.
-	try { ensureDeliveryAuthorization(platform); } catch {}
 	// svelte-adapter-uws hands hooks a per-connection platform created via
 	// Object.create(basePlatform). Wrapping that per-connection object would
 	// leave every other connection's inherited publish / publishBatched

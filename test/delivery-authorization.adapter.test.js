@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 /** @param {(ctx: any, delivery: any) => any} [authorize] @param {any} [options] */
-async function start(authorize = policy, options, { init = true } = {}) {
+async function start(authorize = policy, options, { init = true, open = true } = {}) {
 	const hooks = api.realtime({ authorizeDelivery: authorize, ...(options ? { deliveryAuthorizationOptions: options } : {}) });
 	const ids = [];
 	const sockets = new Map();
@@ -44,7 +44,7 @@ async function start(authorize = policy, options, { init = true } = {}) {
 			const id = ids.shift();
 			ws.getUserData().id = id;
 			sockets.set(id, ws);
-			return hooks.open?.(ws, ctx);
+			if (open) return hooks.open?.(ws, ctx);
 		}
 	} });
 	return {
@@ -79,6 +79,28 @@ async function subscribe(client, eventId) {
 	client.ws.send(JSON.stringify({ rpc: 'scan/log', id, args: [eventId], stream: true }));
 	await vi.waitFor(() => expect(client.frames.some((frame) => frame.topic === '__rpc' && frame.event === id && frame.data?.ok === true)).toBe(true));
 }
+
+describe('delivery authorization on any adapter', () => {
+	it('closes a connection with 1011 when the app exports neither init nor open', async () => {
+		const { connect } = await start(policy, undefined, { init: false, open: false });
+		grant('victim', 'e8');
+		const client = await connect('victim');
+		client.ws.send(JSON.stringify({ rpc: 'scan/log', id: 'unguarded', args: ['e8'], stream: true }));
+		await vi.waitFor(() => expect(client.closeCode).toBe(1011));
+		expect(client.frames.some((frame) => frame.event === 'unguarded')).toBe(false);
+	});
+
+	it('keeps the first policy when a later realtime() call configures none', async () => {
+		const first = api.realtime({ authorizeDelivery: policy });
+		api.realtime({});
+		if (!NATIVE) {
+			await expect(createTestServer({ handler: first })).rejects.toThrow('has no platform.authorizeDelivery');
+			return;
+		}
+		server = await createTestServer({ handler: first });
+		expect(() => server.platform.authorizeDelivery(() => true)).toThrow();
+	});
+});
 
 describe.skipIf(NATIVE)('delivery authorization with an adapter that lacks platform.authorizeDelivery', () => {
 	it('refuses to start an app that configured a delivery policy', async () => {

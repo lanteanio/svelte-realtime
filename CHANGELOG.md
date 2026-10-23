@@ -99,7 +99,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `realtime({ authorizeDelivery })` installs a per-recipient delivery policy on the adapter (`platform.authorizeDelivery`). It receives the live context and a frozen descriptor with `kind` (`message`, `replay`, `snapshot`, `request`), wire `topic` (`null` for requests), `event`, `data`, `binary`, and the `rpc` and a copy of the `args` of the stream that first admitted the topic, kept for frames still held after it left. RPC, upload and protocol responses pass without a check. See [delivery authorization](docs/delivery-authorization.md).
 
-- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws; an app that exports no `init` installs the policy on its first connection and closes connections with 1011 when it cannot.
+- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws. Without an `init` export, `open` installs the policy; a connection the policy cannot cover is closed with 1011. One policy per process: a second `realtime()` call naming another policy throws.
 
 ### Changed
 

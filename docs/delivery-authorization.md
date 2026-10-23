@@ -10,10 +10,18 @@ below) and can stop delivery to a connection that lost access.
 This option requires svelte-adapter-uws 0.6.0-next.97 or newer, which provides
 `platform.authorizeDelivery`. With an older adapter, the `init` hook throws and
 the server does not start, so a version mismatch cannot silently drop the
-check. An app that does not export `init` gets the policy installed on its
-first connection instead; if that fails, every connection is closed with 1011
-before realtime serves it, and a `delivery-authorization.unavailable` error is
-logged once. Without the option, nothing changes: subscription admission and native
+check. Export `init`, or at least `open`, from the same `realtime()` call:
+without `init` the policy is installed by the first connection's `open` hook.
+If it cannot be installed, every connection is closed with 1011 and a
+`delivery-authorization.unavailable` error is logged once. A connection that
+reaches realtime's `message`, `unsubscribe` or `close` hook without passing
+its `open` hook after the policy was installed may already have received
+frames no policy checked; it is closed with 1011 and a
+`delivery-authorization.unguarded` error is logged once.
+
+The adapter runs one policy per worker, so configure it in one `realtime()`
+call. Another `realtime()` call without `authorizeDelivery` leaves it in place;
+one naming a different policy or different options throws. Without the option, nothing changes: subscription admission and native
 delivery behave as before.
 
 <!-- doc-code: ambient names="db" -->
@@ -49,7 +57,7 @@ per-request view) and a frozen descriptor:
 | `event` | Event name, or `null` for a binary frame, a snapshot, or an envelope that names none. |
 | `data` | The parsed payload; `undefined` for a binary frame. A replayed frame carries the replay envelope (`{ seq, event, data }` for `msg`, `null` or `{ truncated: true }` for `end`, plus `reqId` when the client asked with one); a replay response carries the array of missed events. |
 | `binary` | Whether the frame is binary. |
-| `rpc`, `args` | The stream RPC path that admitted `topic` on this connection and a copy of its validated arguments, or `null`. Plain data is frozen; arguments holding a `Map`, `Set`, `Date` or binary value are copied afresh for each call. |
+| `rpc`, `args` | The stream RPC path that admitted `topic` on this connection and a copy of its validated arguments, or `null`. Arrays and plain objects are copied and frozen (a `__proto__` key stays an ordinary key); a `Map`, `Set`, `Date` or binary value is copied afresh for each call that reads `args`; functions, symbols and other class instances are passed by reference. |
 
 Dynamic derived output topics are opaque hashes: identify their resource by
 `rpc` and `args` instead of parsing the topic. A topic the connection joined
