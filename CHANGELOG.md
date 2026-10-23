@@ -103,6 +103,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Without an `init` export, both the delivery policy and the strict wire-subscribe check take effect only once a connection reaches a realtime hook; export `init` from `realtime()` so they hold from the first connection.
 
+- `@sveltejs/kit` 3 joins the supported peer range (`^2.0.0 || ^3.0.0`). The Vite plugin, the compatibility matrix and the scaffolder cover SvelteKit 3 on Vite 8.
+
 ### Changed
 
 - New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
@@ -130,10 +132,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - A stream subscriber that resumes from a replay or a delta arms the stream's `staleAfterMs` watchdog and `invalidateOn` watchers the same way a loader run does. Before, a topic whose first subscriber resumed this way was never reloaded. A socket that closes while its resume is still awaiting arms nothing.
 
 - The unsequenced delivery policy covers rooms list deltas, cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand and `ctx.publishThrottled` / `ctx.publishDebounced`. These frames carry no adapter sequence on a single worker either and take no publish options, so an app that needs a sequenced frame publishes it with explicit options through `ctx.platform.publish`.
-
 - New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
 
 - New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.
+
 - The README's documentation paths send "Add realtime to an existing app" to the README's own manual setup, which the release checks build and run on SvelteKit 3 and, with the `svelte.config.js` it now shows for existing projects, on SvelteKit 2.
 
 ### Fixed
@@ -254,11 +256,17 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The first page request of a new dev server waits for the live handlers to finish loading. A request that raced that load could get a partly initialized `svelte-realtime/server` and fail with `live.stream is not a function` until the server was restarted.
 
 - The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
+
 - The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
+
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
+
 - A stream store cached without subscribers no longer keeps its last event object alive. It keeps only a weak reference to it, so a later subscribe still ignores the event the adapter replays to new listeners. Runtimes without `WeakRef` keep the event until the next subscribe.
+
 - A live module that fails to load (a syntax error saved during development, or a module whose top level throws) no longer crashes the server with an unhandled rejection. Calls into it answer `INTERNAL_ERROR` and reach the `onError` hook, the server emits an `rpc.module.load-failed` diagnostic once per distinct failure, and the next call loads the module again. In development a broken save keeps the handlers that were already loaded, and `live.flag` values keep following cluster updates; a handler first called after the broken save answers `INTERNAL_ERROR` until the file is fixed.
+
 - The dev server pre-bundles `svelte-realtime/client` and `svelte-realtime/devtools` when they are installed under `node_modules` and dependency discovery is on, so the first page load of a new project is no longer reloaded once per discovered entry. A reload during that first navigation could fail to fetch the SvelteKit client entry. A linked or excluded `svelte-realtime` stays served from source, so every client module shares one instance.
+
 - The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
 
 ## [0.6.0-next.91] - 2026-10-13
