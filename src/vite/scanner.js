@@ -137,7 +137,8 @@ export function _skipNonCode(s, i) {
 	// string is malformed, and the next line is code again.
 	if (ch === '\'' || ch === '"') {
 		for (let j = i + 1; j < s.length; j++) {
-			if (s[j] === '\\') { j++; continue; }
+			// A backslash before CRLF continues the line over both characters.
+			if (s[j] === '\\') { j += (s[j + 1] === '\r' && s[j + 2] === '\n') ? 2 : 1; continue; }
 			if (s[j] === ch) return j;
 			if (s[j] === '\n') return j - 1;
 		}

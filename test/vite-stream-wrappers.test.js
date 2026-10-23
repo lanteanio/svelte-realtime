@@ -148,9 +148,11 @@ describe('codegen for wrapped streams', () => {
 				`export const feed = live.public(live.stream('notes', async () => []));
 `
 		});
-		const out = code(createPlugin().load(' live:notes', { ssr: false }));
+		const out = code(createPlugin().load('\0live:notes', { ssr: false }));
 		expect(out).toContain('export const feed = __stream(');
-		expect(out).not.toMatch(/export const (old|older|quoted)/);
+		// None of them is read as a stream (and the commented gate-around-derived
+		// does not fail the build).
+		expect(out).not.toMatch(/export const (old|older|quoted) = __stream/);
 	});
 
 	it('finds a wrapped export after nested templates and an unterminated quote', () => {
@@ -164,4 +166,19 @@ describe('codegen for wrapped streams', () => {
 		const out = code(createPlugin().load('\0live:tricky', { ssr: false }));
 		expect(out).toContain('export const feed = __stream("tricky/feed"');
 	});
+
+	for (const [label, eol, quote] of [['CRLF', '\r\n', "'"], ['LF', '\n', "'"], ['CRLF', '\r\n', '"'], ['LF', '\n', '"']]) {
+		it(`reads a ${quote}-quoted string continued over a ${label} line break as one string`, () => {
+			// If the continuation ended the string, its second line would be
+			// read as code, and its backtick would open a template that hides
+			// the export below it.
+			setup({
+				'continued.js': header +
+					`const text = ${quote}a\\${eol}b \`${quote};${eol}` +
+					`export const feed = live.public(live.stream('continued', async () => []));${eol}`
+			});
+			const out = code(createPlugin().load('\0live:continued', { ssr: false }));
+			expect(out).toContain('export const feed = __stream("continued/feed"');
+		});
+	}
 });

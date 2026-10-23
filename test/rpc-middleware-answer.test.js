@@ -508,7 +508,8 @@ describe('RPC answers whatever the global middleware returns', () => {
 		const c = conn(env);
 		const topics = trackTopics(c);
 		const original = env.platform.subscribe;
-		env.platform.subscribe = async (ws, topic) => { await tick(20); ws.subscribe(topic); return null; };
+		let admissions = 0;
+		env.platform.subscribe = async (ws, topic) => { admissions++; await tick(20); ws.subscribe(topic); return null; };
 		try {
 			handleRpc(c.ws, textEncoder.encode(JSON.stringify({ rpc: 'admit/feed', id: 's1', args: [], stream: true, attach: true })).buffer, env.platform);
 			expect(await answerFor(c, 's1')).toMatchObject({ code: 'TIMEOUT' });
@@ -516,6 +517,8 @@ describe('RPC answers whatever the global middleware returns', () => {
 		} finally {
 			env.platform.subscribe = original;
 		}
+		// Admitted once, after the answer: the chain reached the subscribe.
+		expect(admissions).toBe(1);
 		expect([...topics]).toEqual([]);
 		expect(ran).toBe(0);
 		expect(c.sent.filter((f) => f.event === 's1')).toHaveLength(1);
