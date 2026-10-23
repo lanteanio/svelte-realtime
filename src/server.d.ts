@@ -4912,9 +4912,10 @@ export interface RealtimeConfig {
 	 * Requires svelte-adapter-uws 0.6.0-next.97 or newer: `init` throws when
 	 * the adapter has no `platform.authorizeDelivery`. Export `init` or `open`
 	 * from the same call; a connection the policy cannot be installed for is closed with
-	 * 1011. One policy per worker: the hooks the adapter runs decide, so the
-	 * call whose hooks ran last is active; changing the options after install
-	 * throws.
+	 * 1011. One policy per worker: the hooks the adapter runs decide. Another
+	 * call's hooks take over once and retire the replaced call, whose hooks
+	 * are then refused. Different options after install throw in `init` and
+	 * close connections with 1011 in the other hooks.
 	 * Without this option nothing changes. See docs/delivery-authorization.md.
 	 */
 	authorizeDelivery?: (ctx: LiveContext<any>, delivery: RealtimeDelivery) => boolean | PromiseLike<boolean>;

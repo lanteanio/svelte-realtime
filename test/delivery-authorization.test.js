@@ -267,11 +267,66 @@ describe('delivery authorization configuration across realtime() calls', () => {
 		expect(seen).toEqual(['first', 'second']);
 		expect(warnings).toHaveBeenCalledTimes(1);
 		expect(warnings).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.replaced'));
-		// The first call's hooks switch back.
-		hooks.message(socket(), { platform: Object.create(platform), data: new ArrayBuffer(0) });
-		expect(platform.gate(socket(), frame)).toBe(true);
-		expect(warnings).toHaveBeenCalledTimes(2);
+		// A retired call cannot reclaim: alternating hooks never switch back.
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const staleSockets = [];
+		for (let i = 0; i < 10; i++) {
+			const stale = socket();
+			staleSockets.push(stale);
+			hooks.message(stale, { platform: Object.create(platform), data: new ArrayBuffer(0) });
+			const current = socket();
+			reloaded.message(current, { platform: Object.create(platform), data: new ArrayBuffer(0) });
+			expect(current.ended).toBeNull();
+		}
+		expect(staleSockets.every((stale) => stale.ended === 1011)).toBe(true);
+		expect(platform.gate(socket(), frame)).toBe(false);
+		expect(warnings).toHaveBeenCalledTimes(1);
+		expect(errors.mock.calls.filter(([line]) => String(line).includes('delivery-authorization.stale'))).toHaveLength(1);
+		expect(() => hooks.init({ platform })).toThrow('replaced by a newer delivery policy');
+		errors.mockRestore();
 		warnings.mockRestore();
+	});
+
+	it('treats realtime() calls with the same function and equal options as one policy', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const shared = () => true;
+		const first = api.realtime({ authorizeDelivery: shared, deliveryAuthorizationOptions: { timeoutMs: 50 }, authorizeWireSubscribe: false });
+		const second = api.realtime({ authorizeDelivery: shared, deliveryAuthorizationOptions: { timeoutMs: 50 }, authorizeWireSubscribe: false });
+		const platform = adapterPlatform();
+		first.init({ platform });
+		for (let i = 0; i < 5; i++) {
+			const a = socket(), b = socket();
+			second.open(a, { platform: Object.create(platform) });
+			first.open(b, { platform: Object.create(platform) });
+			expect(a.ended).toBeNull();
+			expect(b.ended).toBeNull();
+		}
+		expect(warnings).not.toHaveBeenCalled();
+		warnings.mockRestore();
+	});
+
+	it('decides every stream reply of one frame with the policy active when the frame started', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const seen = [];
+		const platform = adapterPlatform();
+		let next;
+		const hooks = api.realtime({ authorizeDelivery: (_ctx, frame) => {
+			seen.push('first:' + frame.topic);
+			// A hook of a newer call runs while this frame is being decided.
+			next.open(socket(), { platform: Object.create(platform) });
+			return true;
+		}, authorizeWireSubscribe: false });
+		next = api.realtime({ authorizeDelivery: (_ctx, frame) => { seen.push('next:' + frame.topic); return true; }, authorizeWireSubscribe: false });
+		hooks.init({ platform });
+		platform.gate(socket(), { kind: 'message', topic: '__rpc', event: '__batch', binary: false, data: { batch: [{ ok: true, topic: 'a', data: 1 }, { ok: true, topic: 'b', data: 2 }] } });
+		expect(seen).toEqual(['first:a', 'first:b']);
+		platform.gate(socket(), { kind: 'message', topic: 'c', event: 'e', data: null, binary: false });
+		expect(seen.at(-1)).toBe('next:c');
+		vi.restoreAllMocks();
 	});
 
 	it('installs with the options of the call whose hooks ran first and refuses other options afterwards', async () => {
@@ -326,7 +381,7 @@ describe('delivery authorization configuration across realtime() calls', () => {
 		hooks.message(opened, { platform: view, data: new ArrayBuffer(0) });
 		expect(opened.ended).toBeNull();
 		expect(platform.installs).toBe(1);
-		expect(errors).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.unguarded'));
+		expect(errors.mock.calls.filter(([line]) => String(line).includes('delivery-authorization.unguarded'))).toHaveLength(1);
 		errors.mockRestore();
 	});
 
@@ -425,5 +480,52 @@ describe('delivery authorization cost without a policy', () => {
 		const hooks = api.realtime({});
 		expect(hooks.message).toBe(api.message);
 		expect(hooks.unsubscribe).toBe(api.unsubscribe);
+	});
+});
+
+describe('delivery authorization installation order and options', () => {
+	function adapterPlatform() {
+		const platform = mockPlatform();
+		platform.connections = 0;
+		platform.authorizeDelivery = (callback) => { platform.gate = callback; };
+		return platform;
+	}
+	const socket = () => ({ ...mockWs({ id: 'scanner' }), ended: null, end(code) { this.ended = code; } });
+	const frame = { kind: 'message', topic: 'scans:e1', event: 'e', data: null, binary: false };
+
+	it('keeps the active policy when installing a newer one fails', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const first = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
+		const second = api.realtime({ authorizeDelivery: () => false, authorizeWireSubscribe: false });
+		const platform = adapterPlatform();
+		first.init({ platform });
+		const broken = adapterPlatform();
+		broken.authorizeDelivery = () => { throw new TypeError('refused'); };
+		const ws = socket();
+		second.open(ws, { platform: Object.create(broken) });
+		expect(ws.ended).toBe(1011);
+		expect(platform.gate(socket(), frame)).toBe(true);
+		expect(warnings).not.toHaveBeenCalled();
+		warnings.mockRestore();
+		errors.mockRestore();
+	});
+
+	it('compares later calls with the options as installed, not as later mutated', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const options = { timeoutMs: 20 };
+		const hooks = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: options, authorizeWireSubscribe: false });
+		const platform = adapterPlatform();
+		hooks.init({ platform });
+		options.timeoutMs = 30;
+		const same = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { timeoutMs: 20 }, authorizeWireSubscribe: false });
+		const ws = socket();
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		same.open(ws, { platform: Object.create(platform) });
+		expect(ws.ended).toBeNull();
+		vi.restoreAllMocks();
 	});
 });

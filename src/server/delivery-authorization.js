@@ -17,7 +17,7 @@ import { formatDiagnostic } from '../shared/diagnostic.js';
 /**
  * @typedef {{ rpc: string, args: readonly unknown[], copy: boolean, confirmed: boolean, token: object | null }} Admission
  * @typedef {{ live: Map<string, Admission>, retired: Map<string, Admission>, inflight: Map<string, number> }} SocketAdmissions
- * @typedef {{ authorize: (ctx: any, delivery: any) => unknown, options: any }} DeliveryPolicy
+ * @typedef {{ authorize: (ctx: any, delivery: any) => unknown, options: any, retired: boolean }} DeliveryPolicy
  * @typedef {{ options: any }} Installation
  */
 
@@ -42,6 +42,8 @@ let activePolicy = null;
 const reportedUnavailable = new WeakSet();
 /** @type {WeakSet<object>} */
 const reportedUnguarded = new WeakSet();
+/** @type {WeakSet<object>} */
+const reportedStale = new WeakSet();
 
 /**
  * Admissions kept per socket after their stream left. The adapter decides a
@@ -205,11 +207,21 @@ export function configureDeliveryAuthorization(authorize, options) {
 	validateDeliveryAuthorizationConfig(authorize, options);
 	if (authorize === undefined) return null;
 	anyConfigured = true;
-	return { authorize: /** @type {any} */ (authorize), options };
+	return { authorize: /** @type {any} */ (authorize), options: _ownOptions(options), retired: false };
 }
 
-/** @type {(ctx: any, delivery: any) => unknown} */
-const _trampoline = (ctx, delivery) => /** @type {DeliveryPolicy} */ (activePolicy).authorize(ctx, delivery);
+/** @param {any} options */
+function _ownOptions(options) {
+	return options === undefined ? undefined : { ...options };
+}
+
+/** Records with the same function and equal options are one policy. @param {DeliveryPolicy} a @param {DeliveryPolicy} b */
+function _samePolicy(a, b) {
+	return a === b || (a.authorize === b.authorize && _sameOptions(a.options, b.options));
+}
+
+/** The active policy's function, read once per frame. */
+const _activeAuthorize = () => /** @type {DeliveryPolicy} */ (activePolicy).authorize;
 
 /**
  * The platform object that owns `authorizeDelivery`: the adapter hands hooks
@@ -246,44 +258,71 @@ export function abandonDeliveryAuthorization(platform) {
 	installations.delete(_owner(platform));
 }
 
+/** Raised for the hooks of a record a newer policy replaced. */
+class StalePolicyError extends Error {}
+
 /**
  * Make a record the active policy, because the adapter ran its hooks, and
- * install the trampoline on this platform unless it already has it. Throws
- * when the adapter lacks the capability, or when the platform was installed
- * with other options (the adapter's bounds are fixed once installed).
+ * install the bridge on this platform unless it already has it. Activation
+ * is one-way: the record it replaces is retired for good, and a retired
+ * record's hooks are refused. A record equal to the active one (same
+ * function, equal options) is the same policy. Throws when the adapter
+ * lacks the capability, when the platform was installed with other options
+ * (the adapter's bounds are fixed once installed), or for a retired record.
  * @param {any} platform
  * @param {DeliveryPolicy} policy
  * @returns {{ installedNow: boolean }}
  */
 export function ensureDeliveryAuthorization(platform, policy) {
+	if (policy.retired) throw new StalePolicyError('[svelte-realtime] realtime({ authorizeDelivery }): this realtime() call was replaced by a newer delivery policy');
 	const existing = _installationOf(platform);
 	if (existing !== undefined && !_sameOptions(existing.options, policy.options)) {
 		throw new Error('[svelte-realtime] realtime({ deliveryAuthorizationOptions }): the installed delivery policy has different options; restart the server to change them');
 	}
+	let installedNow = false;
 	if (existing === undefined) {
 		const owner = _owner(platform);
-		// Refuse an adapter without the capability before the record becomes active.
-		_requireCapability(owner);
+		_installBridge(owner, _activeAuthorize, _ownOptions(policy.options));
+		installations.set(owner, { options: _ownOptions(policy.options) });
+		installedNow = true;
 	}
-	if (activePolicy !== policy) {
-		const replaced = activePolicy !== null;
+	if (activePolicy === null) activePolicy = policy;
+	else if (activePolicy !== policy && !_samePolicy(activePolicy, policy)) {
+		activePolicy.retired = true;
 		activePolicy = policy;
-		if (replaced) {
-			console.warn(formatDiagnostic({
-				source: 'svelte-realtime',
-				component: 'server.delivery-authorization',
-				event: 'delivery-authorization.replaced',
-				severity: 'warn',
-				message: 'The active delivery policy changed to the realtime() call whose hooks the adapter ran.',
-				attributes: {}
-			}));
-		}
+		console.warn(formatDiagnostic({
+			source: 'svelte-realtime',
+			component: 'server.delivery-authorization',
+			event: 'delivery-authorization.replaced',
+			severity: 'warn',
+			message: 'A newer realtime() delivery policy replaced the active one; the replaced one stays retired.',
+			attributes: {}
+		}));
 	}
-	if (existing !== undefined) return { installedNow: false };
-	const owner = _owner(platform);
-	installDeliveryAuthorization(owner, _trampoline, policy.options);
-	installations.set(owner, { options: policy.options });
-	return { installedNow: true };
+	return { installedNow };
+}
+
+/**
+ * Refuse a hook of a retired record: close its connection with 1011 and log
+ * the stale diagnostic once per platform.
+ * @param {any} ws @param {any} platform
+ * @returns {false}
+ */
+function _refuseStale(ws, platform) {
+	const key = platform ? _owner(platform) : reportedStale;
+	if (!reportedStale.has(key)) {
+		reportedStale.add(key);
+		console.error(formatDiagnostic({
+			source: 'svelte-realtime',
+			component: 'server.delivery-authorization',
+			event: 'delivery-authorization.stale',
+			severity: 'error',
+			message: 'Hooks of a replaced delivery policy ran; their connections are closed.',
+			attributes: { closeCode: 1011 }
+		}));
+	}
+	_end(ws);
+	return false;
 }
 
 /** @param {any} ws */
@@ -295,7 +334,8 @@ function _end(ws) {
  * Connection-level capture point used by every realtime() hook. Activates
  * this call's policy and installs it when init did not. Ends with 1011,
  * before realtime serves it, a connection the policy cannot be installed
- * for. When a non-open hook performs the install, the connection was open
+ * for, and refuses the hooks of a retired record the same way. When a
+ * non-open hook performs the install, the connection was open
  * before any policy existed: it is served, and an `unguarded` diagnostic is
  * logged once per platform.
  * @param {any} ws
@@ -306,6 +346,7 @@ function _end(ws) {
  */
 export function guardDeliveryAuthorization(ws, platform, policy, opening) {
 	if (activePolicy === policy && platform && _installationOf(platform) !== undefined) return true;
+	if (policy.retired) return _refuseStale(ws, platform);
 	let installedNow;
 	try {
 		({ installedNow } = ensureDeliveryAuthorization(platform, policy));
@@ -465,9 +506,19 @@ function _requireCapability(platform) {
  */
 export function installDeliveryAuthorization(platform, authorize, options) {
 	validateDeliveryAuthorizationConfig(authorize, options);
+	_installBridge(platform, () => authorize, options);
+}
+
+/**
+ * @param {any} platform
+ * @param {() => (ctx: any, delivery: any) => unknown} current the policy function, read once per frame so one frame is never decided by two policies
+ * @param {any} options
+ */
+function _installBridge(platform, current, options) {
 	_requireCapability(platform);
 	const helpers = _getCtxHelpers(platform);
 	platform.authorizeDelivery((/** @type {any} */ ws, /** @type {any} */ frame) => {
+		const authorize = current();
 		const kind = frame.kind;
 		const topic = frame.topic;
 		if (kind === 'message' && RESPONSE_TOPICS.has(topic)) {

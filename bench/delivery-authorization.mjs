@@ -8,6 +8,10 @@
 //    installed (the only per-message work a policy adds to the hooks).
 // 2. One adapter policy call for an attributed stream frame: descriptor,
 //    live context and the application's (trivial, synchronous) answer.
+// 3. The hooks of a second realtime() call with the same policy (equal
+//    function and options): no switch.
+// 4. Switching to a newer policy once, and the refused hooks of the
+//    retired one afterwards (1011 close; the stale diagnostic logs once).
 // Without a policy realtime() returns the plain hooks, so there is no
 // per-message cost to measure; the script asserts that instead.
 
@@ -67,12 +71,31 @@ if (guardDeliveryAuthorization(ws, view, policy, false) !== true) throw new Erro
 configureDeliveryAuthorization(() => false, undefined);
 if (base.callback(ws, frame) !== true) throw new Error('an unmounted policy took over');
 
-const rows = { 'empty loop': [], 'guard per message': [], 'policy call per delivery': [] };
+const alias = /** @type {any} */ (configureDeliveryAuthorization(policy.authorize, undefined));
+if (guardDeliveryAuthorization(ws, view, alias, false) !== true) throw new Error('an equal policy was refused');
+
+/** @type {Record<string, number[]>} */
+const rows = { 'empty loop': [], 'guard per message': [], 'policy call per delivery': [], 'guard, equal policy': [], 'switch to newer policy': [], 'guard, retired policy': [] };
 for (let round = 0; round < ROUNDS; round++) {
 	rows['empty loop'].push(measure(() => {}));
 	rows['guard per message'].push(measure(() => guardDeliveryAuthorization(ws, view, policy, false)));
 	rows['policy call per delivery'].push(measure(() => base.callback(ws, frame)));
+	rows['guard, equal policy'].push(measure(() => guardDeliveryAuthorization(ws, view, alias, false)));
 }
+
+// Switching logs one warning per switch and retires the replaced record.
+const warn = console.warn, error = console.error;
+console.warn = console.error = () => {};
+const switches = checkOnly ? 10 : 10_000;
+const records = Array.from({ length: switches }, () => /** @type {any} */ (configureDeliveryAuthorization(() => true, undefined)));
+const switchStart = process.hrtime.bigint();
+for (const record of records) guardDeliveryAuthorization(ws, view, record, false);
+rows['switch to newer policy'].push(Number(process.hrtime.bigint() - switchStart) / switches);
+const retiredWs = { getUserData: () => ({ id: 'u' }), ended: 0, end() { this.ended++; } };
+if (guardDeliveryAuthorization(retiredWs, view, policy, false) !== false || retiredWs.ended !== 1) throw new Error('a retired policy was served');
+for (let round = 0; round < ROUNDS; round++) rows['guard, retired policy'].push(measure(() => guardDeliveryAuthorization(retiredWs, view, policy, false)));
+console.warn = warn; console.error = error;
+if (base.callback(ws, frame) !== true) throw new Error('the newest policy did not decide');
 console.log('no policy: realtime({}) returns the plain message and unsubscribe hooks');
 for (const [label, values] of Object.entries(rows)) {
 	const sorted = [...values].sort((a, b) => a - b);

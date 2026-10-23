@@ -24,14 +24,19 @@ checked only once the policy is installed, and without `init` the strict
 wire-subscribe check is armed at that point too: export `init`.
 
 The adapter runs one policy per worker, and the hooks the adapter runs
-decide which one: the policy of the `realtime()` call whose `init`, `open`,
-`message`, `unsubscribe` or `close` hook ran last is active. A dev reload of
-`hooks.ws` therefore switches to the new policy without reinstalling it, and a
-`realtime()` call whose hooks are never mounted changes nothing. Each switch
-logs a `delivery-authorization.replaced` warning. The adapter's bounds are
-fixed once installed: hooks of a call with different
-`deliveryAuthorizationOptions` throw in `init` and close connections with 1011
-elsewhere.
+decide which one. The first `realtime()` call whose `init`, `open`,
+`message`, `unsubscribe` or `close` hook runs becomes active; when the hooks of
+another call with a different policy run, that call takes over and the
+replaced one is retired for good, with one `delivery-authorization.replaced`
+warning. Hooks of a retired call never take back over: `init` throws, and the
+other hooks close their connection with 1011 and log
+`delivery-authorization.stale` once. A dev reload of `hooks.ws` therefore
+switches to the new policy without reinstalling it (the dev server closes the
+old connections and runs only the new hooks), and a `realtime()` call whose
+hooks are never mounted changes nothing. Calls with the same function and
+equal options are one policy. The adapter's bounds are fixed once installed:
+hooks of a call with different `deliveryAuthorizationOptions` throw in `init`
+and close connections with 1011 elsewhere.
 Without the option, nothing changes: subscription admission and native
 delivery behave as before.
 

@@ -21,3 +21,15 @@ it.each(['development', 'production'])('checks real dispatch outcomes and report
 	expect(output).not.toContain('Stream merge throughput');
 	expect(output).toContain('Check passed.');
 }, 35_000);
+
+it('checks real delivery authorization decisions in the benchmark', () => {
+	const output = execFileSync(process.execPath, ['bench/delivery-authorization.mjs', '--check'], {
+		cwd: root, encoding: 'utf8', timeout: 30_000,
+		env: { ...process.env, VITEST: '' }
+	});
+	expect(output).toMatch(/svelte-realtime .+ delivery authorization benchmarks/);
+	expect(output).toMatch(/Runtime: Node v/);
+	expect(output).toContain('no policy: realtime({}) returns the plain message and unsubscribe hooks');
+	for (const row of ['guard per message', 'policy call per delivery', 'guard, equal policy', 'switch to newer policy', 'guard, retired policy']) expect(output).toContain(row);
+	expect(output).toContain('Check passed.');
+}, 35_000);
