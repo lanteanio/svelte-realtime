@@ -196,6 +196,24 @@ describe('SvelteKit development module loading', () => {
 				vi.useRealTimers();
 			}
 		});
+		it('releases held requests when the dev server closes during startup using the ' + (modern ? 'environment runner' : 'Kit 2 loader'), async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = plugin('serve', { devtools: false });
+				const s = server(modern);
+				s.load.mockImplementation(async id => {
+					if (id === '/@svelte-realtime-registry') return new Promise(() => {});
+					return ['svelte-realtime/server', '/@svelte-realtime-server'].includes(id) ? s.runtime : {};
+				});
+				p.configureServer(s);
+				s.listeners.listening();
+				const [hold] = s.middlewares.use.mock.calls.map(call => call[0]);
+				const passed = new Promise(resolve => hold({ url: '/' }, {}, resolve));
+				s.listeners.close();
+				await passed;
+				expect(warn.mock.calls.filter(args => /still loading/.test(String(args[0])))).toEqual([]);
+			} finally { warn.mockRestore(); }
+		});
 		it('reloads live handlers using the ' + (modern ? 'SSR environment graph' : 'Kit 2 graph'), async () => {
 			const p = plugin();
 			const s = server(modern);

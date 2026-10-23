@@ -375,10 +375,14 @@ export default function svelteRealtime(options) {
 						console.warn(`[svelte-realtime] Live handlers are still loading after ${STARTUP_HOLD_MS / 1000} s; serving requests without waiting for them.\n  See: https://svti.me/vite`);
 						resolve(undefined);
 					}, STARTUP_HOLD_MS);
-					loading.then(() => {
+					// The hold must not keep a closing dev server's process alive.
+					timer.unref?.();
+					const release = () => {
 						clearTimeout(timer); // determinism-allow: pairs the development request hold above
 						resolve(undefined);
-					});
+					};
+					loading.then(release);
+					server.httpServer?.once('close', release);
 				});
 				startup = held;
 				held.then(() => { if (startup === held) startup = null; });
