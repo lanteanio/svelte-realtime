@@ -4,7 +4,7 @@ import { resolve, relative, sep, posix } from 'path';
 import { _readCached } from './source-cache.js';
 import { _runtimeExports } from './hooks-exports.js';
 import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports } from './scanner.js';
-import { _extractAggregateWindows, _extractFlagDecl, _unwrapStreamWrappers } from './extract-options.js';
+import { _extractAggregateWindows, _extractFlagDecl, _liveSource } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
 
 /**
@@ -246,7 +246,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = _unwrapStreamWrappers(_readCached(filePath), `${dir}/${rel}`);
+		const source = _liveSource(_readCached(filePath), `${dir}/${rel}`);
 		const normalizedPath = filePath.split(sep).join(posix.sep);
 
 		const _importPath = JSON.stringify(normalizedPath);

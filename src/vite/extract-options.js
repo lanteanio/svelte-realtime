@@ -1429,28 +1429,14 @@ const _WRAPPER_CALL_RE = /^live\.(public|gate|scoped)\s*\(/;
  * @param {string} [file]
  * @returns {string}
  */
-export function _unwrapStreamWrappers(source, file) {
+function _unwrapStreamWrappers(source, file) {
 	if (!source.includes('live.public') && !source.includes('live.gate') && !source.includes('live.scoped')) return source;
 	const blank = (/** @type {string} */ text) => text.replace(/[^\n]/g, ' ');
 	let out = '';
 	let last = 0;
 	_WRAPPER_EXPORT_RE.lastIndex = 0;
 	let m;
-	/** @type {Array<[number, number]> | null} */
-	let nonCode = null;
-	let nonCodeAt = 0;
 	scan: while ((m = _WRAPPER_EXPORT_RE.exec(source)) !== null) {
-		// A declaration inside a comment or string is not one; the ranges are
-		// found once, on the first match.
-		if (nonCode === null) {
-			nonCode = [];
-			for (let i = 0; i < source.length; i++) {
-				const end = _skipNonCode(source, i);
-				if (end >= 0) { nonCode.push([i, end]); i = end; }
-			}
-		}
-		while (nonCodeAt < nonCode.length && nonCode[nonCodeAt][1] < m.index) nonCodeAt++;
-		if (nonCodeAt < nonCode.length && nonCode[nonCodeAt][0] <= m.index) continue;
 		const name = m[1];
 		/** @type {string[]} */
 		const wrappers = [];
@@ -1492,4 +1478,56 @@ export function _unwrapStreamWrappers(source, file) {
 		if (wrappers.includes('public')) out += ' /* realtime-allow-public */';
 	}
 	return last === 0 ? source : out + source.slice(last);
+}
+
+// - Live source ---------------------------------------------------------------
+
+const _EXPORT_WORD_RE = /\bexport\b/g;
+
+/**
+ * Hide every `export` keyword that sits inside a comment or a string, so no
+ * export scanner reads a commented-out or quoted declaration. The keyword is
+ * replaced by a same-length non-keyword; nothing else changes, and nothing
+ * is scanned when the source has no `export` at all.
+ * @param {string} source
+ * @returns {string}
+ */
+function _hideNonCodeExports(source) {
+	/** @type {number[]} */
+	const words = [];
+	_EXPORT_WORD_RE.lastIndex = 0;
+	let m;
+	while ((m = _EXPORT_WORD_RE.exec(source)) !== null) words.push(m.index);
+	if (words.length === 0) return source;
+	/** @type {number[]} */
+	const hidden = [];
+	const lastWord = words[words.length - 1];
+	let w = 0;
+	for (let i = 0; i <= lastWord; i++) {
+		const end = _skipNonCode(source, i);
+		if (end < 0) continue;
+		while (w < words.length && words[w] < i) w++;
+		while (w < words.length && words[w] <= end) hidden.push(words[w++]);
+		i = end;
+	}
+	if (hidden.length === 0) return source;
+	let out = '';
+	let at = 0;
+	for (const index of hidden) {
+		out += source.slice(at, index) + '_xport';
+		at = index + 6;
+	}
+	return out + source.slice(at);
+}
+
+/**
+ * The source every live-module scanner reads: declarations inside comments
+ * and strings hidden, and streams wrapped in `live.public` / `live.gate` /
+ * `live.scoped` read as the streams they wrap.
+ * @param {string} source
+ * @param {string} [file]
+ * @returns {string}
+ */
+export function _liveSource(source, file) {
+	return _unwrapStreamWrappers(_hideNonCodeExports(source), file);
 }

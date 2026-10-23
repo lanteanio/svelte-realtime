@@ -5,7 +5,7 @@ import { _readCached } from './source-cache.js';
 import { _findLiveFiles } from './codegen-registry.js';
 import { _warnUnsafeExports } from './scanner.js';
 import { _extractFunctionSignature, _extractFunctionSignatureFor, _extractErrorCodes, _isDynamicExport, _extractStreamReturnType, _extractDynamicFactoryParams } from './extract-types.js';
-import { _extractAggregateWindows, _extractMultiplayerInfo, _unwrapStreamWrappers } from './extract-options.js';
+import { _extractAggregateWindows, _extractMultiplayerInfo, _liveSource } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
 
 // The `.load()` SSR-degradation options, shared across every generated stream
@@ -61,7 +61,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = _unwrapStreamWrappers(readSource(filePath), `${dir}/${rel}`);
+		const source = _liveSource(readSource(filePath), `${dir}/${rel}`);
 		const isTS = filePath.endsWith('.ts');
 
 		/** @type {string[]} */

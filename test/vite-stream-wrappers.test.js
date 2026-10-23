@@ -150,9 +150,9 @@ describe('codegen for wrapped streams', () => {
 		});
 		const out = code(createPlugin().load('\0live:notes', { ssr: false }));
 		expect(out).toContain('export const feed = __stream(');
-		// None of them is read as a stream (and the commented gate-around-derived
-		// does not fail the build).
-		expect(out).not.toMatch(/export const (old|older|quoted) = __stream/);
+		// None of them is generated (and the commented gate-around-derived does
+		// not fail the build).
+		expect(out).not.toMatch(/export const (old|older|quoted)/);
 	});
 
 	it('finds a wrapped export after nested templates and an unterminated quote', () => {
