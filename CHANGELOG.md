@@ -102,7 +102,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Comments in the server declarations and the README name the extensions subpaths that exist, `svelte-adapter-uws-extensions/redis/presence` and `svelte-adapter-uws-extensions/postgres/tasks`, and the durable alarm example spells its Postgres store as a complete import.
 
-- A dynamic `live.derived` output topic stays within the adapter's 256-character topic limit when its module path is longer than 120 characters, including under a tenant prefix. Before, such a path plus the argument digest exceeded the limit and every subscribe was refused with `INVALID_TOPIC`. Topics of shorter paths are unchanged.
+- A dynamic `live.derived` output topic for a module path longer than 120 characters is now shortened and hashed, so it stays within the adapter's 256-character topic limit. Under a tenant prefix such topics exceeded the limit and every subscribe was refused with `INVALID_TOPIC`. Topics of shorter paths are unchanged. The wire topic changes for those long paths, so replicas on mixed versions disagree on it during a rolling deploy.
 
 - A stream subscribe sends its attach frame only after the adapter admitted the subscribe, and still before the loader reads its snapshot. Before, the frame went out ahead of the adapter's subscribe hook, so a caller the hook denied had already been told the resolved, possibly tenant-scoped, wire topic. A subscribe denied by a room guard, a stream filter or the adapter's hook is now never told the topic.
 
@@ -128,7 +128,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.forget(userId, { tenantId })` erases only the named tenant's records from the in-memory webhook dead-letter store, the push registry and smooth state. An equal userId in another tenant keeps its dead-lettered events, routing and smooth entries, and a dead-letter delivery still in flight for that other tenant is captured instead of being dropped by the erasure's tombstone. The dead-letter store scopes by record topic, the same rule the durable stores apply.
 
-- `forget: 'retain'` aggregates clear their privacy contributor cohorts whole on `live.forget`. Before, only an entry equal to the userId was removed, so a numeric or email contributor id survived an erasure that reported success. A thresholded output holds its last value until k contributors return. The aggregate docs now state that aggregate erasure acts on the calling worker only and that a `forget: 'reset'` does not re-key perturbation noise.
+- `forget: 'retain'` aggregates clear their privacy contributor cohorts whole on `live.forget`. Before, only an entry equal to the userId was removed, so a numeric or email contributor id survived an erasure that reported success. The cohorts of every tenant are cleared whatever `tenantId` the erasure names, and a thresholded output holds its last value until k contributors return. Aggregate erasure acts on the calling worker only, and a `forget: 'reset'` keeps the privacy noise key because a worker-local reset has no replica-consistent generation to re-key it with.
 
 - Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
 
@@ -161,7 +161,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
 
 - Dead-letter replay is bounded: `replayDeadLetter()` and `POST /__realtime/dlq/<topic>/replay` handle at most `limit` records per call (default 100, at most 1000) or up to 1000 explicit `ids`, and the admin route answers 400 on invalid input. Each call emits a `webhook.dead-letter.replayed` operational event with its initiator and counts. Before, one call re-fired every queued record.
-  **Action required:** code that replayed a whole queue in one call now calls again until a call replays nothing. Failed and `webhook-unregistered` records stay at the head of the list, so reach records behind them by passing their `ids` or raising `limit`.
+  **Action required:** code that replayed a whole queue in one call now calls again until a call replays nothing. Failed and `webhook-unregistered` records stay in place, so reach records behind them by passing their `ids` or raising `limit`.
 
 - With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 

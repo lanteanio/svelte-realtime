@@ -2674,11 +2674,13 @@ export namespace live {
 			 * Required for confirmed live.forget erasure of arbitrary reducer data.
 			 * 'retain' declares all reducer state, snapshots and outputs non-personal:
 			 * keep them and their timers while clearing the privacy contributor
-			 * cohorts whole (a contributor id need not be the userId); a thresholded
-			 * output holds its last value until k contributors return.
+			 * cohorts whole (a contributor id need not be the userId) for every tenant,
+			 * whatever tenantId the erasure names; a thresholded output holds its last
+			 * value until k contributors return.
 			 * 'reset' resets the entire aggregate across all users, tenants, windows
 			 * and buckets, cancels pending output/hydration and publishes a clean
-			 * initial value. A reset does not re-key privacy noise.
+			 * initial value. A reset is worker-local and keeps the privacy noise key,
+			 * since no replica-consistent generation exists to re-key it.
 			 * init() must return non-personal serializable state (no functions or shared memory).
 			 * Missing policy or failed reset reports FORGET_INCOMPLETE.
 			 * Erasure acts on the calling worker's aggregates only; run live.forget
@@ -5025,11 +5027,11 @@ export function getDeadLetter(): DeadLetterStore | null;
  * One call handles the first `limit` records (default 100, at most 1000) in
  * the store's list order (the in-memory store lists newest first). Replayed
  * records leave the queue; failed and `webhook-unregistered` records stay in
- * place, so later calls see them again at the head. Stop when a call replays
- * nothing, and reach records behind a stuck head by passing their `ids`
+ * place, so later calls see them again. Stop when a call replays
+ * nothing, and reach records behind them by passing their `ids`
  * (read them with `getDeadLetter().list({ topic, limit })`) or by raising
- * `limit`. `ids` names records explicitly (at most 1000); `limit` does not
- * apply to an `ids` call. An out-of-range limit, a malformed or oversized id list, or a bad
+ * `limit`. `ids` names records explicitly (at most 1000); `limit` is
+ * validated but not applied to an `ids` call. An out-of-range limit, a malformed or oversized id list, or a bad
  * initiator rejects with `INVALID_REQUEST`. Each call emits a
  * `webhook.dead-letter.replayed` operational event carrying `initiator`
  * (default `'api'`) and its counts.
