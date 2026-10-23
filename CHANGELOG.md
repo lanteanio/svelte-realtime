@@ -132,9 +132,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - A stream subscriber that resumes from a replay or a delta arms the stream's `staleAfterMs` watchdog and `invalidateOn` watchers the same way a loader run does. Before, a topic whose first subscriber resumed this way was never reloaded. A socket that closes while its resume is still awaiting arms nothing.
 
 - The unsequenced delivery policy covers rooms list deltas, cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand and `ctx.publishThrottled` / `ctx.publishDebounced`. These frames carry no adapter sequence on a single worker either and take no publish options, so an app that needs a sequenced frame publishes it with explicit options through `ctx.platform.publish`.
-- New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
-
-- New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.
 
 - The README's documentation paths send "Add realtime to an existing app" to the README's own manual setup, which the release checks build and run on SvelteKit 3 and, with the `svelte.config.js` it now shows for existing projects, on SvelteKit 2.
 
@@ -227,18 +224,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Inline `live.webhooks.outbound()` configuration accepts the runtime-supported numeric `pinCacheMs` option, including zero to disable validated DNS pin caching.
 
 - `live.breaker()` rejects unsupported breaker objects at registration with `VALIDATION`; its type accepts the extensions `guard()` contract and legacy `isOpen()` breakers.
-### Security
 
-- A stream path answers only a subscribe frame. A plain RPC frame (no `stream: true`) naming a `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, `live.flag` or room sub-stream is refused with `INVALID_REQUEST` after the module guard, also inside a batch and as a fire-and-forget call. Before, such a frame ran the stream's loader directly, skipping its `access`/`filter` predicate, args schema and gate, and returned the snapshot to a caller that could not subscribe. Server-side `.load()` is unchanged. In `createTestEnv`, `.call()` on a stream path now rejects with `INVALID_REQUEST`; use `.subscribe()`.
-
-- `live.stream` no longer writes its metadata onto the loader function it is given. A loader also exported as a plain `live()` RPC, or shared by two streams, kept the last stream's options: one stream's `access` predicate could replace another's, and the RPC export answered as a stream.
-
-- Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
-
-- Dead-letter replay is bounded: `replayDeadLetter()` and `POST /__realtime/dlq/<topic>/replay` handle at most `limit` records per call (default 100, at most 1000) or up to 1000 explicit `ids`, and the admin route answers 400 on invalid input. Each call emits a `webhook.dead-letter.replayed` operational event with its initiator and counts. Before, one call re-fired every queued record.
-  **Action required:** code that replayed a whole queue in one call now calls again until a call replays nothing. Failed and `webhook-unregistered` records stay in place, so reach records behind them by passing their `ids` or raising `limit`.
-
-- With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 - Live handlers register in the SvelteKit 3 SSR environment during builds, development and hot reloads. Production builds emit the registry chunk and keep `svelte-realtime` external in the SSR environment; client imports still generate WebSocket stubs.
 
 - On Windows, live handlers and SvelteKit routes share one instance of each server module when the working directory's drive letter is lowercase. Vite 8 resolves its root with an uppercase drive letter, which loaded live modules a second time in development and in production builds.
@@ -268,6 +254,19 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The dev server pre-bundles `svelte-realtime/client` and `svelte-realtime/devtools` when they are installed under `node_modules` and dependency discovery is on, so the first page load of a new project is no longer reloaded once per discovered entry. A reload during that first navigation could fail to fetch the SvelteKit client entry. A linked or excluded `svelte-realtime` stays served from source, so every client module shares one instance.
 
 - The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
+
+### Security
+
+- A stream path answers only a subscribe frame. A plain RPC frame (no `stream: true`) naming a `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, `live.flag` or room sub-stream is refused with `INVALID_REQUEST` after the module guard, also inside a batch and as a fire-and-forget call. Before, such a frame ran the stream's loader directly, skipping its `access`/`filter` predicate, args schema and gate, and returned the snapshot to a caller that could not subscribe. Server-side `.load()` is unchanged. In `createTestEnv`, `.call()` on a stream path now rejects with `INVALID_REQUEST`; use `.subscribe()`.
+
+- `live.stream` no longer writes its metadata onto the loader function it is given. A loader also exported as a plain `live()` RPC, or shared by two streams, kept the last stream's options: one stream's `access` predicate could replace another's, and the RPC export answered as a stream.
+
+- Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
+
+- Dead-letter replay is bounded: `replayDeadLetter()` and `POST /__realtime/dlq/<topic>/replay` handle at most `limit` records per call (default 100, at most 1000) or up to 1000 explicit `ids`, and the admin route answers 400 on invalid input. Each call emits a `webhook.dead-letter.replayed` operational event with its initiator and counts. Before, one call re-fired every queued record.
+  **Action required:** code that replayed a whole queue in one call now calls again until a call replays nothing. Failed and `webhook-unregistered` records stay in place, so reach records behind them by passing their `ids` or raising `limit`.
+
+- With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 
 ## [0.6.0-next.91] - 2026-10-13
 
