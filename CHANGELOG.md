@@ -122,8 +122,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Coalescing declarations for static and literal-prefix stream topics now resolve before the first local subscriber and after the last disconnect, so a publisher with no local subscribers still relays coalesced through a platform with `relayCoalesced` (the Redis pub/sub bus), keeping the original-data key and the transformed payload. Platforms without it keep publishing plainly.
 
-- A successful `store.mutate()` no longer applies its change again over server state that arrived while the call was in flight. A function change on a crud stream, or any change on a `set` stream, could overwrite another client's later write and leave that replica on a value the server no longer held.
-
 - A successful `store.mutate()` no longer applies its change again over server state that arrived while the call was in flight. A function change on a crud stream, or any change on a `set` stream, could overwrite another client's later write and leave that replica on a value the server no longer held. Handlers behind a mutate must publish the committed change before they return: when a server event reached what the change touched while the call was in flight, the client keeps the server's events and drops its own copy, so a handler that commits without publishing leaves the stream without that change until a later event or a refetch carries it.
 
 - When a room owner's last connection leaves, the `:owner` stream names the successor before the presence stream publishes the owner's `leave`, including when the departed owner is retired early to admit a member at capacity. A client reacting to the roster change reads the new owner, never the member who just left.
