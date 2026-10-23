@@ -805,7 +805,9 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		ctx.signal = ctx.abortSignal;
 		ctx.upload = { id: _streamIdHex(streamId) };
 
-		await _runWithMiddleware(ctx, async () => {
+		let chainReached = false;
+		const shortCircuit = await _runWithMiddleware(ctx, async () => {
+			chainReached = true;
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
@@ -861,6 +863,15 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { ok: true, data: result });
 			}
 		});
+		if (!chainReached && upload.phase !== 'settled') {
+			// A middleware returned without calling next(). Its return value is
+			// the answer, as on RPC: a failure envelope refuses with its code,
+			// anything else is a server bug and fails with INTERNAL_ERROR.
+			if (shortCircuit && shortCircuit.ok === false && typeof shortCircuit.code === 'string') {
+				throw new LiveError(shortCircuit.code, typeof shortCircuit.error === 'string' ? shortCircuit.error : shortCircuit.code);
+			}
+			throw new Error('middleware returned without calling next() and without a failure envelope');
+		}
 		upload.recordOutcome('');
 	} catch (err) {
 		if (upload.phase !== 'settled') {

@@ -614,6 +614,44 @@ describe('upload stream diagnostics', () => {
 		} finally { sink.restore(); peer = undefined; }
 	});
 
+	it('answers and ends an upload whose middleware returns a failure without calling next()', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			let ran = false;
+			ctx.live.middleware(async (mctx, next) => {
+				if (mctx.upload) return { ok: false, code: 'FORBIDDEN', error: 'blocked here' };
+				return next();
+			});
+			env.register('files', { save: ctx.live.upload(async () => { ran = true; return 1; }, { diagnostics: true }) });
+			const handle = ctx.__upload('files/save')(new Uint8Array(100));
+			await expect(handle).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'blocked here' });
+			expect(ran).toBe(false);
+			expect(sink.stream().map((r) => [r.event, r.attributes.outcome, r.attributes.code])).toEqual([
+				['upload.stream.started', undefined, undefined],
+				['upload.stream.ended', 'rejected', 'FORBIDDEN']
+			]);
+		} finally { sink.restore(); }
+	});
+
+	it('fails an upload with INTERNAL_ERROR when middleware ends the chain without a failure', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			ctx.live.middleware(async () => {});
+			env.register('files', { save: ctx.live.upload(async () => 1, { diagnostics: true }) });
+			const handle = ctx.__upload('files/save')(new Uint8Array(100));
+			await expect(handle).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+			const failed = sink.records.filter((r) => r.event === 'upload.execution.failed');
+			expect(failed).toHaveLength(1);
+			expect(failed[0].attributes.error).toMatch(/next\(\)/);
+			expect(sink.stream().map((r) => [r.event, r.attributes.outcome, r.attributes.code])).toEqual([
+				['upload.stream.started', undefined, undefined],
+				['upload.stream.ended', 'rejected', 'INTERNAL_ERROR']
+			]);
+		} finally { sink.restore(); }
+	});
+
 	it('rejects a non-boolean diagnostics option', async () => {
 		const ctx = await setup();
 		expect(() => ctx.live.upload(async () => 1, { diagnostics: /** @type {any} */ (1) })).toThrow(/diagnostics/);
