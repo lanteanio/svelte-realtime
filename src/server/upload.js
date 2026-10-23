@@ -872,11 +872,28 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		// whichever settles the upload first answers, once. The chain promise
 		// is kept so a middleware that drops or swallows next() cannot leave
 		// the upload unanswered, or cleaned up under a running handler.
+		// Once the upload is answered, a next() runs neither an inner
+		// middleware nor the guard and handler, and rejects, as on RPC.
+		const late = () => {
+			if (upload.phase !== 'settled') return null;
+			emitOperationalEvent({
+				source: 'svelte-realtime',
+				component: 'server.upload',
+				event: 'upload.middleware.next-after-answer',
+				severity: 'warn',
+				dataClass: 'application',
+				message: 'A middleware called next() after the upload was answered; the rest of the chain did not run.',
+				attributes: { path }
+			});
+			const refused = Promise.reject(new Error('middleware called next() after the upload was answered'));
+			refused.catch(() => {});
+			return refused;
+		};
 		const middlewareResult = await _runWithMiddleware(ctx, () => {
 			chainRun = runChain();
 			chainRun.catch(() => { chainFailed = true; });
 			return chainRun;
-		});
+		}, late);
 		if (upload.phase !== 'settled') {
 			// If nothing settled the upload yet, the middleware's return value
 			// answers, as on RPC: a failure envelope refuses with its code. Otherwise the chain's own outcome

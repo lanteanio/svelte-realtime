@@ -758,6 +758,26 @@ describe('upload stream diagnostics', () => {
 		expect(await ctx.__upload('files/save')(new Uint8Array(20_000))).toBe(20_000);
 	});
 
+	it('rejects a next() called after the upload was answered and runs nothing below it', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			const ran = [];
+			let late;
+			ctx.live.middleware(async (mctx, next) => {
+				if (!mctx.upload) return next();
+				late = new Promise((resolve) => setTimeout(() => resolve(Promise.resolve().then(next)), 5));
+				return { ok: false, code: 'FORBIDDEN', error: 'refused' };
+			});
+			ctx.live.middleware(async (mctx, next) => { if (mctx.upload) ran.push('inner'); return next(); });
+			env.register('files', { save: ctx.live.upload(async () => { ran.push('handler'); return 1; }) });
+			await expect(ctx.__upload('files/save')(new Uint8Array(10))).rejects.toMatchObject({ code: 'FORBIDDEN' });
+			await expect(late).rejects.toThrow('after the upload was answered');
+			expect(ran).toEqual([]);
+			expect(sink.records.filter((r) => r.event === 'upload.middleware.next-after-answer')).toHaveLength(1);
+		} finally { sink.restore(); }
+	});
+
 	it('keeps the session slot of a refused upload whose handler a middleware left running', async () => {
 		const ctx = await setup();
 		let calls = 0;
