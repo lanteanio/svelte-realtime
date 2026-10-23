@@ -48,21 +48,18 @@ const _LOAD_FAILURE_REPORT_CAP = 256;
  * syntax error saved in development, a module whose top level throws) answers
  * the call as an internal error instead of rejecting outside the caller's
  * error handling. The entry stays lazy, so a later call loads it again.
+ * Callers look a loaded entry up directly and come here only for a lazy or
+ * missing one, so a call into a loaded handler allocates nothing extra.
  * @param {string} path
  * @param {string | undefined} requestId
- * @param {{ onError?: Function } | undefined} options
- * @param {() => any} buildCtx - Builds the call context for `onError`
- * @returns {Promise<{ fn: Function | null, failure?: undefined } | { fn?: undefined, failure: { ok: false, code: string, error: string } }>}
+ * @returns {Promise<{ fn: Function | null, failure?: undefined, error?: undefined } | { fn?: undefined, failure: { ok: false, code: string, error: string }, error: unknown }>}
  */
-async function _resolveForCall(path, requestId, options, buildCtx) {
+async function _resolveForCall(path, requestId) {
 	try {
 		const fn = await _resolveRegistryEntry(path);
 		if (_reportedLoadFailures.size !== 0) _reportedLoadFailures.delete(path);
 		return { fn };
 	} catch (err) {
-		if (options?.onError) {
-			try { options.onError(path, err, buildCtx()); } catch {}
-		}
 		const message = err instanceof Error ? err.message : String(err);
 		let seen = _reportedLoadFailures.get(path);
 		if (!seen?.has(message)) {
@@ -80,7 +77,7 @@ async function _resolveForCall(path, requestId, options, buildCtx) {
 				attributes: { path, requestId, error: diagnosticError(err), help: 'https://svti.me/errors' }
 			});
 		}
-		return { failure: { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' } };
+		return { failure: { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, error: err };
 	}
 }
 
@@ -1446,12 +1443,18 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	if (!_isLazyResolved()) await _resolveAllLazy();
 
 	const args = rawArgs || [];
-	const resolved = await _resolveForCall(path, requestId, options, () => _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId));
-	if (resolved.failure) {
-		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
-		return { id, ...resolved.failure };
+	let fn = registry.get(path);
+	if (fn === undefined || /** @type {any} */ (fn).__lazy) {
+		const resolved = await _resolveForCall(path, requestId);
+		if (resolved.failure) {
+			if (options?.onError) {
+				try { options.onError(path, resolved.error, _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId)); } catch {}
+			}
+			_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
+			return { id, ...resolved.failure };
+		}
+		fn = resolved.fn;
 	}
-	const fn = resolved.fn;
 	if (!fn) {
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per
@@ -1634,13 +1637,19 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
-	const resolved = await _resolveForCall(path, requestId, options, () => _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), null, null, requestId));
-	if (resolved.failure) {
-		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
-		_respond(ws, platform, id, resolved.failure, requestId, path);
-		return;
+	let fn = registry.get(path);
+	if (fn === undefined || /** @type {any} */ (fn).__lazy) {
+		const resolved = await _resolveForCall(path, requestId);
+		if (resolved.failure) {
+			if (options?.onError) {
+				try { options.onError(path, resolved.error, _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), null, null, requestId)); } catch {}
+			}
+			_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
+			_respond(ws, platform, id, resolved.failure, requestId, path);
+			return;
+		}
+		fn = resolved.fn;
 	}
-	const fn = resolved.fn;
 	if (!fn) {
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per
