@@ -285,7 +285,7 @@ describe('__rpc()', () => {
 	});
 });
 
-// - __stream (Findings 1, 3, 4, 5) ------------------------------------------
+// - __stream -----------------------------------------------------------------
 
 describe('__stream()', () => {
 	it('resolves with full response (topic + data) for stream requests', async () => {

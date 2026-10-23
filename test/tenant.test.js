@@ -343,7 +343,7 @@ describe('live.tenant: room presence roster + join channel are scoped per tenant
 	});
 });
 
-describe('live.tenant: dynamic derived watches its own tenant sources (H3)', () => {
+describe('live.tenant: dynamic derived watches its own tenant sources', () => {
 	it('two tenants get distinct instances watching distinct WIRE source topics', () => {
 		_setTenantResolver((u) => u.org);
 		const fn = live.derived((orgArg) => ['orders:' + orgArg], async () => 0);

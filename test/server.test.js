@@ -6124,7 +6124,7 @@ describe('live.room()', () => {
 	});
 
 	it('stream RPC routes through platform.subscribe so the adapter sees the subscription', async () => {
-		// Regression for the codex H1 audit finding: the stream RPC path
+		// The stream RPC path
 		// must call `platform.subscribe(ws, topic)` (atomic gate + ws.subscribe
 		// + cap + adapter-side state update) rather than raw `ws.subscribe`.
 		// Without this, the adapter's `MAX_SUBSCRIPTIONS_PER_CONNECTION`
@@ -12665,8 +12665,8 @@ describe('auto-replay routing', () => {
 		try {
 			// No platform.replay: a single-process app. The flag's default buffer
 			// has nowhere to write, but per live.flag's contract that loses
-			// nothing (the cached value is authoritative in one process). F4 routes
-			// flag.set() through _maybeReplayPublish; the implicit-default marker
+			// nothing (the cached value is authoritative in one process). flag.set()
+			// routes through _maybeReplayPublish; the implicit-default marker
 			// must keep the missing-extension warn silent here.
 			const platform = mockPlatform();
 			setCronPlatform(platform);
