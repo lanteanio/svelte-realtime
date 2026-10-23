@@ -144,8 +144,8 @@ regenerates it.
 
 The fixture locks record this checkout's dependency ranges as well as its
 version, so a dependency change in the root `package.json` outside a version
-bump regenerates them in the same commit: a runtime dependency change needs
-steps 2 and 3, and a devDependency change needs step 3.
+bump regenerates them in the same commit: a runtime or peer dependency change
+needs steps 2 and 3, and a devDependency change needs step 3.
 
 ## Artifact records
 
