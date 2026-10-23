@@ -17,7 +17,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const installModes = {
 	'.': [],
 	'test/fixture': [],
-	'test/fixtures/svelte4': ['--install-links']
+	'test/fixtures/svelte4': ['--install-links'],
+	'test/fixtures/kit2': ['--install-links'],
+	'test/fixtures/kit2-vite5': ['--install-links'],
+	'test/fixtures/kit3': ['--install-links']
 };
 
 export function committedLocks(directory = root) {
