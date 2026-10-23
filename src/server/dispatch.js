@@ -1068,17 +1068,15 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		throw err;
 	}
 
-	// Arm the staleness watchdog now that the loader succeeded.
-	// Idempotent per topic, so multi-subscriber streams only ever
-	// run one watchdog regardless of how many subscribers join.
+	// Arm the staleness watchdog now that the loader succeeded. One
+	// watchdog per topic; every subscriber whose loader succeeded is
+	// recorded as a context a later reload can run under.
 	if (/** @type {any} */ (fn).__streamStaleAfterMs) {
 		_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
 	}
 
-	// Arm the topic-invalidation watcher(s). Same first-wins
-	// idempotence story as the stale watchdog - duplicate
-	// (pattern, topic) registrations are a no-op inside
-	// _registerInvalidationWatch.
+	// Arm the topic-invalidation watcher(s): one per (pattern, topic),
+	// with this subscriber recorded the same way as for the watchdog.
 	if (/** @type {any} */ (fn).__streamInvalidateOn) {
 		_registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
 	}

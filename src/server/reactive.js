@@ -667,8 +667,12 @@ function _wrapPlatformPublish(platform) {
 	}
 }
 
-/** Resolve a live context and revoke sockets whose identity/tenant scope changed. */
-function _currentDerivedContext(entry, platform, select = true) {
+/**
+ * Resolve a live context and revoke sockets whose identity/tenant scope changed.
+ * With `tried`, a subscriber already in the set is passed over and the one
+ * selected is added, so a caller can move on to the next valid subscriber.
+ */
+function _currentDerivedContext(entry, platform, select = true, tried = null) {
 	let scopeKey = entry.fn.__derivedScopeKey;
 	// This scratch context is used only by internal identity helpers and never
 	// escapes to scope callbacks or compute functions.
@@ -719,6 +723,10 @@ function _currentDerivedContext(entry, platform, select = true) {
 			// Before compute only select one valid context. The mandatory scan
 			// after compute checks every recipient before any output is delivered.
 			if (select) {
+				if (tried) {
+					if (tried.has(subscriber)) continue;
+					tried.add(subscriber);
+				}
 				// A derived output can serve several sockets. Preserve the historic
 				// detached compute context while selecting current user data.
 				return _buildCtx(user || null, null, platform, _getCtxHelpers(platform), null);
@@ -760,11 +768,34 @@ async function _recomputeDerived(entry, platform) {
 	try {
 		let result;
 		if (entry.args) {
-			const ctx = _currentDerivedContext(entry, platform);
-			if (!ctx || !entry.active) return;
-			generation = entry.generation;
-			entry.pending = false;
-			result = await _runWithMiddleware(ctx, () => entry.fn(ctx, ...entry.args));
+			// Run under one valid subscriber's detached ctx (ws is null: the output
+			// serves every subscriber). When middleware refuses that subscriber
+			// (throws before calling next), try the next one; a compute throw ends
+			// the recompute.
+			const tried = new Set();
+			let refused = null;
+			for (;;) {
+				const ctx = _currentDerivedContext(entry, platform, true, tried);
+				if (!entry.active) return;
+				if (!ctx) {
+					if (refused) throw refused.err;
+					return;
+				}
+				ctx.rerun = 'derived';
+				generation = entry.generation;
+				entry.pending = false;
+				let entered = false;
+				try {
+					result = await _runWithMiddleware(ctx, () => {
+						entered = true;
+						return entry.fn(ctx, ...entry.args);
+					});
+					break;
+				} catch (err) {
+					if (entered) throw err;
+					refused = { err };
+				}
+			}
 			_currentDerivedContext(entry, platform, false);
 		} else {
 			result = await entry.fn();

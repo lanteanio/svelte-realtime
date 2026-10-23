@@ -348,6 +348,14 @@ export interface LiveContext<UserData = RegisteredUser> {
 	 * bounded string.
 	 */
 	requestId: string | undefined;
+	/**
+	 * `null` on a client call. On a loader the server re-runs later on behalf
+	 * of a topic's subscribers it names the trigger: an `invalidateOn` or
+	 * `staleAfterMs` stream reload, or a per-argument `live.derived`
+	 * recompute. Lets middleware skip or label re-runs; `requestId` on a
+	 * re-run is still the subscribe's.
+	 */
+	rerun: 'invalidateOn' | 'staleAfterMs' | 'derived' | null;
 	/** Validated W3C context for this RPC/stream operation. */
 	traceContext: OperationTraceContext | null;
 	/** Vendor-neutral span boundary projected by the adapter, or null on older platforms. */
@@ -1763,10 +1771,12 @@ export namespace live {
 	 * Throw a LiveError to reject the call.
 	 *
 	 * The chain encloses the guard, `beforeExecute` and the handler, and also
-	 * the background loader re-runs made for a subscriber (`invalidateOn` and
-	 * `staleAfterMs` reloads, per-argument `live.derived` recomputes) with that
-	 * subscriber's ctx, so `next` inside `AsyncLocalStorage.run()` scopes a
-	 * store to one invocation.
+	 * the background loader re-runs made for a topic's subscribers
+	 * (`invalidateOn` and `staleAfterMs` reloads, per-argument `live.derived`
+	 * recomputes), so `next` inside `AsyncLocalStorage.run()` scopes a store
+	 * to one invocation. A re-run carries `ctx.rerun` and runs under one
+	 * current subscriber; throwing before `next` refuses that subscriber and
+	 * the re-run tries the next one. A derived recompute's ctx has `ws: null`.
 	 *
 	 * @param fn - Middleware function
 	 *

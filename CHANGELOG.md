@@ -108,9 +108,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The [Svelte 4 support profile](docs/svelte-support.md) is checked with svelte-check 4 (4.7.7, previously 3.8.6).
 
-### Fixed
+- `invalidateOn` and `staleAfterMs` reloads and per-argument `live.derived` recomputes run inside the `live.middleware` chain, so a store the app opens there with `AsyncLocalStorage.run()` belongs to a subscriber of the topic instead of the publish or timer that triggered the re-run. Middleware tells re-runs apart by `ctx.rerun` (`null` on client calls, else `'invalidateOn'`, `'staleAfterMs'` or `'derived'`; `createTestContext({ rerun })` builds one). Each re-run runs once per topic under the longest-subscribed subscriber still connected, and moves to the next one when that subscriber leaves. A stream reload gets a copy of that subscriber's subscribe `ctx`; a derived recompute gets a fresh `ctx` with `ws: null`. Middleware that throws before `next` refuses that subscriber and the re-run tries the next; when all are refused the reload is skipped and the error reaches the stream's `onError`. Re-runs keep the subscribe's `requestId`, skip the module guard and `beforeExecute`, and are not counted against the per-connection RPC rate limit.
+  **Action required:** middleware that charges quotas, rate-limits or audits per call should check `ctx.rerun`, and middleware that reads `ctx.ws` should allow `null`.
 
-- `invalidateOn` and `staleAfterMs` reloads and per-argument `live.derived` recomputes run inside the `live.middleware` chain with the subscriber's `ctx`. A store the app opens there with `AsyncLocalStorage.run()` now belongs to the subscriber; previously these re-runs inherited the async context of the publish or timer that triggered them, so audit attribution read another user's store. Middleware now also sees these re-runs, and a throw from it skips the reload and reaches the stream's `onError`.
+- The unsequenced delivery policy covers rooms list deltas, cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand and `ctx.publishThrottled` / `ctx.publishDebounced`. These frames carry no adapter sequence on a single worker either and take no publish options, so an app that needs a sequenced frame publishes it with explicit options through `ctx.platform.publish`.
+
+### Fixed
 
 - Bounded DevTools previews retain whole family emoji and other joined graphemes when their segmentation window ends inside a cluster. Oversized payloads and the code-point fallback remain bounded.
 
@@ -651,7 +654,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 
-- Framework signals, room membership and multiplayer events, rooms list deltas, smooth and document updates, and automatic stream publishes (cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand, and `ctx.publishThrottled` / `ctx.publishDebounced`) declare an unsequenced delivery policy so multi-worker adapters accept them. They carry no adapter sequence on a single worker either, and these surfaces take no publish options, so an app that needs a sequenced frame publishes it itself with explicit options through `ctx.platform.publish`. Application publish options and replay-assigned sequences retain their existing meaning.
+- Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.
 
 - Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
 

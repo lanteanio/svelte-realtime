@@ -55,6 +55,8 @@ export function createTestContext(options?: {
 	requestId?: string;
 	traceContext?: import('./server.js').OperationTraceContext | null;
 	cursor?: any;
+	/** Build a background re-run context, as middleware sees it on a stream reload or derived recompute. */
+	rerun?: 'invalidateOn' | 'staleAfterMs' | 'derived' | null;
 }): {
 	user: RegisteredUser | null;
 	ws: WebSocket<RegisteredUser> | null;
@@ -70,6 +72,7 @@ export function createTestContext(options?: {
 	requestId: string;
 	traceContext: import('./server.js').OperationTraceContext | null;
 	trace: import('./server.js').OperationTrace | null;
+	rerun: 'invalidateOn' | 'staleAfterMs' | 'derived' | null;
 };
 
 /**

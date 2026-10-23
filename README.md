@@ -1851,7 +1851,7 @@ Compose multiple stream stores into a single derived store. When any source upda
 
 ## Global middleware
 
-Use `live.middleware()` to register cross-cutting logic that runs before per-module guards on every RPC and stream call.
+Use `live.middleware()` to register cross-cutting logic that runs before per-module guards on every RPC and stream call, and around the loader re-runs described below.
 
 ```js
 import { live, LiveError } from 'svelte-realtime/server';
@@ -1885,7 +1885,15 @@ live.middleware((ctx, next) =>
 );
 ```
 
-Avoid `enterWith()` in `beforeExecute`: it leaks the store into whatever runs next on the event loop. The chain also runs, with the subscriber's `ctx`, around the loader re-runs made later on a subscriber's behalf: `invalidateOn` and `staleAfterMs` reloads and per-argument `live.derived` recomputes, so those reads carry the subscriber's context rather than the publisher's. A middleware that throws there skips that reload and reports to the stream's `onError`. Work with no subscriber identity (cron jobs, effects, aggregates, static derived streams, webhooks) runs outside middleware.
+Avoid `enterWith()` in `beforeExecute`: it leaks the store into whatever runs next on the event loop.
+
+The chain also runs around the loader re-runs the server makes later on behalf of a topic's subscribers, so those reads carry a subscriber's context rather than the publisher's:
+
+- **`ctx.rerun` tells them apart.** It is `null` on every client call and `'invalidateOn'`, `'staleAfterMs'` or `'derived'` on a re-run, so a rate-limit, quota or audit middleware can skip or label them. A re-run keeps the subscribe's `ctx.requestId`, does not run the module guard or `beforeExecute` again, and is not counted against the per-connection RPC rate limit.
+- **One current subscriber per re-run.** A shared topic re-runs once for all its subscribers, under the longest-subscribed one still connected; when it leaves, the next one takes over. A stream reload gets a copy of that subscriber's subscribe `ctx` (with what the guard attached to it). A `live.derived` recompute gets a fresh `ctx` with `ctx.ws` set to `null`, as in a `.load()` call, because its output serves every subscriber.
+- **A refusal moves on.** Middleware that throws before calling `next` refuses that subscriber, and the re-run tries the next one. When every subscriber is refused, the re-run is skipped and the error reaches the stream's `onError` (a derived failure goes to the server error handler). A throw from the loader itself ends the re-run.
+
+Work with no subscriber identity (cron jobs, effects, aggregates, static derived streams, webhooks) runs outside middleware.
 
 ---
 
@@ -5380,7 +5388,7 @@ Currently models the `drop-outbound` scenario only - `platform.publish` events t
 
 ### Direct ctx unit tests
 
-`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, and the user / cursor / connectionId / requestId / traceContext can be overridden. A supplied Platform's `trace` surface is mirrored onto the context. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
+`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, and the user / cursor / connectionId / requestId / traceContext / rerun can be overridden. A supplied Platform's `trace` surface is mirrored onto the context. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
 
 ```js
 import { createTestContext } from 'svelte-realtime/testing';

@@ -76,7 +76,7 @@ import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUse
 import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './server/rate-limit.js';
 export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
-import { _getCtxHelpers, _buildCtx, installCtx } from './server/ctx.js';
+import { _getCtxHelpers, _buildCtx, _rerunCtx, installCtx } from './server/ctx.js';
 import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggregateState, _copyAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
@@ -535,10 +535,143 @@ function _compileInvalidatePattern(pattern, unscoped = false) {
 }
 
 /**
- * Register the invalidation watchers for a stream's first subscriber.
- * No-op when `fn.__streamInvalidateOn` is unset. Idempotent per
- * (pattern, topic) pair: re-subscribing the same stream won't
- * accumulate duplicate watchers.
+ * Record a subscriber as a context a background reload can run under.
+ * Every subscriber whose loader succeeded is kept, oldest first, so a reload
+ * still has a current subscriber after the first one leaves. Keyed by socket;
+ * a re-subscribe on the same socket keeps its first binding.
+ *
+ * @param {Map<any, { ctx: any, args: any[], platform: any }>} bindings
+ * @param {any} ctx
+ * @param {any[]} args
+ * @param {any} platform
+ */
+function _addReloadBinding(bindings, ctx, args, platform) {
+	const key = ctx.ws || ctx;
+	if (!bindings.has(key)) bindings.set(key, { ctx, args, platform });
+}
+
+/**
+ * Forget a socket that left a topic other subscribers still hold. The last
+ * binding is kept, so subscribers that attached without running the loader
+ * (a replay resume) still get reloads; a reload skips it once a live
+ * subscriber is bound, and the whole entry goes when the topic empties.
+ *
+ * @param {Map<any, any>} bindings
+ * @param {any} ws
+ */
+function _dropReloadBinding(bindings, ws) {
+	if (bindings.size > 1) bindings.delete(ws);
+}
+
+/**
+ * Drop a departing socket's reload bindings for `topic` while other sockets
+ * remain subscribed. Called from every path that removes a socket from a
+ * topic's subscriber set without emptying it.
+ *
+ * @param {string} topic
+ * @param {any} ws
+ * @param {Array<{ fn: any }>} owners
+ */
+function _releaseReloadBindings(topic, ws, owners) {
+	const stale = _topicStaleWatch.get(topic);
+	if (stale) _dropReloadBinding(stale.bindings, ws);
+	if (_topicInvalidationWatch.size === 0) return;
+	for (const owner of owners) {
+		const patterns = owner.fn.__streamInvalidateOn;
+		if (!patterns) continue;
+		const scope = _invalidationScope(topic);
+		for (const p of patterns) {
+			const entry = _topicInvalidationWatch.get(scope + '\0' + p);
+			const watcher = entry?.watchers.find(w => w.topic === topic && w.fn === owner.fn);
+			if (watcher) _dropReloadBinding(watcher.bindings, ws);
+		}
+	}
+}
+
+/** @param {string} topic */
+function _invalidationScope(topic) {
+	return _isTenancyEnabled() && topic.startsWith(_TENANT_TOPIC_NS) ? topic.slice(0, topic.indexOf('/', _TENANT_TOPIC_NS.length) + 1) : '';
+}
+
+/**
+ * Re-run a stream loader for a background reload under one current
+ * subscriber. Bindings are tried oldest first; a socket that has left the
+ * topic is skipped (and forgotten while another binding remains). The run
+ * goes through the middleware chain with a copy of that subscriber's ctx
+ * marked `rerun: kind`. When middleware refuses a subscriber (throws before
+ * calling `next`), the next one is tried; a loader throw ends the attempt.
+ * Resolves `null` when no binding is left.
+ *
+ * @param {string} topic
+ * @param {any} fn
+ * @param {Map<any, { ctx: any, args: any[], platform: any }>} bindings
+ * @param {'invalidateOn' | 'staleAfterMs'} kind
+ * @returns {Promise<{ result: any, ctx: any, platform: any } | null>}
+ */
+async function _rerunStreamLoader(topic, fn, bindings, kind) {
+	/** @type {{ err: any, ctx: any } | null} */
+	let refused = null;
+	for (const [key, binding] of bindings) {
+		const ws = binding.ctx.ws;
+		const left = !!ws && !_topicWsCounts.get(topic)?.has(ws);
+		if (left && bindings.size > 1) {
+			bindings.delete(key);
+			continue;
+		}
+		const ctx = _rerunCtx(binding.ctx, kind);
+		// The last binding outlives its socket only to serve subscribers that
+		// never ran the loader; it no longer stands for a connection.
+		if (left) ctx.ws = null;
+		let entered = false;
+		try {
+			const result = await _runWithMiddleware(ctx, () => {
+				entered = true;
+				return fn(ctx, ...binding.args);
+			});
+			return { result, ctx, platform: binding.platform };
+		} catch (err) {
+			if (entered) throw new _RerunFailure(err, ctx);
+			refused = { err, ctx };
+		}
+	}
+	if (refused) throw new _RerunFailure(refused.err, refused.ctx);
+	return null;
+}
+
+/** Carries a re-run's error together with the ctx it ran under. */
+class _RerunFailure {
+	/** @param {any} err @param {any} ctx */
+	constructor(err, ctx) {
+		this.err = err;
+		this.ctx = ctx;
+	}
+}
+
+/**
+ * Broadcast a reload result as `refreshed` on the stream's own topic,
+ * applying the stream's init transform and redactor.
+ *
+ * @param {any} fn
+ * @param {string} topic
+ * @param {any} platform
+ * @param {any} result
+ */
+function _publishReload(fn, topic, platform, result) {
+	const initTransform = /** @type {any} */ (fn).__streamTransform;
+	let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+	const redactor = /** @type {any} */ (fn).__streamPiiRedact;
+	if (redactor && finalData != null) {
+		// Fail-closed: a throwing redactor must never broadcast un-redacted
+		// reload data, so skip the publish entirely.
+		try { finalData = redactor(finalData); } catch { return; }
+	}
+	try { _platformPublish(platform, topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
+}
+
+/**
+ * Register the invalidation watchers for a stream subscriber whose loader
+ * succeeded. No-op when `fn.__streamInvalidateOn` is unset. One watcher per
+ * (pattern, topic) pair; each further subscriber only adds a reload binding.
  *
  * @param {string} topic
  * @param {any} fn
@@ -560,8 +693,12 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 			entry = { regex, prefix, prefixOnly, watchers: [] };
 			_topicInvalidationWatch.set(key, entry);
 		}
-		if (entry.watchers.some(w => w.topic === topic && w.fn === fn)) continue;
-		entry.watchers.push({ topic, fn, ctx, args, platform, onError, reloading: false });
+		let watcher = entry.watchers.find(w => w.topic === topic && w.fn === fn);
+		if (!watcher) {
+			watcher = { topic, fn, bindings: new Map(), onError, reloading: false };
+			entry.watchers.push(watcher);
+		}
+		_addReloadBinding(watcher.bindings, ctx, args, platform);
 	}
 }
 
@@ -576,7 +713,7 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 function _unregisterInvalidationWatch(topic, fn) {
 	const patterns = fn.__streamInvalidateOn;
 	if (!patterns) return;
-	const scope = _isTenancyEnabled() && topic.startsWith(_TENANT_TOPIC_NS) ? topic.slice(0, topic.indexOf('/', _TENANT_TOPIC_NS.length) + 1) : '';
+	const scope = _invalidationScope(topic);
 	for (const p of patterns) {
 		const key = scope + '\0' + p;
 		const entry = _topicInvalidationWatch.get(key);
@@ -593,14 +730,14 @@ export function _resetInvalidationWatch() {
 }
 
 /**
- * Re-run a stream's loader because an invalidation pattern matched.
- * Mirrors `_staleReload` - captures the same ctx+args, applies the
- * init transform, and broadcasts the result as a `refreshed` event on
- * the stream's own topic. Concurrent triggers are deduped via the
- * `reloading` flag (we never queue or merge them; the next match after
- * the in-flight reload completes will re-run regardless).
+ * Re-run a stream's loader because an invalidation pattern matched, under
+ * one current subscriber (see `_rerunStreamLoader`), and broadcast the
+ * result as a `refreshed` event on the stream's own topic. Concurrent
+ * triggers are deduped via the `reloading` flag (we never queue or merge
+ * them; the next match after the in-flight reload completes will re-run
+ * regardless).
  *
- * @param {{ topic: string, fn: any, ctx: any, args: any[], platform: any, onError: Function | null, reloading: boolean }} watcher
+ * @param {{ topic: string, fn: any, bindings: Map<any, any>, onError: Function | null, reloading: boolean }} watcher
  */
 async function _invalidationReload(watcher) {
 	// Graceful shutdown: skip the publish-triggered reload during a drain
@@ -608,23 +745,18 @@ async function _invalidationReload(watcher) {
 	if (_isShuttingDown()) return;
 	if (watcher.reloading) return;
 	watcher.reloading = true;
+	/** @type {any} */
+	let ranCtx = null;
 	try {
-		// Re-enter the middleware chain with the subscriber's ctx, so a context the
-		// app establishes there (an AsyncLocalStorage store) belongs to the
-		// subscriber and not to whichever publish triggered this reload.
-		const result = await _runWithMiddleware(watcher.ctx, () => watcher.fn(watcher.ctx, ...watcher.args));
-		const initTransform = /** @type {any} */ (watcher.fn).__streamTransform;
-		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
-		const redactor = /** @type {any} */ (watcher.fn).__streamPiiRedact;
-		if (redactor && finalData != null) {
-			// Fail-closed: a throwing redactor must never broadcast un-redacted
-			// reload data, so skip the publish entirely.
-			try { finalData = redactor(finalData); } catch { return; }
+		const run = await _rerunStreamLoader(watcher.topic, watcher.fn, watcher.bindings, 'invalidateOn');
+		if (run) {
+			ranCtx = run.ctx;
+			_publishReload(watcher.fn, watcher.topic, run.platform, run.result);
 		}
-		try { _platformPublish(watcher.platform, watcher.topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
-	} catch (err) {
+	} catch (failure) {
 		if (watcher.onError) {
-			try { await watcher.onError(err, watcher.ctx, watcher.topic); } catch {}
+			const rerun = failure instanceof _RerunFailure;
+			try { await watcher.onError(rerun ? failure.err : failure, rerun ? failure.ctx : ranCtx, watcher.topic); } catch {}
 		}
 	} finally {
 		watcher.reloading = false;
@@ -633,8 +765,8 @@ async function _invalidationReload(watcher) {
 
 /**
  * Arm the per-topic stale watchdog if `fn` declares `__streamStaleAfterMs`.
- * Idempotent per topic: if a watchdog already exists (from an earlier
- * subscriber), this is a no-op so we don't replace the captured ctx.
+ * One watchdog per topic; each further subscriber only adds a reload
+ * binding.
  *
  * @param {string} topic
  * @param {any} fn The stream's init function (with __streamStaleAfterMs / __streamOnError stashed)
@@ -645,18 +777,19 @@ async function _invalidationReload(watcher) {
 function _registerStaleWatch(topic, fn, ctx, args, platform) {
 	const staleMs = fn.__streamStaleAfterMs;
 	if (!staleMs) return;
-	if (_topicStaleWatch.has(topic)) return;
-	const entry = {
-		staleAfterMs: staleMs,
-		fn,
-		ctx,
-		args,
-		platform,
-		onError: fn.__streamOnError || null,
-		reloading: false,
-		timerId: setTimer(() => _staleReload(topic), staleMs)
-	};
-	_topicStaleWatch.set(topic, entry);
+	let entry = _topicStaleWatch.get(topic);
+	if (!entry) {
+		entry = {
+			staleAfterMs: staleMs,
+			fn,
+			bindings: new Map(),
+			onError: fn.__streamOnError || null,
+			reloading: false,
+			timerId: setTimer(() => _staleReload(topic), staleMs)
+		};
+		_topicStaleWatch.set(topic, entry);
+	}
+	_addReloadBinding(entry.bindings, ctx, args, platform);
 }
 
 /**
@@ -685,11 +818,11 @@ function _resetStaleTimer(topic) {
 }
 
 /**
- * Run the stale-reload for a topic: re-invoke the stream's loader with the
- * captured ctx + args, broadcast the new data as a `refreshed` event, and
- * re-arm the timer. Loader throws are routed to the stream's onError if
- * configured; the timer always re-arms so transient failures do not leave
- * the topic in a permanently-stale state.
+ * Run the stale-reload for a topic: re-invoke the stream's loader under one
+ * current subscriber (see `_rerunStreamLoader`), broadcast the new data as a
+ * `refreshed` event, and re-arm the timer. Failures are routed to the
+ * stream's onError if configured; the timer always re-arms so transient
+ * failures do not leave the topic in a permanently-stale state.
  *
  * @param {string} topic
  */
@@ -702,21 +835,18 @@ async function _staleReload(topic) {
 	if (!entry) return;
 	if (entry.reloading) return;
 	entry.reloading = true;
+	/** @type {any} */
+	let ranCtx = null;
 	try {
-		// Same subscriber-owned middleware context as _invalidationReload.
-		const result = await _runWithMiddleware(entry.ctx, () => entry.fn(entry.ctx, ...entry.args));
-		const initTransform = /** @type {any} */ (entry.fn).__streamTransform;
-		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
-		const redactor = /** @type {any} */ (entry.fn).__streamPiiRedact;
-		if (redactor && finalData != null) {
-			// Fail-closed (see _invalidationReload): never broadcast un-redacted
-			// reload data; skip the publish on a redactor throw.
-			try { finalData = redactor(finalData); } catch { return; }
+		const run = await _rerunStreamLoader(topic, entry.fn, entry.bindings, 'staleAfterMs');
+		if (run) {
+			ranCtx = run.ctx;
+			_publishReload(entry.fn, topic, run.platform, run.result);
 		}
-		try { _platformPublish(entry.platform, topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
-	} catch (err) {
+	} catch (failure) {
 		if (entry.onError) {
-			try { await entry.onError(err, entry.ctx, topic); } catch {}
+			const rerun = failure instanceof _RerunFailure;
+			try { await entry.onError(rerun ? failure.err : failure, rerun ? failure.ctx : ranCtx, topic); } catch {}
 		}
 	} finally {
 		entry.reloading = false;
@@ -951,6 +1081,8 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 				_unregisterStaleWatch(topic);
 				_unregisterInvalidationWatch(topic, fn);
 				_disarmSilentTopicWatch(topic);
+			} else {
+				_releaseReloadBindings(topic, ws, [{ fn }]);
 			}
 		}
 	} else {
@@ -3764,6 +3896,8 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 			_unregisterStaleWatch(topic);
 			for (const entry of owners) _unregisterInvalidationWatch(topic, entry.fn);
 			_disarmSilentTopicWatch(topic);
+		} else {
+			_releaseReloadBindings(topic, ws, owners);
 		}
 	}
 
@@ -3841,6 +3975,8 @@ export function close(ws, { platform, subscriptions }) {
 					_unregisterStaleWatch(topic);
 					for (const entry of owners) _unregisterInvalidationWatch(topic, entry.fn);
 					_disarmSilentTopicWatch(topic);
+				} else {
+					_releaseReloadBindings(topic, ws, owners);
 				}
 			}
 			if (alreadyFired && alreadyFired.has(topic)) continue;

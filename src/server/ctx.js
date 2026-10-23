@@ -599,6 +599,21 @@ function _collectBatch(ctx, fn) {
 	return result;
 }
 
+/**
+ * Copy a subscriber's ctx for a background loader re-run, marked with `kind`.
+ * The copy keeps what the guard and middleware attached to the original, and
+ * its `batch(fn)` collects into the copy's own `publish`, so a re-run never
+ * shadows the original ctx or races another re-run of the same subscriber.
+ * @param {any} ctx
+ * @param {'invalidateOn' | 'staleAfterMs'} kind
+ */
+export function _rerunCtx(ctx, kind) {
+	const out = { ...ctx, rerun: kind };
+	const listBatch = ctx.batch;
+	out.batch = (arg) => (typeof arg === 'function' ? _collectBatch(out, arg) : listBatch(arg));
+	return out;
+}
+
 /** Build background work without resolving a missing user's tenant. */
 export function _buildPersistedCtx(platform, helpers, tenantId) {
 	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
@@ -686,7 +701,11 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		// every ctx (value swap, not shape change) to keep one hidden class.
 		tenantId,
 		_publishWire: helpers.publish,
-		tenant: (id) => _makeTenantScope(helpers.publish, id)
+		tenant: (id) => _makeTenantScope(helpers.publish, id),
+		// Null on a client call. A loader the framework re-runs later on a
+		// subscriber's behalf carries 'invalidateOn', 'staleAfterMs' or 'derived'
+		// here, so middleware can tell it apart from the call it serves.
+		rerun: null
 	};
 	// `ctx.batch(fn)` atomic-collector overload beside the list form. Assigned
 	// after the literal so the closure can capture the ctx instance (the
