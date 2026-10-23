@@ -133,26 +133,20 @@ export function _readStringLiteral(s, start) {
 export function _skipNonCode(s, i) {
 	const ch = s[i];
 
-	// Single / double quoted strings
+	// Single / double quoted strings. An unescaped line break ends one: the
+	// string is malformed, and the next line is code again.
 	if (ch === '\'' || ch === '"') {
 		for (let j = i + 1; j < s.length; j++) {
 			if (s[j] === '\\') { j++; continue; }
 			if (s[j] === ch) return j;
+			if (s[j] === '\n') return j - 1;
 		}
 		return s.length - 1;
 	}
 
-	// Template literals - track ${...} interpolation depth
-	if (ch === '`') {
-		let tmplDepth = 0;
-		for (let j = i + 1; j < s.length; j++) {
-			if (s[j] === '\\') { j++; continue; }
-			if (s[j] === '`' && tmplDepth === 0) return j;
-			if (s[j] === '$' && s[j + 1] === '{') { tmplDepth++; j++; continue; }
-			if (s[j] === '}' && tmplDepth > 0) { tmplDepth--; continue; }
-		}
-		return s.length - 1;
-	}
+	// Template literals. Each ${...} is code, read with this same skipper, so
+	// a nested template or a string holding a brace inside it stays balanced.
+	if (ch === '`') return _skipTemplate(s, i);
 
 	// Line comments
 	if (ch === '/' && s[i + 1] === '/') {
@@ -181,6 +175,30 @@ export function _skipNonCode(s, i) {
 	}
 
 	return -1;
+}
+
+/**
+ * The index of the backtick that closes the template literal opened at `i`.
+ * @param {string} s
+ * @param {number} i
+ * @returns {number}
+ */
+function _skipTemplate(s, i) {
+	for (let j = i + 1; j < s.length; j++) {
+		const c = s[j];
+		if (c === '\\') { j++; continue; }
+		if (c === '`') return j;
+		if (c === '$' && s[j + 1] === '{') {
+			let depth = 0;
+			for (j += 2; j < s.length; j++) {
+				const skip = _skipNonCode(s, j);
+				if (skip >= 0) { j = skip; continue; }
+				if (s[j] === '{') depth++;
+				else if (s[j] === '}') { if (depth === 0) break; depth--; }
+			}
+		}
+	}
+	return s.length - 1;
 }
 
 /** Keywords after which an expression, and so a regex literal, can start. */

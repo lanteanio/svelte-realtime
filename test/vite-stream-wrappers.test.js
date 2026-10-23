@@ -152,4 +152,16 @@ describe('codegen for wrapped streams', () => {
 		expect(out).toContain('export const feed = __stream(');
 		expect(out).not.toMatch(/export const (old|older|quoted)/);
 	});
+
+	it('finds a wrapped export after nested templates and an unterminated quote', () => {
+		setup({
+			'tricky.js': header +
+				"const label = `a ${ \"}\" + `b ${'}'} c` } d`;\n" +
+				"const odd = `x ${ { y: `z` }.y }`;\n" +
+				"const broken = 'it\n" +
+				"export const feed = live.public(live.stream('tricky', async () => []));\n"
+		});
+		const out = code(createPlugin().load('\0live:tricky', { ssr: false }));
+		expect(out).toContain('export const feed = __stream("tricky/feed"');
+	});
 });
