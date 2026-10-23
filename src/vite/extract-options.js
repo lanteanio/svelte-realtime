@@ -1436,7 +1436,21 @@ export function _unwrapStreamWrappers(source, file) {
 	let last = 0;
 	_WRAPPER_EXPORT_RE.lastIndex = 0;
 	let m;
+	/** @type {Array<[number, number]> | null} */
+	let nonCode = null;
+	let nonCodeAt = 0;
 	scan: while ((m = _WRAPPER_EXPORT_RE.exec(source)) !== null) {
+		// A declaration inside a comment or string is not one; the ranges are
+		// found once, on the first match.
+		if (nonCode === null) {
+			nonCode = [];
+			for (let i = 0; i < source.length; i++) {
+				const end = _skipNonCode(source, i);
+				if (end >= 0) { nonCode.push([i, end]); i = end; }
+			}
+		}
+		while (nonCodeAt < nonCode.length && nonCode[nonCodeAt][1] < m.index) nonCodeAt++;
+		if (nonCodeAt < nonCode.length && nonCode[nonCodeAt][0] <= m.index) continue;
 		const name = m[1];
 		/** @type {string[]} */
 		const wrappers = [];

@@ -135,4 +135,21 @@ describe('codegen for wrapped streams', () => {
 			});
 		}
 	}
+
+	it('ignores wrapped declarations inside comments and strings', () => {
+		setup({
+			'notes.js': header +
+				`// export const old = live.gate(() => true, live.derived(['src'], async () => 1));
+` +
+				`/* export const older = live.public(live.stream('x', async () => [])); */
+` +
+				`const doc = "export const quoted = live.scoped(() => true, live.flag('q', 1));";
+` +
+				`export const feed = live.public(live.stream('notes', async () => []));
+`
+		});
+		const out = code(createPlugin().load(' live:notes', { ssr: false }));
+		expect(out).toContain('export const feed = __stream(');
+		expect(out).not.toMatch(/export const (old|older|quoted)/);
+	});
 });
