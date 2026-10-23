@@ -362,6 +362,17 @@ describe('repeated live module updates', () => {
 		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
 		expect(s.load.mock.calls.slice(-2).map(call => call[0])).toEqual(['/@svelte-realtime-registry', file.replaceAll('\\', '/')]);
 	});
+	it('invalidates the server module of a live file that is added again', async () => {
+		const p = plugin();
+		const s = await started(p, server());
+		const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
+		const file = join(root, 'src/live/count.js');
+		// An editor that saves by replacing the file reports unlink and add.
+		await add(file);
+		expect(s.graph.getModulesByFile).toHaveBeenCalledWith(file.replaceAll('\\', '/'));
+		expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.changed);
+		expect(s.graph.invalidateModule.mock.invocationCallOrder[0]).toBeLessThan(s.load.mock.invocationCallOrder.at(-1));
+	});
 	it('retries a save whose server graph invalidation threw', async () => {
 		const p = plugin();
 		const s = server();

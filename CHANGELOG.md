@@ -246,6 +246,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - An error while the dev server handles an added or removed live file is logged instead of rejecting the watcher listener.
 
+- A live file saved by an editor that replaces the file (reported as a removal and an add) reloads its edited handlers instead of the module Vite had cached.
+
 - The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
 - The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.

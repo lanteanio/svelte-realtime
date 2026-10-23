@@ -434,15 +434,15 @@ export default function svelteRealtime(options) {
 			// Regenerate type declarations on file change
 			if (typedImports) _writeTypeDeclarations(liveDir, dir);
 
-			if (reported !== null) {
-				// Server-side HMR: invalidate the changed module so Vite re-executes
-				// it, under each spelling it may have been imported with.
-				const graph = _serverModuleGraph(server);
-				for (const spelling of new Set([file, reported])) {
-					const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
-					if (ssrMods) {
-						for (const m of ssrMods) graph.invalidateModule(m);
-					}
+			// Server-side HMR: invalidate the changed module so Vite re-executes
+			// it, under each spelling it may have been imported with. An add can
+			// name a file the graph still holds: an editor that saves by
+			// replacing the file reports unlink and add instead of a change.
+			const graph = _serverModuleGraph(server);
+			for (const spelling of new Set(reported === null ? [file] : [file, reported])) {
+				const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
+				if (ssrMods) {
+					for (const m of ssrMods) graph.invalidateModule(m);
 				}
 			}
 
