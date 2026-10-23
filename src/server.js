@@ -596,7 +596,7 @@ function _releaseReloadBindings(topic, ws, owners, partial = false) {
 		const scope = _invalidationScope(topic);
 		let empty = false;
 		for (const p of patterns) {
-			const entry = _topicInvalidationWatch.get(scope + '\0' + p);
+			const entry = _topicInvalidationWatch.get(_invalidationKey(scope, p));
 			const watcher = entry?.watchers.find(w => w.topic === topic && w.fn === owner.fn);
 			if (!watcher) continue;
 			_dropReloadBinding(watcher.bindings, ws, partial ? [owner] : null);
@@ -604,6 +604,15 @@ function _releaseReloadBindings(topic, ws, owners, partial = false) {
 		}
 		if (empty) _unregisterInvalidationWatch(topic, owner.fn);
 	}
+}
+
+/**
+ * Registry key of one invalidation pattern within a tenant scope.
+ * @param {string} scope
+ * @param {string} pattern
+ */
+function _invalidationKey(scope, pattern) {
+	return scope + '\0' + pattern;
 }
 
 /** @param {string} topic */
@@ -723,7 +732,7 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 	// Compile the trusted scope once; publishing keeps its existing matcher path.
 	const scope = _tenantTopic(ctx.tenantId, '');
 	for (const p of patterns) {
-		const key = scope + '\0' + p;
+		const key = _invalidationKey(scope, p);
 		let entry = _topicInvalidationWatch.get(key);
 		if (!entry) {
 			const { regex, prefix, prefixOnly } = _compileInvalidatePattern(scope + p, !scope && _isTenancyEnabled());
@@ -752,7 +761,7 @@ function _unregisterInvalidationWatch(topic, fn) {
 	if (!patterns) return;
 	const scope = _invalidationScope(topic);
 	for (const p of patterns) {
-		const key = scope + '\0' + p;
+		const key = _invalidationKey(scope, p);
 		const entry = _topicInvalidationWatch.get(key);
 		if (!entry) continue;
 		const idx = entry.watchers.findIndex(w => w.topic === topic && w.fn === fn);
@@ -770,7 +779,7 @@ function _removeInvalidationWatcher(watcher) {
 	if (!patterns) return;
 	const scope = _invalidationScope(watcher.topic);
 	for (const p of patterns) {
-		const key = scope + ' ' + p;
+		const key = _invalidationKey(scope, p);
 		const entry = _topicInvalidationWatch.get(key);
 		if (!entry) continue;
 		const idx = entry.watchers.indexOf(watcher);

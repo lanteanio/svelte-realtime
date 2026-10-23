@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { live, guard, _resetMiddleware, _resetInvalidationWatch, _prepareHmr } from '../src/server.js';
 import { createTestContext, createTestEnv } from '../src/testing.js';
-import { _topicInvalidationWatch, _topicStaleWatch } from '../src/server/state.js';
+import { _topicInvalidationWatch, _topicStaleWatch, _topicWsCounts } from '../src/server/state.js';
 
 const als = new AsyncLocalStorage();
 const actor = () => als.getStore()?.actor ?? null;
@@ -443,5 +443,20 @@ describe('reload bookkeeping for resumed subscribers', () => {
 		await new Promise(resolve => setImmediate(resolve));
 		await publisher.call('feed/touch');
 		await vi.waitFor(() => expect(reloads).toEqual(['alice', 'dave']));
+	});
+
+	it('drops a watcher whose every binding a reload had to prune', async () => {
+		const loads = [];
+		env.register('feed', {
+			read: live.stream('prune:feed', async () => { loads.push(actor()); return { n: loads.length }; }, { merge: 'set', invalidateOn: 'prune:control' }),
+			touch: live(ctx => ctx.publish('prune:control', 'changed', {}))
+		});
+		await env.connect({ id: 'alice' }).subscribe('feed/read').waitFor(v => v?.n === 1);
+		expect(_topicInvalidationWatch.size).toBe(1);
+		// Lose the subscriber from the topic index without any leave path running.
+		_topicWsCounts.get('prune:feed').clear();
+		await env.connect({ id: 'carol' }).call('feed/touch');
+		await vi.waitFor(() => expect(_topicInvalidationWatch.size).toBe(0));
+		expect(loads).toEqual(['alice']);
 	});
 });
