@@ -2246,9 +2246,16 @@ describe('devtools injection', () => {
 		};
 		plugin.configureServer.call({ load: () => {} }, mockServer);
 
-		// No devtools middleware, only the watcher setup
-		// (configureServer only adds middleware when devtools is enabled)
-		expect(middlewares).toHaveLength(0);
+		// The startup gate middleware remains; no middleware wraps the response.
+		const write = () => true, end = () => {}, writeHead = () => {};
+		const res = { write, end, writeHead };
+		let passed = 0;
+		for (const middleware of middlewares) middleware({ url: '/' }, res, () => { passed++; });
+		expect(passed).toBe(middlewares.length);
+		expect(res).toEqual({ write, end, writeHead });
+		expect(res.write).toBe(write);
+		expect(res.end).toBe(end);
+		expect(res.writeHead).toBe(writeHead);
 	});
 });
 

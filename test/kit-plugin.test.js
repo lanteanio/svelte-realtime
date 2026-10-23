@@ -137,6 +137,37 @@ describe('SvelteKit development module loading', () => {
 			expect(s.load).toHaveBeenCalledWith('/@svelte-realtime-registry');
 			if (modern) expect(s.ssrLoadModule).not.toHaveBeenCalled();
 		});
+		it('holds requests until the startup registry has loaded using the ' + (modern ? 'environment runner' : 'Kit 2 loader'), async () => {
+			const p = plugin('serve', { devtools: false });
+			const s = server(modern);
+			let finish;
+			const loaded = new Promise(resolve => { finish = resolve; });
+			s.load.mockImplementation(async id => {
+				if (id === '/@svelte-realtime-registry') await loaded;
+				return ['svelte-realtime/server', '/@svelte-realtime-server'].includes(id) ? s.runtime : {};
+			});
+			p.configureServer(s);
+			const startup = s.listeners.listening();
+			// Concurrent first evaluations of the realtime server module can hand
+			// a page a partly initialized instance, so the page waits.
+			const chain = (req) => new Promise(resolve => {
+				const stack = s.middlewares.use.mock.calls.map(call => call[0]);
+				const step = (index) => index === stack.length ? resolve('handled') : stack[index](req, {}, () => step(index + 1));
+				step(0);
+			});
+			let passed = false;
+			const request = chain({ url: '/' }).then(() => { passed = true; });
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(passed).toBe(false);
+			finish();
+			await startup;
+			await request;
+			expect(passed).toBe(true);
+			// Later requests are not held.
+			let later = false;
+			await chain({ url: '/' }).then(() => { later = true; });
+			expect(later).toBe(true);
+		});
 		it('reloads live handlers using the ' + (modern ? 'SSR environment graph' : 'Kit 2 graph'), async () => {
 			const p = plugin();
 			const s = server(modern);

@@ -321,25 +321,33 @@ export default function svelteRealtime(options) {
 
 		configureServer(server) {
 			registryStarting = !!server.httpServer;
-			// Load the development tools as a Vite module from every HTML page,
-			// streamed or not (works with SvelteKit and plain Vite apps).
-			if (devtools) {
-				const base = server.config?.base || '/';
-				const script = '<script type="module" src="' + base + DEVTOOLS_PUBLIC_ID.slice(1) + '"></script>';
-				server.middlewares.use((_req, res, next) => {
-					_injectDevtools(res, script);
-					next();
-				});
-			}
-
 			// On first transform, load the registry to populate server-side state
 			let registryLoaded = false;
+			/** @type {Promise<unknown> | null} */
+			let startup = null;
+
+			// Load the development tools as a Vite module from every HTML page,
+			// streamed or not (works with SvelteKit and plain Vite apps).
+			const base = server.config?.base || '/';
+			const script = devtools ? '<script type="module" src="' + base + DEVTOOLS_PUBLIC_ID.slice(1) + '"></script>' : null;
+			// Hold requests until the startup registry load has finished. The
+			// realtime server module imports itself through its submodules, so
+			// Vite hands a concurrent importer the partly evaluated instance: a
+			// first page load racing the startup load failed with live() or
+			// live.stream unavailable until a restart.
+			if (script !== null || server.httpServer) {
+				server.middlewares.use((_req, res, next) => {
+					if (script !== null) _injectDevtools(res, script);
+					if (startup === null) return next();
+					startup.then(() => next(), () => next());
+				});
+			}
 
 			server.httpServer?.once('listening', () => {
 				if (registryLoaded) return;
 				registryLoaded = true;
 				registryStarting = false;
-				return enqueueRegistry(async () => {
+				const loading = enqueueRegistry(async () => {
 					if (!existsSync(liveDir)) return;
 					_fileCache.clear();
 					_codeCache.clear();
@@ -357,6 +365,9 @@ export default function svelteRealtime(options) {
 						server.warmupRequest(VIRTUAL_PREFIX + rel).catch(() => {});
 					}
 				}).catch(reportRegistryFailure);
+				startup = loading;
+				loading.finally(() => { if (startup === loading) startup = null; });
+				return loading;
 			});
 
 			// Watch for new or deleted files in src/live/ - these don't trigger

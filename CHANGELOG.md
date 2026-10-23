@@ -248,6 +248,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - A live file saved by an editor that replaces the file (reported as a removal and an add) reloads its edited handlers instead of the module Vite had cached.
 
+- The first page request of a new dev server waits for the live handlers to finish loading. A request that raced that load could get a partly initialized `svelte-realtime/server` and fail with `live.stream is not a function` until the server was restarted.
+
 - The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
 - The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
