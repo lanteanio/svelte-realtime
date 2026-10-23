@@ -1614,6 +1614,15 @@ live.stream = function stream(topic, initFn, options) {
 		initFn = Object.assign(function streamLoader(/** @type {any} */ ctx, /** @type {any[]} */ ...args) {
 			return loader(ctx, ...args);
 		}, loader);
+		// The wrapper is a frame of its own, not a rate-limit or idempotency
+		// wrapper: registration stamps the path through `__wrappedFn` onto the
+		// loader that actually reads it.
+		const w = /** @type {any} */ (initFn);
+		delete w.__isRateLimited;
+		delete w.__rateLimitPath;
+		delete w.__isIdempotent;
+		delete w.__idempotencyPath;
+		w.__wrappedFn = loader;
 	}
 	if (replay) {
 		/** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};

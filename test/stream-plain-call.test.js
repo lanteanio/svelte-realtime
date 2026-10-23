@@ -166,4 +166,34 @@ describe('plain RPC frames to stream paths', () => {
 		expect(calls).toBe(2);
 		expect(fetchItems.__isStream).toBeUndefined();
 	});
+
+	it('rate-limited stream loaders keep a bucket per stream path', async () => {
+		env.register('limits', {
+			a: live.stream('limits:a', live.rateLimit({ points: 1, window: 60000 }, async () => ['a'])),
+			b: live.stream('limits:b', live.rateLimit({ points: 1, window: 60000 }, async () => ['b']))
+		});
+		const c = env.connect(alice);
+		const a = c.subscribe('limits/a');
+		const b = c.subscribe('limits/b');
+		await settle();
+		expect(a.error).toBeNull();
+		expect(b.error).toBeNull();
+		const again = c.subscribe('limits/a');
+		await settle();
+		expect(again.error).toMatchObject({ code: 'RATE_LIMITED' });
+	});
+
+	it('idempotent stream loaders keep a cache slot per stream path', async () => {
+		env.register('once', {
+			a: live.stream('once:a', live.idempotent({ keyFrom: () => 'same' }, async () => ['a'])),
+			b: live.stream('once:b', live.idempotent({ keyFrom: () => 'same' }, async () => ['b']))
+		});
+		const c = env.connect(alice);
+		const a = c.subscribe('once/a');
+		await settle();
+		const b = c.subscribe('once/b');
+		await settle();
+		expect(a.value).toEqual(['a']);
+		expect(b.value).toEqual(['b']);
+	});
 });
