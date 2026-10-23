@@ -383,7 +383,7 @@ export default function svelteRealtime(options) {
 					if (registryStarting) return;
 					// A rejected watcher listener would end the dev server, so log
 					// failures the way Vite's own add and unlink listeners do.
-					return enqueueRegistry(() => reloadWrite(server, file, null)).catch((error) => {
+					return enqueueRegistry(async () => { await reloadWrite(server, file, null); }).catch((error) => {
 						console.error(`[svelte-realtime] Could not reload live handlers after ${event} of ${reported}:`, error);
 					});
 				});
@@ -406,7 +406,11 @@ export default function svelteRealtime(options) {
 				// A repeated event for an already handled write skips the server
 				// reload. It runs after that reload in the queue, so its client
 				// update never runs ahead of the handlers.
-				await reloadWrite(server, file, resolve(root, reported));
+				const reloaded = await reloadWrite(server, file, resolve(root, reported));
+				// A save whose reload failed updates no module: an SSR update would
+				// make Vite reload the whole server graph, and the WebSocket hooks
+				// would then load a new runtime without the restored handlers.
+				if (reloaded === false) return [];
 
 				// Client-side: invalidate the virtual module so the browser picks up new stubs
 				const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
@@ -427,6 +431,7 @@ export default function svelteRealtime(options) {
 	 * @param {any} server
 	 * @param {string} file - The live file, spelled under liveDir
 	 * @param {string | null} reported - The path a change event named, or null for add/unlink
+	 * @returns {Promise<boolean | undefined>} Whether the reload registered the handlers; undefined when an earlier event handled this write
 	 */
 	async function reloadWrite(server, file, reported) {
 		const version = claimVersion(file);
@@ -464,5 +469,6 @@ export default function svelteRealtime(options) {
 		} finally {
 			if (!reloaded) releaseVersion(file, version);
 		}
+		return reloaded;
 	}
 }

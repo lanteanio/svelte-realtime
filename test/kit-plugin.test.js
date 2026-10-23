@@ -322,14 +322,16 @@ describe('repeated live module updates', () => {
 		s.runtime._prepareHmr.mockReturnValue(snapshot);
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			await p.handleHotUpdate({ file: id, server: s });
+			// No module update for a failed save: an SSR update would make Vite
+			// reload the whole server graph and drop the restored handlers.
+			expect(await p.handleHotUpdate({ file: id, server: s })).toEqual([]);
 			expect(s.runtime._restoreHmr).toHaveBeenCalledExactlyOnceWith(snapshot);
 			expect(error).toHaveBeenCalledWith(expect.stringContaining('HMR failed for src/live/count'), 'Unexpected token');
 		} finally { error.mockRestore(); }
 		// The fixed save reloads and keeps the new handlers.
 		broken = false;
 		writeFileSync(file, "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 2);\n");
-		await p.handleHotUpdate({ file: id, server: s });
+		expect(await p.handleHotUpdate({ file: id, server: s })).not.toEqual([]);
 		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
 		expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
 	});
