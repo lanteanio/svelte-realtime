@@ -164,7 +164,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - An upload whose arguments cannot be JSON-encoded rejects its handle with `INVALID_REQUEST` (the encoding error as `cause`) instead of leaving the upload pending, and arguments that encode past 65535 bytes reject with `PAYLOAD_TOO_LARGE` instead of sending a corrupt chunk 0, as do arguments that leave chunk 0 no room for payload under the frame size the server announced (the adapter would close the connection with 1009); an empty upload's header may fill the frame exactly. The arguments are encoded once per upload, also when the client falls back to the older upload format.
 
-- An upload whose global middleware returns without calling `next()` is answered instead of left pending: a returned `{ ok: false, code, error }` refuses it with that code, as on RPC, and any other return fails it with `INTERNAL_ERROR` and an `upload.execution.failed` event. With diagnostics on, `upload.stream.ended` follows with outcome `rejected`.
+- An upload whose global middleware returns without letting the chain settle it is answered instead of left pending. A returned `{ ok: false, code, error }` refuses it with that code and its `params`, `details` and `retryAfter`, as on RPC; a guard or handler failure the middleware caught and swallowed answers with that failure; a middleware that never called `next()` fails it with `INTERNAL_ERROR` and an `upload.execution.failed` event. A handler the middleware did not wait for keeps its stream and session slot until it ends. With diagnostics on, `upload.stream.ended` follows with the matching outcome.
 
 - Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
 

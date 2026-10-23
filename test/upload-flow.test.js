@@ -664,6 +664,99 @@ describe('upload stream diagnostics', () => {
 		} finally { sink.restore(); }
 	});
 
+	/** @param {any} e */
+	const asEnvelope = (e) => ({ ok: false, code: e.code ?? 'INTERNAL_ERROR', error: 'x' });
+	/** @param {any} sink */
+	const endings = (sink) => sink.stream().map((r) => [r.event, r.attributes.outcome, r.attributes.code]);
+
+	it('answers a guard refusal that a middleware caught and returned', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			ctx.live.middleware(async (_mctx, next) => { try { return await next(); } catch (e) { return asEnvelope(e); } });
+			env.register('files', {
+				_guard: ctx.guard(() => { throw new ctx.LiveError('FORBIDDEN', 'no'); }),
+				save: ctx.live.upload(async () => 1, { diagnostics: true })
+			});
+			await expect(ctx.__upload('files/save')(new Uint8Array(100))).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'x' });
+			expect(endings(sink)).toEqual([
+				['upload.stream.started', undefined, undefined],
+				['upload.stream.ended', 'rejected', 'FORBIDDEN']
+			]);
+		} finally { sink.restore(); }
+	});
+
+	it('answers a handler failure that a middleware caught and returned, and aborts the stream', async () => {
+		const ctx = await setup({ frameSize: 1024 });
+		const sink = capture(ctx);
+		try {
+			let signal;
+			ctx.live.middleware(async (_mctx, next) => { try { return await next(); } catch (e) { return asEnvelope(e); } });
+			env.register('files', {
+				save: ctx.live.upload(async (uctx) => { signal = uctx.signal; throw new Error('disk full'); }, { diagnostics: true })
+			});
+			await expect(ctx.__upload('files/save')(new Uint8Array(5000))).rejects.toMatchObject({ code: 'INTERNAL_ERROR', message: 'x' });
+			expect(signal.aborted).toBe(true);
+			expect(endings(sink)).toEqual([
+				['upload.stream.started', undefined, undefined],
+				['upload.stream.ended', 'handler-failed', 'INTERNAL_ERROR']
+			]);
+		} finally { sink.restore(); }
+	});
+
+	it('answers with the original failure when a middleware swallows it and returns nothing', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			ctx.live.middleware(async (_mctx, next) => { try { await next(); } catch { /* swallowed */ } });
+			env.register('files', {
+				_guard: ctx.guard(() => { throw new ctx.LiveError('FORBIDDEN', 'no'); }),
+				save: ctx.live.upload(async () => 1, { diagnostics: true })
+			});
+			await expect(ctx.__upload('files/save')(new Uint8Array(100))).rejects.toMatchObject({ code: 'FORBIDDEN', message: 'no' });
+			expect(endings(sink)).toEqual([
+				['upload.stream.started', undefined, undefined],
+				['upload.stream.ended', 'rejected', 'FORBIDDEN']
+			]);
+		} finally { sink.restore(); }
+	});
+
+	it('carries params, details and retryAfter from a middleware refusal envelope', async () => {
+		const ctx = await setup();
+		ctx.live.middleware(async () => ({ ok: false, code: 'RATE_LIMITED', error: 'slow down', params: { limit: 3 }, details: { scope: 'files' }, retryAfter: 1500 }));
+		env.register('files', { save: ctx.live.upload(async () => 1) });
+		await expect(ctx.__upload('files/save')(new Uint8Array(10))).rejects.toMatchObject({
+			code: 'RATE_LIMITED', message: 'slow down', params: { limit: 3 }, details: { scope: 'files' }
+		});
+		expect(ctx.uploadEnvelopes.find((e) => e.ok === false)).toMatchObject({ code: 'RATE_LIMITED', retryAfter: 1500, params: { limit: 3 } });
+	});
+
+	it('finishes an upload whose middleware calls next() without waiting for it', async () => {
+		const ctx = await setup({ frameSize: 1024 });
+		ctx.live.middleware((_mctx, next) => { next(); });
+		env.register('files', { save: counting(ctx.live, 2) });
+		expect(await ctx.__upload('files/save')(new Uint8Array(20_000))).toBe(20_000);
+	});
+
+	it('keeps the session slot of a refused upload whose handler a middleware left running', async () => {
+		const ctx = await setup();
+		let calls = 0;
+		let release;
+		const gate = new Promise((resolve) => { release = resolve; });
+		ctx.live.middleware((_mctx, next) => {
+			if (++calls > 1) return next();
+			next();
+			return { ok: false, code: 'FORBIDDEN', error: 'no' };
+		});
+		env.register('files', { save: ctx.live.upload(async () => { await gate; return 1; }, { maxConcurrentPerSession: 1 }) });
+		await expect(ctx.__upload('files/save')(new Uint8Array(10))).rejects.toMatchObject({ code: 'FORBIDDEN' });
+		// The first handler still runs, so it still holds the only slot.
+		await expect(ctx.__upload('files/save')(new Uint8Array(10))).rejects.toMatchObject({ code: 'TOO_MANY_UPLOADS' });
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(await ctx.__upload('files/save')(new Uint8Array(10))).toBe(1);
+	});
+
 	it('rejects a non-boolean diagnostics option', async () => {
 		const ctx = await setup();
 		expect(() => ctx.live.upload(async () => 1, { diagnostics: /** @type {any} */ (1) })).toThrow(/diagnostics/);
