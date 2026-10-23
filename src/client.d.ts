@@ -300,7 +300,10 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 * (push, pop, filter, splice) are rolled back cleanly; in-place
 	 * mutations of individual items (e.g. `draft[0].name = 'x'`) are NOT,
 	 * because the snapshot array and the draft array share item references.
-	 * To mutate an item field, replace the whole item:
+	 * Replace rows rather than edit them in place: an in-place edit also
+	 * changes the server state the change replays over, and is not undone
+	 * when the call fails or the change throws. To change an item field,
+	 * replace the whole item:
 	 * `draft[i] = { ...draft[i], name: 'x' }`.
 	 */
 	mutate<R>(
