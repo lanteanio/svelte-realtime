@@ -763,18 +763,46 @@ describe('upload stream diagnostics', () => {
 		const sink = capture(ctx);
 		try {
 			const ran = [];
-			let late;
-			ctx.live.middleware(async (mctx, next) => {
-				if (!mctx.upload) return next();
-				late = new Promise((resolve) => setTimeout(() => resolve(Promise.resolve().then(next)), 5));
+			let next;
+			ctx.live.middleware(async (mctx, n) => {
+				if (!mctx.upload) return n();
+				next = n;
 				return { ok: false, code: 'FORBIDDEN', error: 'refused' };
 			});
-			ctx.live.middleware(async (mctx, next) => { if (mctx.upload) ran.push('inner'); return next(); });
+			ctx.live.middleware(async (mctx, n) => { if (mctx.upload) ran.push('inner'); return n(); });
 			env.register('files', { save: ctx.live.upload(async () => { ran.push('handler'); return 1; }) });
 			await expect(ctx.__upload('files/save')(new Uint8Array(10))).rejects.toMatchObject({ code: 'FORBIDDEN' });
-			await expect(late).rejects.toThrow('after the upload was answered');
+			await expect(next()).rejects.toThrow('after the upload was answered');
 			expect(ran).toEqual([]);
 			expect(sink.records.filter((r) => r.event === 'upload.middleware.next-after-answer')).toHaveLength(1);
+		} finally { sink.restore(); }
+	});
+
+	it('rejects a next() after the client cancelled the upload without a warning', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			const ran = [];
+			let release, late;
+			const gate = new Promise((resolve) => { release = resolve; });
+			ctx.live.middleware(async (mctx, next) => {
+				if (!mctx.upload) return next();
+				await gate;
+				late = next();
+				return late;
+			});
+			ctx.live.middleware(async (mctx, next) => { if (mctx.upload) ran.push('inner'); return next(); });
+			env.register('files', { save: ctx.live.upload(async () => { ran.push('handler'); return 1; }, { diagnostics: true }) });
+			const handle = ctx.__upload('files/save')(new Uint8Array(10));
+			await vi.waitFor(() => expect(sink.stream().map((r) => r.event)).toContain('upload.stream.started'));
+			handle.cancel();
+			await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+			await vi.waitFor(() => expect(sink.stream().find((r) => r.event === 'upload.stream.ended')?.attributes.outcome).toBe('cancelled'));
+			release();
+			await vi.waitFor(() => expect(late).toBeDefined());
+			await expect(late).rejects.toThrow('after the upload was answered');
+			expect(ran).toEqual([]);
+			expect(sink.records.filter((r) => r.event === 'upload.middleware.next-after-answer')).toHaveLength(0);
 		} finally { sink.restore(); }
 	});
 

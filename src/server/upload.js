@@ -741,6 +741,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	/** @type {number | undefined} */ let refusalRetryAfter;
 	let refusedByMiddleware = false;
 	let chainFailed = false;
+	// Set where the server itself answered the upload. A client cancel, a cap
+	// overflow while pending or a disconnect also settles it, but a late next()
+	// after one of those is no middleware fault worth a warning.
+	let answeredByServer = false;
 
 	// Count the upload handler as in-flight so onShutdown's drain waits for it.
 	// Uploads are the longest-running handler (they span every chunk via the
@@ -861,6 +865,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const result = await fn(ctx, ...args);
 			if (upload.phase !== 'settled') {
 				upload.phase = 'settled';
+				answeredByServer = true;
 				upload.recordOutcome('');
 				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
 				_respondUpload(ws, platform, streamId, { ok: true, data: result });
@@ -873,10 +878,11 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		// is kept so a middleware that drops or swallows next() cannot leave
 		// the upload unanswered, or cleaned up under a running handler.
 		// Once the upload is answered, a next() runs neither an inner
-		// middleware nor the guard and handler, and rejects, as on RPC.
+		// middleware nor the guard and handler, and rejects, as on RPC. Only a
+		// server answer warns: the client settles uploads by cancelling too.
 		const late = () => {
 			if (upload.phase !== 'settled') return null;
-			emitOperationalEvent({
+			if (answeredByServer) emitOperationalEvent({
 				source: 'svelte-realtime',
 				component: 'server.upload',
 				event: 'upload.middleware.next-after-answer',
@@ -912,6 +918,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	} catch (err) {
 		if (upload.phase !== 'settled') {
 			upload.phase = 'settled';
+			answeredByServer = true;
 			// Queued bytes go back now; a chain still running keeps only its
 			// start slot, released when it ends.
 			upload.pendingChunks = null;

@@ -1210,8 +1210,8 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/upload.js:383</code>
 - <code>src/server/upload.js:509</code>
 - <code>src/server/upload.js:511</code>
-- <code>src/server/upload.js:905</code>
-- <code>src/server/upload.js:929</code>
+- <code>src/server/upload.js:911</code>
+- <code>src/server/upload.js:936</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>
