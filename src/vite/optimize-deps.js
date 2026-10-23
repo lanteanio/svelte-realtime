@@ -172,14 +172,37 @@ function packageName(id) {
 }
 
 /**
- * Whether `id` resolves into a node_modules directory from `from`. Vite
- * follows a link to its target unless preserveSymlinks keeps the link's own
- * path, and it discovers only what resolves into node_modules.
+ * The manifest of the package.json nearest to `dir`, looking upward, or null.
+ * @param {string} dir
+ * @returns {{ name?: unknown, exports?: unknown } | null}
+ */
+function nearestManifest(dir) {
+	for (;;) {
+		const manifest = resolve(dir, 'package.json');
+		if (existsSync(manifest)) {
+			try {
+				return JSON.parse(readFileSync(manifest, 'utf8'));
+			} catch {
+				return null;
+			}
+		}
+		if (dirname(dir) === dir) return null;
+		dir = dirname(dir);
+	}
+}
+
+/**
+ * Whether `id` resolves into a node_modules directory from `base`, the file
+ * `from` was created for. Vite follows a link to its target unless
+ * preserveSymlinks keeps the link's own path, and it discovers only what
+ * resolves into node_modules. A package that imports its own name resolves
+ * through its own exports, ahead of any node_modules copy.
  * @param {NodeJS.Require} from
+ * @param {string} base
  * @param {string} id
  * @param {boolean} preserveSymlinks
  */
-function resolvesInstalled(from, id, preserveSymlinks) {
+function resolvesInstalled(from, base, id, preserveSymlinks) {
 	let file;
 	try {
 		file = realpathSync(from.resolve(id));
@@ -188,6 +211,8 @@ function resolvesInstalled(from, id, preserveSymlinks) {
 	}
 	if (!preserveSymlinks) return NODE_MODULES_RE.test(file);
 	const name = packageName(id);
+	const own = nearestManifest(dirname(base));
+	if (own?.name === name && own.exports) return false;
 	return !!from.resolve.paths(name)?.some(dir => existsSync(resolve(dir, name, 'package.json')));
 }
 
@@ -240,7 +265,8 @@ function excluded(exclude, id) {
 export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids, generatedImports = () => [], sourceIds = ADAPTER_CLIENT_DEPS) {
 	if (optimizeDeps.noDiscovery || optimizeDeps.disabled === true || optimizeDeps.disabled === 'dev') return;
 	const exclude = optimizeDeps.exclude ?? [];
-	const fromRoot = createRequire(resolve(root, 'package.json'));
+	const rootManifest = resolve(root, 'package.json');
+	const fromRoot = createRequire(rootManifest);
 	let entry;
 	try {
 		entry = realpathSync(fromRoot.resolve(CLIENT_DEP));
@@ -249,8 +275,8 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 	}
 	const fromRealtime = createRequire(entry);
 	/** @param {string} id */
-	const sharedWithRealtime = (id) => resolvesInstalled(fromRealtime, id, preserveSymlinks)
-		&& resolvesInstalled(fromRoot, id, preserveSymlinks);
+	const sharedWithRealtime = (id) => resolvesInstalled(fromRealtime, entry, id, preserveSymlinks)
+		&& resolvesInstalled(fromRoot, rootManifest, id, preserveSymlinks);
 	/** @param {string} id */
 	const realtimeImports = (id) => {
 		try {
@@ -261,7 +287,7 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 		}
 	};
 	const generated = generatedImports();
-	const installed = resolvesInstalled(fromRoot, CLIENT_DEP, preserveSymlinks);
+	const installed = resolvesInstalled(fromRoot, rootManifest, CLIENT_DEP, preserveSymlinks);
 	const add = installed
 		? [...ids, ...generated.filter(id => packageName(id) === 'svelte-realtime')]
 		: sourceIds.filter(sharedWithRealtime);
@@ -270,7 +296,7 @@ export function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids,
 	if (shared) warnVersionSkew(fromRealtime, fromRoot, shared);
 	for (const id of generated) {
 		if (packageName(id) === 'svelte-realtime') continue;
-		if (realtimeImports(id) ? !sharedWithRealtime(id) : !resolvesInstalled(fromRoot, id, preserveSymlinks)) continue;
+		if (realtimeImports(id) ? !sharedWithRealtime(id) : !resolvesInstalled(fromRoot, rootManifest, id, preserveSymlinks)) continue;
 		if (importsResolve(fromRoot.resolve(id))) add.push(id);
 	}
 	const include = (optimizeDeps.include ??= []);

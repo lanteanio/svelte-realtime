@@ -389,6 +389,38 @@ describe('dependency optimization for generated modules', () => {
 		expect(resolveWith()).toEqual(DEPS);
 	});
 
+	it('follows a package replaced by a link while the process runs', () => {
+		installed();
+		expect(resolveWith()).toEqual(DEPS);
+		rmSync(resolve(appRoot, 'node_modules/svelte-realtime'), { recursive: true, force: true });
+		const target = resolve(appRoot, 'linked/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('optimizes the installed copy under a root named svelte-realtime without exports', () => {
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'svelte-realtime', private: true }));
+		installed();
+		expect(resolveWith()).toEqual(DEPS);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual(DEPS);
+	});
+
+	it('leaves the root\'s own svelte-realtime package to be served from source', () => {
+		installRealtime(appRoot);
+		installed();
+		expect(resolveWith()).toEqual([]);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual([]);
+	});
+
+	it('lists every entry point the devtools module imports', () => {
+		const plugin = realtime({ typedImports: false });
+		plugin.configResolved({ root: appRoot, build: {}, command: 'serve' });
+		const code = plugin.load('\0live-devtools', {});
+		const specifiers = [...code.matchAll(/\b(?:from|import)\s*\(?\s*(['"])([^'"]+)\1/g)].map(m => m[2]);
+		expect([...new Set(specifiers)].sort()).toEqual(DEPS);
+	});
+
 	it('adds nothing when the client entry point does not resolve', () => {
 		const dir = resolve(appRoot, 'node_modules/svelte-realtime');
 		installRealtime(dir);
