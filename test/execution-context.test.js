@@ -224,4 +224,100 @@ describe('background re-runs in middleware', () => {
 		await alice.waitFor(v => v === 'bob');
 		expect(sockets).toEqual([null, null]);
 	});
+
+	it('reloads under a subscriber that resumed without running the loader once the first one leaves', async () => {
+		const loads = [];
+		env.register('feed', {
+			read: live.stream('resume:feed', async () => { loads.push(actor()); return { n: loads.length }; }, {
+				merge: 'set', invalidateOn: 'resume:control', delta: { version: () => 1, diff: async () => null }
+			}),
+			touch: live(ctx => ctx.publish('resume:control', 'changed', {}))
+		});
+		const alice = env.connect({ id: 'alice' });
+		await alice.subscribe('feed/read').waitFor(v => v?.n === 1);
+		const bob = env.connect({ id: 'bob' });
+		const replies = [];
+		bob.onMessage(message => replies.push(message));
+		bob.sendRaw(new TextEncoder().encode(JSON.stringify({ rpc: 'feed/read', id: 'bob-resume', args: [], stream: true, version: 1 })).buffer);
+		await vi.waitFor(() => expect(JSON.stringify(replies)).toContain('"unchanged":true'));
+		alice.disconnect();
+		await env.connect({ id: 'carol' }).call('feed/touch');
+		await vi.waitFor(() => expect(loads).toHaveLength(2));
+		expect(loads).toEqual(['alice', 'bob']);
+	});
+
+	it('skips a stream reload when middleware returns without calling next', async () => {
+		live.middleware((ctx, next) => (ctx.rerun ? undefined : next()));
+		const loads = [];
+		env.register('feed', {
+			read: live.stream('skipnext:feed', async () => { loads.push(actor()); return { n: loads.length }; }, { merge: 'set', invalidateOn: 'skipnext:control' }),
+			touch: live(ctx => ctx.publish('skipnext:control', 'changed', {})),
+			ping: live(() => 'pong')
+		});
+		const stream = env.connect({ id: 'alice' }).subscribe('feed/read');
+		await stream.waitFor(v => v?.n === 1);
+		const carol = env.connect({ id: 'carol' });
+		await carol.call('feed/touch');
+		await carol.call('feed/ping');
+		await new Promise(resolve => setImmediate(resolve));
+		expect(loads).toEqual(['alice']);
+		expect(stream.events.filter(e => e.event === 'refreshed')).toEqual([]);
+		expect(stream.value).toEqual({ n: 1 });
+	});
+
+	it('skips a derived recompute when middleware returns without calling next', async () => {
+		live.middleware((ctx, next) => (ctx.rerun ? undefined : next()));
+		let computes = 0;
+		env.register('stats', {
+			board: live.derived(id => ['skipnext:source:' + id], async () => ++computes),
+			touch: live((ctx, id) => ctx.publish('skipnext:source:' + id, 'set', 1)),
+			ping: live(() => 'pong')
+		});
+		const board = env.connect({ id: 'alice' }).subscribe('stats/board', 'x');
+		await board.waitFor(v => v === 1);
+		const carol = env.connect({ id: 'carol' });
+		await carol.call('stats/touch', 'x');
+		await carol.call('stats/ping');
+		await new Promise(resolve => setImmediate(resolve));
+		expect(computes).toBe(1);
+		expect(board.events.filter(e => e.event === 'set')).toEqual([]);
+	});
+
+	it('checks each derived subscriber once while every one of them is refused', async () => {
+		let refusals = 0;
+		live.middleware((ctx, next) => {
+			if (ctx.rerun) { refusals++; throw new Error('refused'); }
+			return next();
+		});
+		let scopeChecks = 0;
+		env.register('stats', {
+			board: live.derived(id => ['refuseall:source:' + id], async () => 'initial', { scopeKey: () => { scopeChecks++; return 'shared'; } }),
+			touch: live((ctx, id) => ctx.publish('refuseall:source:' + id, 'set', 1))
+		});
+		const count = 6;
+		for (let i = 0; i < count; i++) await env.connect({ id: 'user' + i }).subscribe('stats/board', 'x').waitFor(v => v === 'initial');
+		scopeChecks = 0;
+		await env.connect({ id: 'carol' }).call('stats/touch', 'x');
+		await vi.waitFor(() => expect(refusals).toBe(count));
+		await new Promise(resolve => setImmediate(resolve));
+		expect(refusals).toBe(count);
+		expect(scopeChecks).toBe(count);
+	});
+
+	it('reloads a stale topic shared by two streams with the remaining subscriber\'s own stream', async () => {
+		vi.useFakeTimers();
+		const loads = [];
+		env.register('feed', {
+			first: live.stream('sharedstale:feed', async () => { loads.push('first:' + actor()); return { from: 'first' }; }, { merge: 'set', staleAfterMs: 1000 }),
+			second: live.stream('sharedstale:feed', async () => { loads.push('second:' + actor()); return { from: 'second' }; }, { merge: 'set', staleAfterMs: 1000 })
+		});
+		const alice = env.connect({ id: 'alice' });
+		alice.subscribe('feed/first');
+		await vi.advanceTimersByTimeAsync(0);
+		env.connect({ id: 'bob' }).subscribe('feed/second');
+		await vi.advanceTimersByTimeAsync(0);
+		alice.disconnect();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(loads).toEqual(['first:alice', 'second:bob', 'second:bob']);
+	});
 });

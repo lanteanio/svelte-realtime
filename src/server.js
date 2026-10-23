@@ -536,31 +536,31 @@ function _compileInvalidatePattern(pattern, unscoped = false) {
 
 /**
  * Record a subscriber as a context a background reload can run under.
- * Every subscriber whose loader succeeded is kept, oldest first, so a reload
- * still has a current subscriber after the first one leaves. Keyed by socket;
- * a re-subscribe on the same socket keeps its first binding.
+ * Every successful subscribe records one (a loader run, a replay resume, a
+ * delta), in subscribe order, so a reload has a current subscriber for as
+ * long as the topic has one. Keyed by socket; a re-subscribe on the same
+ * socket keeps its first binding. The binding carries the subscriber's own
+ * stream function, since two streams can share a topic.
  *
- * @param {Map<any, { ctx: any, args: any[], platform: any }>} bindings
+ * @param {Map<any, { ctx: any, args: any[], platform: any, fn: any }>} bindings
  * @param {any} ctx
  * @param {any[]} args
  * @param {any} platform
+ * @param {any} fn
  */
-function _addReloadBinding(bindings, ctx, args, platform) {
+function _addReloadBinding(bindings, ctx, args, platform, fn) {
 	const key = ctx.ws || ctx;
-	if (!bindings.has(key)) bindings.set(key, { ctx, args, platform });
+	if (!bindings.has(key)) bindings.set(key, { ctx, args, platform, fn });
 }
 
 /**
- * Forget a socket that left a topic other subscribers still hold. The last
- * binding is kept, so subscribers that attached without running the loader
- * (a replay resume) still get reloads; a reload skips it once a live
- * subscriber is bound, and the whole entry goes when the topic empties.
+ * Forget a socket that left a topic other subscribers still hold.
  *
  * @param {Map<any, any>} bindings
  * @param {any} ws
  */
 function _dropReloadBinding(bindings, ws) {
-	if (bindings.size > 1) bindings.delete(ws);
+	bindings.delete(ws);
 }
 
 /**
@@ -595,56 +595,66 @@ function _invalidationScope(topic) {
 
 /**
  * Re-run a stream loader for a background reload under one current
- * subscriber. Bindings are tried oldest first; a socket that has left the
- * topic is skipped (and forgotten while another binding remains). The run
- * goes through the middleware chain with a copy of that subscriber's ctx
- * marked `rerun: kind`. When middleware refuses a subscriber (throws before
- * calling `next`), the next one is tried; a loader throw ends the attempt.
- * Resolves `null` when no binding is left.
+ * subscriber. Bindings are tried in subscribe order; a socket that has left
+ * the topic is forgotten. The run goes through the middleware chain with a
+ * copy of that subscriber's ctx marked `rerun: kind`. Middleware that throws
+ * before calling `next` refuses that subscriber and the next one is tried;
+ * middleware that returns without calling `next` skips the reload; a loader
+ * throw ends the attempt. Resolves `null` when nothing should be published.
  *
  * @param {string} topic
- * @param {any} fn
- * @param {Map<any, { ctx: any, args: any[], platform: any }>} bindings
+ * @param {Map<any, { ctx: any, args: any[], platform: any, fn: any }>} bindings
  * @param {'invalidateOn' | 'staleAfterMs'} kind
- * @returns {Promise<{ result: any, ctx: any, platform: any } | null>}
+ * @returns {Promise<{ result: any, ctx: any, platform: any, fn: any } | null>}
  */
-async function _rerunStreamLoader(topic, fn, bindings, kind) {
-	/** @type {{ err: any, ctx: any } | null} */
+async function _rerunStreamLoader(topic, bindings, kind) {
+	/** @type {{ err: any, ctx: any, fn: any } | null} */
 	let refused = null;
 	for (const [key, binding] of bindings) {
 		const ws = binding.ctx.ws;
-		const left = !!ws && !_topicWsCounts.get(topic)?.has(ws);
-		if (left && bindings.size > 1) {
+		if (ws && !_topicWsCounts.get(topic)?.has(ws)) {
 			bindings.delete(key);
 			continue;
 		}
 		const ctx = _rerunCtx(binding.ctx, kind);
-		// The last binding outlives its socket only to serve subscribers that
-		// never ran the loader; it no longer stands for a connection.
-		if (left) ctx.ws = null;
 		let entered = false;
 		try {
 			const result = await _runWithMiddleware(ctx, () => {
 				entered = true;
-				return fn(ctx, ...binding.args);
+				return binding.fn(ctx, ...binding.args);
 			});
-			return { result, ctx, platform: binding.platform };
+			if (!entered) return null;
+			return { result, ctx, platform: binding.platform, fn: binding.fn };
 		} catch (err) {
-			if (entered) throw new _RerunFailure(err, ctx);
-			refused = { err, ctx };
+			if (entered) throw new _RerunFailure(err, ctx, binding.fn);
+			refused = { err, ctx, fn: binding.fn };
 		}
 	}
-	if (refused) throw new _RerunFailure(refused.err, refused.ctx);
+	if (refused) throw new _RerunFailure(refused.err, refused.ctx, refused.fn);
 	return null;
 }
 
-/** Carries a re-run's error together with the ctx it ran under. */
+/** Carries a re-run's error together with the ctx and stream it ran under. */
 class _RerunFailure {
-	/** @param {any} err @param {any} ctx */
-	constructor(err, ctx) {
+	/** @param {any} err @param {any} ctx @param {any} fn */
+	constructor(err, ctx, fn) {
 		this.err = err;
 		this.ctx = ctx;
+		this.fn = fn;
 	}
+}
+
+/**
+ * Route a reload failure to the onError of the stream it ran under.
+ * @param {any} failure
+ * @param {any} run The completed run, when the failure came after it
+ * @param {string} topic
+ */
+async function _reportReloadFailure(failure, run, topic) {
+	const rerun = failure instanceof _RerunFailure;
+	const onError = (rerun ? failure.fn : run?.fn)?.__streamOnError;
+	if (!onError) return;
+	try { await onError(rerun ? failure.err : failure, rerun ? failure.ctx : run?.ctx ?? null, topic); } catch {}
 }
 
 /**
@@ -682,7 +692,6 @@ function _publishReload(fn, topic, platform, result) {
 function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 	const patterns = fn.__streamInvalidateOn;
 	if (!patterns) return;
-	const onError = fn.__streamOnError || null;
 	// Compile the trusted scope once; publishing keeps its existing matcher path.
 	const scope = _tenantTopic(ctx.tenantId, '');
 	for (const p of patterns) {
@@ -695,10 +704,10 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 		}
 		let watcher = entry.watchers.find(w => w.topic === topic && w.fn === fn);
 		if (!watcher) {
-			watcher = { topic, fn, bindings: new Map(), onError, reloading: false };
+			watcher = { topic, fn, bindings: new Map(), reloading: false };
 			entry.watchers.push(watcher);
 		}
-		_addReloadBinding(watcher.bindings, ctx, args, platform);
+		_addReloadBinding(watcher.bindings, ctx, args, platform, fn);
 	}
 }
 
@@ -737,7 +746,7 @@ export function _resetInvalidationWatch() {
  * them; the next match after the in-flight reload completes will re-run
  * regardless).
  *
- * @param {{ topic: string, fn: any, bindings: Map<any, any>, onError: Function | null, reloading: boolean }} watcher
+ * @param {{ topic: string, fn: any, bindings: Map<any, any>, reloading: boolean }} watcher
  */
 async function _invalidationReload(watcher) {
 	// Graceful shutdown: skip the publish-triggered reload during a drain
@@ -746,18 +755,12 @@ async function _invalidationReload(watcher) {
 	if (watcher.reloading) return;
 	watcher.reloading = true;
 	/** @type {any} */
-	let ranCtx = null;
+	let run = null;
 	try {
-		const run = await _rerunStreamLoader(watcher.topic, watcher.fn, watcher.bindings, 'invalidateOn');
-		if (run) {
-			ranCtx = run.ctx;
-			_publishReload(watcher.fn, watcher.topic, run.platform, run.result);
-		}
+		run = await _rerunStreamLoader(watcher.topic, watcher.bindings, 'invalidateOn');
+		if (run) _publishReload(run.fn, watcher.topic, run.platform, run.result);
 	} catch (failure) {
-		if (watcher.onError) {
-			const rerun = failure instanceof _RerunFailure;
-			try { await watcher.onError(rerun ? failure.err : failure, rerun ? failure.ctx : ranCtx, watcher.topic); } catch {}
-		}
+		await _reportReloadFailure(failure, run, watcher.topic);
 	} finally {
 		watcher.reloading = false;
 	}
@@ -781,15 +784,13 @@ function _registerStaleWatch(topic, fn, ctx, args, platform) {
 	if (!entry) {
 		entry = {
 			staleAfterMs: staleMs,
-			fn,
 			bindings: new Map(),
-			onError: fn.__streamOnError || null,
 			reloading: false,
 			timerId: setTimer(() => _staleReload(topic), staleMs)
 		};
 		_topicStaleWatch.set(topic, entry);
 	}
-	_addReloadBinding(entry.bindings, ctx, args, platform);
+	_addReloadBinding(entry.bindings, ctx, args, platform, fn);
 }
 
 /**
@@ -836,18 +837,12 @@ async function _staleReload(topic) {
 	if (entry.reloading) return;
 	entry.reloading = true;
 	/** @type {any} */
-	let ranCtx = null;
+	let run = null;
 	try {
-		const run = await _rerunStreamLoader(topic, entry.fn, entry.bindings, 'staleAfterMs');
-		if (run) {
-			ranCtx = run.ctx;
-			_publishReload(entry.fn, topic, run.platform, run.result);
-		}
+		run = await _rerunStreamLoader(topic, entry.bindings, 'staleAfterMs');
+		if (run) _publishReload(run.fn, topic, run.platform, run.result);
 	} catch (failure) {
-		if (entry.onError) {
-			const rerun = failure instanceof _RerunFailure;
-			try { await entry.onError(rerun ? failure.err : failure, rerun ? failure.ctx : ranCtx, topic); } catch {}
-		}
+		await _reportReloadFailure(failure, run, topic);
 	} finally {
 		entry.reloading = false;
 		// Re-arm only if this entry is still registered. The last

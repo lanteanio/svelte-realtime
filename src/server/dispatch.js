@@ -972,6 +972,15 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, max: streamOpts.max, channel: true };
 	}
 
+	// Record this subscriber for the stream's background reloads (stale
+	// watchdog, invalidation watchers) on every path that completes the
+	// subscribe, so a reload can run under any current subscriber, including
+	// one that resumed from a replay or a delta without running the loader.
+	const armReloads = () => {
+		if (/** @type {any} */ (fn).__streamStaleAfterMs) _registerStaleWatch(topic, fn, ctx, streamArgs, platform);
+		if (/** @type {any} */ (fn).__streamInvalidateOn) _registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
+	};
+
 	// Delta sync
 	const deltaOpts = /** @type {any} */ (fn).__delta;
 	const clientVersion = msg.version;
@@ -979,6 +988,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		try {
 			const currentVersion = await deltaOpts.version();
 			if (currentVersion === clientVersion) {
+				armReloads();
 				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
 			}
 			let diff = await deltaOpts.diff(clientVersion);
@@ -989,6 +999,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 				// the loader - fail-closed, never returning raw diff.
 				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
 				if (_redact) diff = _redact(diff);
+				armReloads();
 				return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
 			}
 		} catch {}
@@ -1000,6 +1011,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			const missed = await platform.replay.since(topic, clientSeq);
 			if (missed) {
 				const currentSeq = await platform.replay.seq(topic);
+				armReloads();
 				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}
 		} catch {}
@@ -1021,6 +1033,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			const missed = await platform.replay.since(topic, 0);
 			if (Array.isArray(missed) && missed.length > 0) {
 				const currentSeq = await platform.replay.seq(topic);
+				armReloads();
 				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}
 		} catch {}
@@ -1052,6 +1065,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 					replay: true
 				};
 				if (respSeq !== undefined) deltaResp.seq = respSeq;
+				armReloads();
 				return deltaResp;
 			}
 		} catch {}
@@ -1068,18 +1082,9 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		throw err;
 	}
 
-	// Arm the staleness watchdog now that the loader succeeded. One
-	// watchdog per topic; every subscriber whose loader succeeded is
-	// recorded as a context a later reload can run under.
-	if (/** @type {any} */ (fn).__streamStaleAfterMs) {
-		_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
-	}
-
-	// Arm the topic-invalidation watcher(s): one per (pattern, topic),
-	// with this subscriber recorded the same way as for the watchdog.
-	if (/** @type {any} */ (fn).__streamInvalidateOn) {
-		_registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
-	}
+	// The loader succeeded: arm the watchdog and invalidation watchers (one
+	// per topic, or per (pattern, topic)) and record this subscriber.
+	armReloads();
 
 	const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
 	let resultData = isPaginated ? result.data : result;

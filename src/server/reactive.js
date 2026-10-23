@@ -669,10 +669,11 @@ function _wrapPlatformPublish(platform) {
 
 /**
  * Resolve a live context and revoke sockets whose identity/tenant scope changed.
- * With `tried`, a subscriber already in the set is passed over and the one
- * selected is added, so a caller can move on to the next valid subscriber.
+ * With `cursor` (an iterator over `entry.subscribers.values()`), the scan
+ * resumes where the previous selection stopped, so a caller can move on to
+ * the next valid subscriber without re-checking the ones before it.
  */
-function _currentDerivedContext(entry, platform, select = true, tried = null) {
+function _currentDerivedContext(entry, platform, select = true, cursor = null) {
 	let scopeKey = entry.fn.__derivedScopeKey;
 	// This scratch context is used only by internal identity helpers and never
 	// escapes to scope callbacks or compute functions.
@@ -696,7 +697,9 @@ function _currentDerivedContext(entry, platform, select = true, tried = null) {
 			scopeKey = () => null;
 		}
 	}
-	for (const subscriber of entry.subscribers.values()) {
+	// A Map iterator has no return(), so leaving the loop early keeps the
+	// cursor where it stopped.
+	for (const subscriber of cursor || entry.subscribers.values()) {
 		const ws = subscriber.ctx.ws || null;
 		let user, ctx, valid = false;
 		try {
@@ -723,10 +726,6 @@ function _currentDerivedContext(entry, platform, select = true, tried = null) {
 			// Before compute only select one valid context. The mandatory scan
 			// after compute checks every recipient before any output is delivered.
 			if (select) {
-				if (tried) {
-					if (tried.has(subscriber)) continue;
-					tried.add(subscriber);
-				}
 				// A derived output can serve several sockets. Preserve the historic
 				// detached compute context while selecting current user data.
 				return _buildCtx(user || null, null, platform, _getCtxHelpers(platform), null);
@@ -769,13 +768,14 @@ async function _recomputeDerived(entry, platform) {
 		let result;
 		if (entry.args) {
 			// Run under one valid subscriber's detached ctx (ws is null: the output
-			// serves every subscriber). When middleware refuses that subscriber
-			// (throws before calling next), try the next one; a compute throw ends
-			// the recompute.
-			const tried = new Set();
+			// serves every subscriber). Middleware that throws before calling next
+			// refuses that subscriber and the next one is tried; middleware that
+			// returns without calling next skips the recompute; a compute throw
+			// ends it.
+			const cursor = entry.subscribers.values();
 			let refused = null;
 			for (;;) {
-				const ctx = _currentDerivedContext(entry, platform, true, tried);
+				const ctx = _currentDerivedContext(entry, platform, true, cursor);
 				if (!entry.active) return;
 				if (!ctx) {
 					if (refused) throw refused.err;
@@ -790,6 +790,7 @@ async function _recomputeDerived(entry, platform) {
 						entered = true;
 						return entry.fn(ctx, ...entry.args);
 					});
+					if (!entered) return;
 					break;
 				} catch (err) {
 					if (entered) throw err;
