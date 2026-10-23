@@ -773,6 +773,39 @@ describe('__stream() mutate', () => {
 		}
 	});
 
+	it('a change that throws when applied to the server state is left out and reported', async () => {
+		const ctx = await setupCrudStream('mut/graduate-throws', 'mut-graduate-throws', [{ id: 1 }]);
+		const save = __rpc('mut/save-graduate-throws');
+		vi.stubGlobal('reportError', undefined);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		let runs = 0;
+		try {
+			const before = sendQueuedFn.mock.calls.length;
+			const op = ctx.store.mutate(() => save({ id: 2 }), (draft) => {
+				if (++runs > 1) throw new Error('second run');
+				draft.push({ id: 2 });
+			});
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+			const frame = sendQueuedFn.mock.calls.slice(before).map((c) => c[0]).find((f) => f && f.rpc);
+			simulateRpcResponse(frame.id, { ok: true, data: 'saved' });
+			expect(await op).toBe('saved');
+			expect(runs).toBe(2);
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(errorSpy.mock.calls[0][0]).toContain('applied to the server state');
+			expect(errorSpy.mock.calls[0][1]).toEqual(expect.objectContaining({ message: 'second run' }));
+			// Rolled back to the server state, out of queue mode: a server event
+			// applies directly instead of replaying the change.
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
+			simulateTopicMessage('mut-graduate-throws', { event: 'created', data: { id: 2, saved: true } });
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 2, saved: true }]);
+			expect(runs).toBe(2);
+		} finally {
+			vi.unstubAllGlobals();
+			errorSpy.mockRestore();
+			ctx.unsub();
+		}
+	});
+
 	it('a call that throws synchronously never shows its optimistic change', async () => {
 		const ctx = await setupCrudStream('mut/throw-early', 'mut-throw-early', [{ id: 1 }]);
 		const seen = ctx.values.length;

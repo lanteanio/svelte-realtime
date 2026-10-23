@@ -1477,44 +1477,43 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * then publish to the store and record history. Called whenever queue
 	 * state changes during queue mode (mutate add, mutate settle, server
 	 * event arrives).
+	 *
+	 * @param {boolean} [reporting] - a mutate's own publish: see `_publish`.
 	 */
-	function _recomputeDisplay() {
+	function _recomputeDisplay(reporting = false) {
 		const replayed = _replayQueue();
 		currentValue = replayed.value;
 		_index.clear();
 		for (const [k, i] of replayed.index) _index.set(k, i);
-		store.set(currentValue);
-		_recordHistory();
-	}
-
-	/** @param {unknown} err */
-	function _reportSubscriberError(err) {
-		if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
-		else console.error('[svelte-realtime] a stream subscriber threw during mutate():', err);
-	}
-
-	/** Publish `currentValue` and record history, reporting a subscriber that throws. */
-	function _publishReporting() {
-		try {
-			store.set(currentValue);
-		} catch (err) {
-			_reportSubscriberError(err);
-		}
-		_recordHistory();
+		_publish(reporting);
 	}
 
 	/**
-	 * Settle a mutate's queue entry once its call has an outcome, reporting a
-	 * subscriber that throws so the mutate settles as the call did.
-	 * @param {(success: boolean) => void} settle
-	 * @param {boolean} success
+	 * @param {string} what
+	 * @param {unknown} err
 	 */
-	function _settleReporting(settle, success) {
-		try {
-			settle(success);
-		} catch (err) {
-			_reportSubscriberError(err);
+	function _reportMutateError(what, err) {
+		if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
+		else console.error('[svelte-realtime] mutate(): ' + what + ':', err);
+	}
+
+	/**
+	 * Publish `currentValue` and record history. A mutate whose call is out
+	 * publishes `reporting`: a store subscriber that throws is reported
+	 * instead of failing a call the server may commit. Only the publish is
+	 * guarded; the state written before it is complete.
+	 * @param {boolean} reporting
+	 */
+	function _publish(reporting) {
+		if (!reporting) store.set(currentValue);
+		else {
+			try {
+				store.set(currentValue);
+			} catch (err) {
+				_reportMutateError('a stream subscriber threw', err);
+			}
 		}
+		_recordHistory();
 	}
 
 	/**
@@ -1522,8 +1521,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * the parallel server-state slots, publishes to the store, and
 	 * records history. Called when the queue empties after a mutate
 	 * settles.
+	 *
+	 * @param {boolean} [reporting] - a mutate's own publish: see `_publish`.
 	 */
-	function _drainQueue() {
+	function _drainQueue(reporting = false) {
 		// drain-precondition invariant: _drainQueue is the queue-mode exit
 		// path; callers must only invoke it with an empty queue.
 		assert(_optimisticQueue.length === 0, 'realtime/optimistic.queue.drain-precondition', { queueLen: _optimisticQueue.length });
@@ -1534,8 +1535,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		}
 		_serverValue = null;
 		_serverIndex = null;
-		store.set(currentValue);
-		_recordHistory();
+		_publish(reporting);
 	}
 
 	/** Double-buffer swap pattern: two pre-allocated arrays reused every frame */
@@ -2713,10 +2713,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			currentValue = replayed.value;
 			_index.clear();
 			for (const [k, i] of replayed.index) _index.set(k, i);
-			// The call is out: from here the operation decides how mutate
-			// settles. A store subscriber that throws is reported instead of
-			// failing a call the server may still commit.
-			_publishReporting();
+			// The call is out: from here the operation decides how mutate settles.
+			_publish(true);
 
 			/** @param {boolean} success */
 			const settle = (success) => {
@@ -2727,24 +2725,32 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				const idx = _optimisticQueue.indexOf(entry);
 				if (idx >= 0) _optimisticQueue.splice(idx, 1);
 				if (success && !entry.serverConfirmed && !entry.superseded) {
-					_serverValue = _applyChange(
-						_serverValue,
-						/** @type {Map<any, number>} */ (_serverIndex),
-						entry.change
-					);
+					// A function change that throws on the server state is left
+					// out of it: the stream shows what the server sent until its
+					// events carry the committed change. It throws on its draft,
+					// before the index is rebuilt, so neither slot is touched.
+					try {
+						_serverValue = _applyChange(
+							_serverValue,
+							/** @type {Map<any, number>} */ (_serverIndex),
+							entry.change
+						);
+					} catch (err) {
+						_reportMutateError('the optimistic change threw when applied to the server state, so it is not shown until the server publishes it', err);
+					}
 				}
-				if (_optimisticQueue.length === 0) _drainQueue();
-				else _recomputeDisplay();
+				if (_optimisticQueue.length === 0) _drainQueue(true);
+				else _recomputeDisplay(true);
 			};
 
 			let value;
 			try {
 				value = await op;
 			} catch (err) {
-				_settleReporting(settle, false);
+				settle(false);
 				throw err;
 			}
-			_settleReporting(settle, true);
+			settle(true);
 			return value;
 		},
 
