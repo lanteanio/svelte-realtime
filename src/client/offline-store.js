@@ -396,7 +396,7 @@ export function createIndexedDbStore() {
 					const namespace = key.slice(2);
 					const prefix = 'q:' + namespace + ':';
 					// A queue row written since the scan keeps its checkpoint.
-					const rows = store.openKeyCursor(IDBKeyRange.bound(prefix, prefix + '￿'));
+					const rows = store.openKeyCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
 					rows.onerror = (event) => { event?.preventDefault?.(); };
 					rows.onsuccess = () => {
 						const occupied = !!rows.result;
