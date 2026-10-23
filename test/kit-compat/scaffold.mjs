@@ -22,6 +22,7 @@ for (const path of [adapterPack, realtimePack]) {
 const adapterVersion = packages.get('svelte-adapter-uws')?.manifest.version;
 const realtimeVersion = packages.get('svelte-realtime')?.manifest.version;
 assert(adapterVersion && realtimeVersion, 'Pass one svelte-adapter-uws and one svelte-realtime archive');
+assert.equal(realtimeVersion, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, 'The svelte-realtime archive does not carry the version in package.json');
 const directory = resolve(root, 'test-results', 'scaffold-' + Date.now());
 mkdirSync(directory, { recursive: true });
 writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: 'scaffold-smoke', private: true }));
@@ -121,7 +122,9 @@ async function browserSmoke(app, dev) {
 		const pages = [await context.newPage(), await context.newPage()];
 		const errors = [];
 		const frames = [];
-		for (const page of pages) {
+		const loads = pages.map(() => 0);
+		for (const [index, page] of pages.entries()) {
+			page.on('load', () => { loads[index]++; });
 			page.on('pageerror', error => errors.push(error.message));
 			page.on('websocket', socket => {
 				if (new URL(socket.url()).pathname !== '/ws') return;
@@ -142,6 +145,17 @@ async function browserSmoke(app, dev) {
 			await pages[0].locator('#svelte-realtime-devtools').waitFor({ state: 'attached' });
 			await pages[0].keyboard.press('Control+Shift+L');
 			await pages[0].locator('#svelte-realtime-devtools').waitFor({ state: 'visible' });
+			// The app's dependency cache starts empty here. Vite's scan skips the
+			// plugin's generated modules, so an entry point that only they import is
+			// met when the warmup or the browser loads them: Vite optimizes again and
+			// may reload every open page, possibly before either page has connected.
+			await pages[0].waitForTimeout(3000);
+			const failures = [];
+			const late = child.output().match(/(?:new )?dependenc(?:y|ies) optimized:[^\n]*/g);
+			if (late) failures.push('dependencies optimized after startup: ' + late.join('; '));
+			if (/optimized dependencies changed/.test(child.output())) failures.push('dependency optimization reloaded the pages');
+			if (loads.some(count => count !== 1)) failures.push('page loads ' + JSON.stringify(loads));
+			assert.deepEqual(failures, [], 'First dev session: ' + failures.join(', '));
 		}
 		assert.deepEqual(errors, [], 'Browser errors');
 		assert(!/transformIndexHtml.*not supported|transform_index_html_unsupported/.test(child.output()), 'Unsupported Vite hook warning');
