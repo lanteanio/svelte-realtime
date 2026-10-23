@@ -3,6 +3,7 @@ import { isScriptEntry } from './script-entry.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
 import { REALTIME_ERROR_IDS, REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
 import { CODE_GUIDANCE, EVENT_GUIDANCE } from './error-guidance.js';
 import { CONSOLE_EXCLUDED_MODULES, CONSOLE_REASONS, DYNAMIC_SITE_REASONS } from './error-decisions.js';
@@ -47,22 +48,35 @@ export function checkSiblingDocuments(parentDirectory = dirname(ROOT)) {
  * nothing is refused.
  *
  * @param {ReturnType<typeof scanRuntimeErrors>} inventory
- * @param {{ dynamic: Readonly<Record<string, string>>, excluded: Readonly<Record<string, string>>, console: Readonly<Record<string, string>> }} decisions
+ * A computed-site decision records how many sites it covers, so a new
+ * computed site in an already decided function needs a fresh decision while a
+ * line move does not. A registry-printed console line must sit in one of its
+ * entry's declared sources.
+ *
+ * @param {{ dynamic: Readonly<Record<string, { count: number, reason: string }>>, excluded: Readonly<Record<string, string>>, console: Readonly<Record<string, string>> }} decisions
+ * @param {ReadonlyArray<import('../src/error-registry.js').RealtimeErrorDefinition>} registry
  */
-export function validateDecisions(inventory, decisions = DECISIONS) {
+export function validateDecisions(inventory, decisions = DECISIONS, registry = REALTIME_ERROR_REGISTRY) {
 	/** @type {string[]} */
 	const errors = [];
-	const siteKeys = new Set(inventory.dynamicSites.map(dynamicSiteKey));
-	for (const key of siteKeys) {
-		if (!Object.hasOwn(decisions.dynamic, key)) errors.push('dynamic emission site ' + JSON.stringify(key) + ' has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js');
+	const sites = new Map(inventory.dynamicSites.map((site) => [dynamicSiteKey(site), site]));
+	for (const [key, site] of sites) {
+		const decision = decisions.dynamic[key];
+		if (!Object.hasOwn(decisions.dynamic, key)) errors.push('dynamic emission site ' + JSON.stringify(key) + ' (' + site.count + ' site' + (site.count === 1 ? '' : 's') + ') has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js');
+		else if (decision.count !== site.count) errors.push('DYNAMIC_SITE_REASONS[' + JSON.stringify(key) + '] records ' + decision.count + ' site(s) but the function now has ' + site.count + '; decide the changed sites and update the count');
 	}
 	for (const key of Object.keys(decisions.dynamic)) {
-		if (!siteKeys.has(key)) errors.push('DYNAMIC_SITE_REASONS[' + JSON.stringify(key) + '] matches no computed emission site');
+		if (!sites.has(key)) errors.push('DYNAMIC_SITE_REASONS[' + JSON.stringify(key) + '] matches no computed emission site');
 	}
 	const consoleKeys = new Set(), consolePaths = new Set();
 	for (const site of inventory.consoleSites) {
 		consolePaths.add(site.path);
-		if (site.registered || Object.hasOwn(decisions.excluded, site.path)) continue;
+		if (site.registered) {
+			const entry = registry.find((item) => item.id === site.registryId);
+			if (!entry || !entry.sources.includes(site.path)) errors.push('console line in ' + site.path + ' prints through ' + (site.registryId ?? 'an unknown registry entry') + ', whose sources do not list that file');
+			continue;
+		}
+		if (Object.hasOwn(decisions.excluded, site.path)) continue;
 		const key = consoleSiteKey(site);
 		consoleKeys.add(key);
 		if (!Object.hasOwn(decisions.console, key)) errors.push('console line ' + JSON.stringify(key) + ' is neither printed through the error registry nor given a CONSOLE_REASONS entry in scripts/error-decisions.js');
@@ -73,13 +87,42 @@ export function validateDecisions(inventory, decisions = DECISIONS) {
 	for (const path of Object.keys(decisions.excluded)) {
 		if (!consolePaths.has(path)) errors.push('CONSOLE_EXCLUDED_MODULES[' + JSON.stringify(path) + '] prints no console warning or error');
 	}
-	for (const [table, entries] of [['DYNAMIC_SITE_REASONS', decisions.dynamic], ['CONSOLE_EXCLUDED_MODULES', decisions.excluded], ['CONSOLE_REASONS', decisions.console]]) {
+	for (const [key, decision] of Object.entries(decisions.dynamic)) {
+		if (!Number.isInteger(decision?.count) || decision.count < 1) errors.push('DYNAMIC_SITE_REASONS[' + JSON.stringify(key) + '] needs a positive integer count');
+	}
+	const dynamicReasons = Object.fromEntries(Object.entries(decisions.dynamic).map(([key, decision]) => [key, decision?.reason]));
+	for (const [table, entries] of [['DYNAMIC_SITE_REASONS', dynamicReasons], ['CONSOLE_EXCLUDED_MODULES', decisions.excluded], ['CONSOLE_REASONS', decisions.console]]) {
 		for (const [key, reason] of Object.entries(entries)) {
 			if (typeof reason !== 'string' || !reason.trim()) errors.push(table + '[' + JSON.stringify(key) + '] has no reason');
 			else if (!PRINTABLE_ASCII.test(reason)) errors.push(table + '[' + JSON.stringify(key) + '] must be printable ASCII');
 		}
 	}
 	return errors;
+}
+
+/** @type {Map<string, Set<string>>} */
+const referencedKeys = new Map();
+/**
+ * `REALTIME_ERROR_IDS.<KEY>` member expressions in a source file, read from the
+ * syntax tree so a key named only in a comment or a string does not count.
+ * @param {string} path
+ */
+function registryKeysReferenced(path) {
+	let keys = referencedKeys.get(path);
+	if (keys) return keys;
+	keys = new Set();
+	/** @param {any} node */
+	const visit = (node) => {
+		if (!node || typeof node.type !== 'string') return;
+		if (node.type === 'MemberExpression' && !node.computed && node.object.type === 'Identifier' && node.object.name === 'REALTIME_ERROR_IDS') keys.add(node.property.name);
+		for (const child of Object.values(node)) {
+			if (Array.isArray(child)) child.forEach(visit);
+			else if (child && typeof child === 'object') visit(child);
+		}
+	};
+	visit(parse(readFileSync(path, 'utf8'), { sourceType: 'module', ecmaVersion: 'latest' }));
+	referencedKeys.set(path, keys);
+	return keys;
 }
 
 /**
@@ -121,7 +164,7 @@ export function validateErrorRegistry(registry = REALTIME_ERROR_REGISTRY) {
 		const key = Object.keys(REALTIME_ERROR_IDS).find((name) => REALTIME_ERROR_IDS[name] === entry.id);
 		const emitted = key !== undefined && (entry.sources || []).some((source) => {
 			const sourcePath = resolve(ROOT, source);
-			return existsSync(sourcePath) && readFileSync(sourcePath, 'utf8').includes('REALTIME_ERROR_IDS.' + key);
+			return existsSync(sourcePath) && registryKeysReferenced(sourcePath).has(key);
 		});
 		if (!emitted) errors.push(label + ' (' + entry.id + ') is not emitted through REALTIME_ERROR_IDS in any of its sources');
 	}
@@ -205,7 +248,7 @@ function sections(blocks) {
  * @param {ReturnType<typeof scanRuntimeErrors>} inventory
  */
 export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, inventory = scanRuntimeErrors(), codes = CODE_GUIDANCE, events = EVENT_GUIDANCE, decisions = DECISIONS) {
-	const errors = [...validateErrorRegistry(registry), ...validateGuidance(inventory, codes, events), ...validateDecisions(inventory, decisions)];
+	const errors = [...validateErrorRegistry(registry), ...validateGuidance(inventory, codes, events), ...validateDecisions(inventory, decisions, registry)];
 	if (errors.length) throw new Error('Invalid runtime error reference input:\n- ' + errors.join('\n- '));
 
 	const structured = inventory.diagnostics.filter((row) => row.kind === 'structured event');
@@ -273,7 +316,7 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY, invento
 		...decisionLines(row)
 	]);
 	const dynamicRows = inventory.dynamicSites.map((site) =>
-		'| [' + site.path + '](../' + site.path + ') | ' + code(site.scope) + ' | ' + site.kind + ' | ' + site.count + ' | ' + decisions.dynamic[dynamicSiteKey(site)] + ' |'
+		'| [' + site.path + '](../' + site.path + ') | ' + code(site.scope) + ' | ' + site.kind + ' | ' + site.count + ' | ' + decisions.dynamic[dynamicSiteKey(site)].reason + ' |'
 	);
 	const siblingRef = releaseDocumentationRef();
 

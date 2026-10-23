@@ -251,7 +251,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	UNKNOWN: Object.freeze({
 		cause: 'An RPC, batch, stream or upload error reply arrives with no `code` field, for example from an incompatible server or a custom handler that writes raw replies.',
-		consequence: 'The pending call rejects with an UNKNOWN RpcError using the reply\'s `error` text, or the message `Unknown error` or `Upload failed`. Only the reply\'s `params` and `details` are carried onto the error; other reply fields are not.',
+		consequence: 'The pending call rejects with an UNKNOWN RpcError using the reply\'s `error` text, or the message `Unknown error` or `Upload failed`. Only the reply\'s `params` and `details` are carried onto the error, plus `issues` on a single RPC; other reply fields are not.',
 		automaticRecovery: 'None.',
 		nextAction: 'Inspect the raw reply frame in the browser network panel and check the server version. Make sure every error reply includes a code, by throwing a LiveError in handlers.'
 	}),
@@ -360,6 +360,12 @@ export const EVENT_GUIDANCE = Object.freeze({
 		consequence: 'No new value is published for the `topic`. Subscribers keep the last value they received, which may now be out of date.',
 		automaticRecovery: 'If another source event arrived during the failed run, it recomputes immediately. Otherwise the next source event triggers a recompute.',
 		nextAction: 'Fix the compute error reported in the `error` attribute. Check that the source streams return data in the shape the derived function expects.'
+	}),
+	'rpc.module.load-failed': Object.freeze({
+		cause: 'Loading the live module behind a called path threw, for example a syntax error saved in development or a module whose top level throws.',
+		consequence: 'The call is answered INTERNAL_ERROR with a generic message; the load error stays on the server in the `error` attribute. Each distinct error message is reported once per path.',
+		automaticRecovery: 'The entry stays lazy, so the next call to that path loads the module again; a successful load clears the report for that path.',
+		nextAction: 'Fix the module named by the `path` attribute using the `error` attribute, then call again or reload. In development, save the corrected file.'
 	}),
 	'reactive.effect.failed': Object.freeze({
 		cause: 'A `live.effect` handler throws or rejects while running for a publish on one of its watched source topics.',

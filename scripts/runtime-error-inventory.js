@@ -11,7 +11,8 @@ const registry = new Map(REALTIME_ERROR_REGISTRY.map(entry => [entry.id, entry])
 const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
 // How a structured event leaves the process: through the installed sink, or
 // printed straight to the console in the shared line format.
-const DELIVERY = Object.freeze({ emitOperationalEvent: 'operational event sink', formatDiagnostic: 'console only (bypasses the operational event sink)' });
+const CONSOLE_ONLY = 'console only (never sent to the operational event sink)';
+const DELIVERY = Object.freeze({ emitOperationalEvent: 'operational event sink', formatDiagnostic: CONSOLE_ONLY, defaultOperationalEventSink: CONSOLE_ONLY });
 // Helper arguments are followed through at most this many call levels.
 const MAX_HELPER_DEPTH = 4;
 export const INFORMATIONAL_SEVERITIES = Object.freeze(['debug', 'info', 'trace']);
@@ -59,28 +60,43 @@ function literals(node) {
 }
 function hasText(node) {
 	if (isString(node) || node?.type === 'TemplateLiteral') return true;
+	if (node?.type === 'ConditionalExpression') return hasText(node.consequent) || hasText(node.alternate);
 	return node?.type === 'BinaryExpression' && node.operator === '+' && (hasText(node.left) || hasText(node.right));
 }
-// Internal names (leading underscore or SCREAMING_CASE) say nothing to a reader
-// of the log line, so they become a neutral placeholder.
-const readable = name => /^_|^[A-Z0-9_]+$/.test(name) ? '<value>' : '<' + name + '>';
+// Internal names say nothing to a reader of the log line, so they become a
+// neutral placeholder: a leading underscore or SCREAMING_CASE anywhere, and a
+// camelCase property of an internal object.
+const internal = name => /^_|^[A-Z0-9_]+$/.test(name);
 function hole(node) {
-	if (node?.type === 'Identifier') return readable(node.name);
-	if (node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier') return readable(node.property.name);
+	if (node?.type === 'Identifier') return internal(node.name) ? '<value>' : '<' + node.name + '>';
+	if (node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier') {
+		const name = node.property.name;
+		return internal(name) || /[A-Z]/.test(name) ? '<value>' : '<' + name + '>';
+	}
 	return '<value>';
 }
-// A message as literal text with a named placeholder for every computed part.
-function parts(node) {
-	if (node?.type === 'Literal' && (typeof node.value === 'string' || typeof node.value === 'number')) return [{ text: String(node.value) }];
-	if (constantOf(node) !== undefined) return [{ text: String(constantOf(node)) }];
+// One message can print several texts: a conditional with literal text inside
+// a template or a `+` chain yields one pattern per branch, so each phrase is
+// searchable and rewording one branch changes its pattern. Past this many
+// variants the remaining conditionals collapse into placeholders.
+const MAX_VARIANTS = 16;
+const product = (left, right) => left.length * right.length > MAX_VARIANTS ? undefined : left.flatMap(a => right.map(b => [...a, ...b]));
+function variants(node) {
+	if (node?.type === 'Literal' && (typeof node.value === 'string' || typeof node.value === 'number')) return [[{ text: String(node.value) }]];
+	if (constantOf(node) !== undefined) return [[{ text: String(constantOf(node)) }]];
 	if (node?.type === 'TemplateLiteral') {
-		return node.quasis.flatMap((quasi, index) => [
-			{ text: quasi.value.cooked ?? '' },
-			...(index < node.expressions.length ? parts(node.expressions[index]) : [])
-		]);
+		let out = [[]];
+		node.quasis.forEach((quasi, index) => {
+			out = product(out, [[{ text: quasi.value.cooked ?? '' }]]);
+			if (index < node.expressions.length) out = product(out, variants(node.expressions[index])) ?? product(out, [[{ hole: '<value>' }]]);
+		});
+		return out;
 	}
-	if (node?.type === 'BinaryExpression' && node.operator === '+' && hasText(node)) return [...parts(node.left), ...parts(node.right)];
-	return [{ hole: hole(node) }];
+	if (node?.type === 'BinaryExpression' && node.operator === '+' && hasText(node)) {
+		return product(variants(node.left), variants(node.right)) ?? [[{ hole: '<value>' }]];
+	}
+	if (node?.type === 'ConditionalExpression' && hasText(node)) return [...variants(node.consequent), ...variants(node.alternate)];
+	return [[{ hole: hole(node) }]];
 }
 function render(segments) {
 	let out = '', previousHole = false;
@@ -100,8 +116,7 @@ function patterns(node) {
 	if (isFallback(node)) return [...patterns(node.left), ...patterns(node.right)];
 	if (node?.type === 'CallExpression' && node.callee?.name === 'realtimeErrorMessage') return [definition(node)?.messagePrefix].filter(Boolean);
 	if (!hasText(node)) return [];
-	const segments = parts(node);
-	return segments.some(segment => segment.text) ? [render(segments)] : [];
+	return [...new Set(variants(node).filter(segments => segments.some(segment => segment.text)).map(render))];
 }
 function complete(node, message = false) {
 	if (node?.type === 'ConditionalExpression' || isFallback(node)) {
@@ -207,6 +222,13 @@ const anchor = (kind, key) => kind === 'diagnostic' ? kind + '-' + encodeURIComp
 	: kind + '-' + key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const RESOLVABLE_INIT = new Set(['Literal', 'TemplateLiteral', 'ConditionalExpression', 'LogicalExpression', 'BinaryExpression', 'Identifier']);
 
+function consoleMethod(node, unit) {
+	if (node.type !== 'CallExpression') return undefined;
+	const callee = node.callee;
+	if (callee?.type === 'MemberExpression' && !callee.computed && callee.object?.name === 'console' && ['warn', 'error'].includes(callee.property?.name)) return 'console.' + callee.property.name;
+	if (callee?.type === 'Identifier' && unit.consoleAliases.has(callee.name)) return 'console.' + unit.consoleAliases.get(callee.name);
+	return undefined;
+}
 function prepare({ path, source }) {
 	const ast = parse(source, { sourceType: 'module', ecmaVersion: 'latest' });
 	const unit = { path, source, ast, constants: new Map(), calls: [], methodCalls: [] };
@@ -218,6 +240,30 @@ function prepare({ path, source }) {
 			if (declaration.id.type === 'Identifier' && init?.type === 'Literal' && ['string', 'number'].includes(typeof init.value)) unit.constants.set(declaration.id.name, init.value);
 		}
 	}
+	// Console printers bound to a local name: `const warn = console.warn`,
+	// `console.error.bind(console)` and `const { warn } = console`. Matched by
+	// name across the file, so a false positive is possible, a missed alias is not.
+	unit.consoleAliases = new Map();
+	const printer = node => {
+		const target = node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.property.name === 'bind' ? node.callee.object : node;
+		return target?.type === 'MemberExpression' && !target.computed && target.object.type === 'Identifier' && target.object.name === 'console' &&
+			['warn', 'error'].includes(target.property.name) ? target.property.name : undefined;
+	};
+	walk(ast, (node) => {
+		const bind = (id, init) => {
+			if (id?.type === 'Identifier' && printer(init)) unit.consoleAliases.set(id.name, printer(init));
+			if (id?.type === 'ObjectPattern' && init?.type === 'Identifier' && init.name === 'console') {
+				for (const property of id.properties) {
+					const key = property.type === 'Property' && !property.computed ? property.key.name : undefined;
+					const value = property.value?.type === 'AssignmentPattern' ? property.value.left : property.value;
+					if (['warn', 'error'].includes(key) && value?.type === 'Identifier') unit.consoleAliases.set(value.name, key);
+				}
+			}
+		};
+		if (node.type === 'VariableDeclarator') bind(node.id, node.init);
+		if (node.type === 'AssignmentExpression' && node.operator === '=') bind(node.left, node.right);
+		if (node.type === 'AssignmentPattern') bind(node.left, node.right);
+	});
 	walk(ast, (node, parents) => {
 		if (node.type === 'CallExpression' && node.callee.type === 'Identifier') unit.calls.push({ call: node, parents });
 		if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && !node.callee.computed && node.callee.property.type === 'Identifier') unit.methodCalls.push({ call: node, parents });
@@ -372,16 +418,17 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 					if (!complete(event) || !complete(text, true)) site('structured event');
 					for (const [name, severities] of eventSeverities(event, local(fields.severity || fields.level), source)) {
 						const row = record(diagnostics, name, message, path, { kind: 'structured event', severities: new Set(), delivery: new Set() });
-						const callee = parents.at(-1)?.type === 'CallExpression' ? parents.at(-1).callee?.name : undefined;
+						// A record built with createDiagnostic() is delivered by the call it is passed to.
+						const calleeAt = depth => parents.at(depth)?.type === 'CallExpression' ? parents.at(depth).callee?.name : undefined;
+						const callee = calleeAt(-1) === 'createDiagnostic' ? calleeAt(-2) : calleeAt(-1);
 						if (callee && Object.hasOwn(DELIVERY, callee)) row.delivery.add(DELIVERY[callee]);
 						// An unresolved severity counts as a failure, never as informational.
 						for (const severity of severities.length ? severities : ['unresolved']) row.severities.add(severity);
 					}
 				}
 			}
-			if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression' &&
-				node.callee.object?.name === 'console' && ['warn', 'error'].includes(node.callee.property?.name)) {
-				const method = 'console.' + node.callee.property.name;
+			const method = consoleMethod(node, unit);
+			if (method) {
 				const first = local(node.arguments[0]);
 				const message = patterns(first);
 				// Structured diagnostics are indexed by the object carrying their event.
@@ -391,10 +438,11 @@ export function scanRuntimeErrors(files = runtimeSources()) {
 				}
 				if (!complete(first, true)) site(method);
 				const registered = first?.type === 'CallExpression' && first.callee?.name === 'realtimeErrorMessage';
+				const registryId = registered ? definition(first)?.id : undefined;
 				for (const text of message) {
 					const id = 'console-' + createHash('sha256').update(text).digest('hex').slice(0, 16);
 					record(diagnostics, id, [text], path, { kind: 'console line' });
-					consoleSites.push({ path, method, text, id, registered });
+					consoleSites.push({ path, method, text, id, registered, registryId });
 				}
 			}
 		});

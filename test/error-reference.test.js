@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import svelteRealtime from '../src/vite.js';
@@ -170,12 +172,24 @@ describe('guidance gate', () => {
 	it('refuses a computed emission site without a recorded reason, and a reason that matches nothing', () => {
 		const inventory = withExtra('export function relay(reply) { throw new LiveError(reply.code, reply.message); }');
 		expect(validateDecisions(inventory)).toEqual([
-			'dynamic emission site "src/example.js::relay()::new LiveError" has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js'
+			'dynamic emission site "src/example.js::relay()::new LiveError" (1 site) has no DYNAMIC_SITE_REASONS entry in scripts/error-decisions.js'
 		]);
 		expect(() => renderErrorReference(undefined, inventory)).toThrow(/relay\(\)::new LiveError/);
-		const stale = { ...DECISIONS, dynamic: { ...DECISIONS.dynamic, 'src/gone.js::gone()::new LiveError': 'x' } };
+		const stale = { ...DECISIONS, dynamic: { ...DECISIONS.dynamic, 'src/gone.js::gone()::new LiveError': { count: 1, reason: 'x' } } };
 		expect(validateDecisions(scanRuntimeErrors(), stale)).toEqual([
 			'DYNAMIC_SITE_REASONS["src/gone.js::gone()::new LiveError"] matches no computed emission site'
+		]);
+	});
+
+	it('refuses a new computed site in a function whose sites were already decided', () => {
+		const decided = { ...DECISIONS, dynamic: { ...DECISIONS.dynamic, 'src/example.js::relay()::new LiveError': { count: 1, reason: 'Forwards the reply.' } } };
+		const one = withExtra('export function relay(reply) { throw new LiveError(reply.code, reply.message); }');
+		expect(validateDecisions(one, decided)).toEqual([]);
+		const moved = withExtra('\n\n// moved\nexport function relay(reply) {\n\n throw new LiveError(reply.code, reply.message); }');
+		expect(validateDecisions(moved, decided)).toEqual([]);
+		const two = withExtra('export function relay(reply) { if (reply.retry) throw new LiveError(reply.retryCode, reply.message); throw new LiveError(reply.code, reply.message); }');
+		expect(validateDecisions(two, decided)).toEqual([
+			'DYNAMIC_SITE_REASONS["src/example.js::relay()::new LiveError"] records 1 site(s) but the function now has 2; decide the changed sites and update the count'
 		]);
 	});
 
@@ -190,15 +204,55 @@ describe('guidance gate', () => {
 			'CONSOLE_REASONS["src/example.js::[svelte-realtime] tick store failed:"] matches no console line'
 		]);
 		const routed = withExtra("export function tick(err) { console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.LAZY_REGISTRATION, ' x'), err); }");
-		expect(validateDecisions(routed)).toEqual([]);
 		expect(routed.consoleSites.find((site) => site.path === 'src/example.js').registered).toBe(true);
+		expect(validateDecisions(routed)).toEqual([
+			'console line in src/example.js prints through REALTIME-ERR-LAZY-REGISTRATION, whose sources do not list that file'
+		]);
+		const listed = REALTIME_ERROR_REGISTRY.map((entry) => entry.id === REALTIME_ERROR_IDS.LAZY_REGISTRATION ? { ...entry, sources: [...entry.sources, 'src/example.js'] } : entry);
+		expect(validateDecisions(routed, DECISIONS, listed)).toEqual([]);
 	});
 
-	it('refuses a registry entry that nothing emits', () => {
+	it('treats aliased console printers as console lines', () => {
+		for (const source of [
+			"const warn = console.warn; export function tick() { warn('[svelte-realtime] aliased failure'); }",
+			"const log = console.error.bind(console); export function tick() { log('[svelte-realtime] aliased failure'); }",
+			"const { warn: say } = console; export function tick() { say('[svelte-realtime] aliased failure'); }"
+		]) {
+			expect(validateDecisions(withExtra(source)), source).toEqual([
+				'console line "src/example.js::[svelte-realtime] aliased failure" is neither printed through the error registry nor given a CONSOLE_REASONS entry in scripts/error-decisions.js'
+			]);
+		}
+	});
+
+	it('refuses a registry entry that nothing emits, ignoring keys named only in comments', () => {
 		const entry = REALTIME_ERROR_REGISTRY.find((item) => item.id === REALTIME_ERROR_IDS.DOC_PERSIST);
 		expect(validateErrorRegistry([{ ...entry, sources: ['src/server/room.js'] }])).toEqual([
 			'entry 0 (REALTIME-ERR-DOC-PERSIST) is not emitted through REALTIME_ERROR_IDS in any of its sources'
 		]);
+		const relativePath = 'test/.registry-comment-' + process.pid + '.js';
+		const file = fileURLToPath(new URL('../' + relativePath, import.meta.url));
+		writeFileSync(file, "// console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.DOC_PERSIST));\nconst text = 'REALTIME_ERROR_IDS.DOC_PERSIST';\n");
+		try {
+			expect(validateErrorRegistry([{ ...entry, sources: [relativePath] }])).toEqual([
+				'entry 0 (REALTIME-ERR-DOC-PERSIST) is not emitted through REALTIME_ERROR_IDS in any of its sources'
+			]);
+		} finally {
+			rmSync(file, { force: true });
+		}
+	});
+
+	it('fails when a present sibling checkout lacks the linked document', () => {
+		const parent = mkdtempSync(join(tmpdir(), 'realtime-siblings-'));
+		try {
+			mkdirSync(join(parent, 'svelte-adapter-uws'));
+			mkdirSync(join(parent, 'svelte-adapter-uws-extensions', 'docs'), { recursive: true });
+			writeFileSync(join(parent, 'svelte-adapter-uws-extensions', 'docs', 'errors.md'), '# errors\n');
+			const errors = checkSiblingDocuments(parent);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatch(/^svelte-adapter-uws: the local checkout at .* has no docs\/errors\.md/);
+		} finally {
+			rmSync(parent, { recursive: true, force: true });
+		}
 	});
 
 	it('checks sibling error references only where a sibling checkout exists', () => {
@@ -365,6 +419,22 @@ describe('code and message resolution', () => {
 	it('inlines module constants and hides internal names in placeholders', () => {
 		const inventory = scanFiles({ 'src/example.js': "const CAP = 5000; const PREFIX = '[svelte-realtime] '; function warn(size) { console.warn(PREFIX + 'gate at ' + CAP + ' of ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' for ' + size); }" });
 		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['[svelte-realtime] gate at 5000 of <value> for <size>']);
+	});
+
+	it('expands a conditional with literal text inside a message into one pattern per branch', () => {
+		const source = "export function report(name, initFailed, err) { console.error('[svelte-realtime] live.aggregate \\'' + name + '\\': ' + (initFailed ? 'init threw; the window keeps its state.' : 'window publish failed; it retries.') + '\\n  ' + err.message); }";
+		const inventory = scanFiles({ 'src/server/example.js': source });
+		expect(inventory.consoleSites.map((site) => site.text)).toEqual([
+			"[svelte-realtime] live.aggregate '<name>': init threw; the window keeps its state.\n  <message>",
+			"[svelte-realtime] live.aggregate '<name>': window publish failed; it retries.\n  <message>"
+		]);
+		const reworded = scanFiles({ 'src/server/example.js': source.replace('it retries.', 'it retries later.') });
+		expect(reworded.consoleSites.map((site) => site.text)).toContain("[svelte-realtime] live.aggregate '<name>': window publish failed; it retries later.\n  <message>");
+	});
+
+	it('hides camelCase internal fields in placeholders but keeps plain names', () => {
+		const inventory = scanFiles({ 'src/server/example.js': "export function warn(state, call) { console.warn('[svelte-realtime] cap ' + state.maxPushRegistry + ' for ' + call.path); }" });
+		expect(inventory.consoleSites.map((site) => site.text)).toEqual(['[svelte-realtime] cap <value> for <path>']);
 	});
 
 	it('indexes the real connection-replaced message under DISCONNECTED', () => {
