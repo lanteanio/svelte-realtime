@@ -182,6 +182,7 @@ function rpc(name, args = []) {
 let origin;
 let launch;
 let pages = [];
+const navigatedAt = new Map();
 async function stopChild() {
 	if (!child || child.exitCode !== null || child.signalCode !== null) return;
 	const exited = once(child, 'exit');
@@ -201,8 +202,20 @@ async function restartServer(after) {
 	child = start(...launch);
 	await waitForFixture({ child, origin, token: readinessToken });
 	await connectSocket(origin);
+	// The Vite client reloads its page itself once the server is back, which
+	// can abort a navigation started here. Navigate until one completes, then
+	// wait until neither page has navigated for a moment.
 	for (const page of pages) {
-		await page.reload();
+		for (let attempt = 0; ; attempt++) {
+			try { await page.goto(origin); break; } catch (error) { if (attempt === 4) throw error; await pause(500); }
+		}
+	}
+	const deadline = Date.now() + 15000;
+	for (const page of pages) {
+		while (Date.now() - (navigatedAt.get(page) ?? 0) < 1500) {
+			assert.ok(Date.now() < deadline, 'A page kept reloading after the restart');
+			await pause(100);
+		}
 		await page.waitForFunction(() => window.compat);
 	}
 }
@@ -249,7 +262,6 @@ try {
 	const pageErrors = [];
 	const frames = { sent: [], received: [] };
 	pages = [await context.newPage(), await context.newPage()];
-	const navigatedAt = new Map();
 	for (const page of pages) {
 		page.setDefaultTimeout(15000);
 		page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigatedAt.set(page, Date.now()); });
