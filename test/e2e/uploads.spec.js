@@ -31,6 +31,9 @@ test('multi-chunk upload with an envelope-derived frame cap sends sequential fra
 	expect(r.lastByte).toBe(20);
 	expect(frames).toHaveLength(20);
 	expect(frames.every(frame => frame.length <= r.frameSize)).toBe(true);
+	// The page derives the cap from the credit-mode chunk 0 header.
+	const headerLength = frames[0].readUInt16BE(10);
+	expect(Object.keys(JSON.parse(frames[0].subarray(12, 12 + headerLength).toString()))).toContain('path');
 });
 
 test('cancel mid-upload rejects with CANCELLED on the client', async ({ page }) => {
