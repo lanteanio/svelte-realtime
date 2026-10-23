@@ -196,4 +196,34 @@ describe('plain RPC frames to stream paths', () => {
 		expect(a.value).toEqual(['a']);
 		expect(b.value).toEqual(['b']);
 	});
+
+	it('gated rate-limited stream loaders keep a bucket per stream path', async () => {
+		env.register('glimits', {
+			a: live.gate(() => true, live.stream('glimits:a', live.rateLimit({ points: 1, window: 60000 }, async () => ['a']))),
+			b: live.gate(() => true, live.stream('glimits:b', live.rateLimit({ points: 1, window: 60000 }, async () => ['b'])))
+		});
+		const c = env.connect(alice);
+		const a = c.subscribe('glimits/a');
+		const b = c.subscribe('glimits/b');
+		await settle();
+		expect(a.error).toBeNull();
+		expect(b.error).toBeNull();
+		const again = c.subscribe('glimits/a');
+		await settle();
+		expect(again.error).toMatchObject({ code: 'RATE_LIMITED' });
+	});
+
+	it('gated idempotent stream loaders keep a cache slot per stream path', async () => {
+		env.register('gonce', {
+			a: live.gate(() => true, live.stream('gonce:a', live.idempotent({ keyFrom: () => 'same' }, async () => ['a']))),
+			b: live.gate(() => true, live.stream('gonce:b', live.idempotent({ keyFrom: () => 'same' }, async () => ['b'])))
+		});
+		const c = env.connect(alice);
+		const a = c.subscribe('gonce/a');
+		await settle();
+		const b = c.subscribe('gonce/b');
+		await settle();
+		expect(a.value).toEqual(['a']);
+		expect(b.value).toEqual(['b']);
+	});
 });

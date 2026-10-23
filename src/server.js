@@ -3213,6 +3213,9 @@ live.gate = function gate(predicate, fn) {
 	_copyStreamMeta(wrapper, fn);
 	/** @type {any} */ (wrapper).__isGated = true;
 	/** @type {any} */ (wrapper).__gatePredicate = predicate;
+	// Registration walks this chain to stamp the path onto rate-limit and
+	// idempotency wrappers inside the gated function.
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
 
 	return wrapper;
 };
@@ -3304,6 +3307,7 @@ export function pipe(stream, ...transforms) {
 	};
 
 	_copyStreamMeta(wrapper, stream);
+	/** @type {any} */ (wrapper).__wrappedFn = stream;
 
 	return wrapper;
 }
