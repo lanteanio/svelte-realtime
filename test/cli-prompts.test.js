@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { win32 } from 'node:path';
+import { join, win32 } from 'node:path';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -22,8 +24,21 @@ childProcess.execFileSync = (file, args) => {
 syncBuiltinESMExports();
 `);
 
-// On Windows the CLI resolves the command through PATH and runs a .cmd shim as
-// one command line with no args array, so read the name and words from either form.
+// The CLI looks commands up through PATH on Windows. Give it a PATH holding only
+// placeholder npx and git files, so the outcome does not depend on what the
+// machine running the tests has installed. Nothing runs them: execFileSync is
+// stubbed above.
+const fakeBin = mkdtempSync(join(tmpdir(), 'realtime-prompt-bin-'));
+writeFileSync(join(fakeBin, 'npx.cmd'), '');
+writeFileSync(join(fakeBin, 'git.exe'), '');
+afterAll(() => rmSync(fakeBin, { recursive: true, force: true }));
+const childEnv = { FORCE_COLOR: '0' };
+for (const [key, value] of Object.entries(process.env)) if (key.toUpperCase() !== 'PATH' && key.toUpperCase() !== 'PATHEXT') childEnv[key] = value;
+childEnv.PATH = fakeBin;
+childEnv.PATHEXT = '.COM;.EXE;.BAT;.CMD';
+
+// On Windows a .cmd shim runs as one command line with no args array, so read
+// the resolved file and the words from either form.
 function command({ file, args }) {
 	let words = args;
 	if (args.length === 0) {
@@ -31,13 +46,14 @@ function command({ file, args }) {
 		file = match[1].replace(/^"|"$/g, '');
 		words = match[2] ? match[2].split(' ').map((word) => word.replace(/^"(.*)"$/, '$1')) : [];
 	}
+	if (process.platform === 'win32') expect(win32.dirname(file)).toBe(fakeBin);
 	return { name: win32.basename(file).replace(/\.(exe|cmd)$/i, '').toLowerCase(), args: words };
 }
 
 function terminal(args, steps) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, ['--import', preload, cli, ...args], {
-			cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FORCE_COLOR: '0' }
+			cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: childEnv
 		});
 		let output = '', next = 0;
 		const timer = setTimeout(() => { child.kill(); reject(new Error('CLI prompt timed out: ' + output)); }, 15000);

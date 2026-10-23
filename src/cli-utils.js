@@ -127,25 +127,54 @@ function winEnv(env, key) {
  * directory in order, each with every PATHEXT extension in order. Package
  * managers come as .cmd shims (npm, or pnpm and yarn through corepack) or as
  * native executables (the bun installer's bun.exe, standalone pnpm.exe), so
- * no single extension can be assumed. The working directory is not searched,
- * so a file in the project being created cannot stand in for the package
- * manager. Returns null when nothing matches.
+ * no single extension can be assumed. Only PATHEXT extensions that can be
+ * launched here (.com, .exe, .bat, .cmd) count; a pnpm.js earlier on PATH is
+ * passed over. Relative and drive-relative entries (`.`, `bin`, `C:foo`) are
+ * skipped, so the working directory is never searched and a file in the
+ * project being created cannot stand in for the package manager. Returns
+ * null when nothing matches.
  * @param {string} name
  * @param {Record<string, string | undefined>} env
  * @param {(path: string) => boolean} isFile
  * @returns {string | null}
  */
 export function findWindowsCommand(name, env, isFile) {
-	const exts = (winEnv(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
-	for (const entry of (winEnv(env, 'PATH') || '').split(';')) {
-		const dir = entry.trim().replace(/^"(.*)"$/, '$1');
-		if (!dir) continue;
+	const listed = (winEnv(env, 'PATHEXT') || '')
+		.split(';')
+		.map((ext) => ext.trim().toLowerCase())
+		.filter((ext) => RUNNABLE_EXTS.includes(ext));
+	const exts = listed.length ? listed : RUNNABLE_EXTS;
+	for (const dir of splitWindowsPath(winEnv(env, 'PATH') || '')) {
+		if (!win32.isAbsolute(dir) || /^[A-Za-z]:(?![\\/])/.test(dir)) continue;
 		for (const ext of exts) {
-			const candidate = win32.join(dir, name + ext.toLowerCase());
+			const candidate = win32.join(dir, name + ext);
 			if (isFile(candidate)) return candidate;
 		}
 	}
 	return null;
+}
+
+const RUNNABLE_EXTS = ['.com', '.exe', '.bat', '.cmd'];
+
+/**
+ * Split a Windows PATH value into directories. A double-quoted entry may
+ * contain `;`; the quotes themselves are not part of the directory.
+ * @param {string} value
+ * @returns {string[]}
+ */
+function splitWindowsPath(value) {
+	const dirs = [];
+	let current = '';
+	let quoted = false;
+	for (const char of value) {
+		if (char === '"') quoted = !quoted;
+		else if (char === ';' && !quoted) {
+			dirs.push(current.trim());
+			current = '';
+		} else current += char;
+	}
+	dirs.push(current.trim());
+	return dirs.filter(Boolean);
 }
 
 /**

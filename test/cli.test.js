@@ -424,9 +424,38 @@ describe('Windows command resolution', () => {
 		expect(findWindowsCommand('pnpm', { PATH: 'C:\\b' }, fakeFs(both))).toBe('C:\\b\\pnpm.exe');
 	});
 
-	it('does not search the working directory', () => {
-		expect(findWindowsCommand('npm', { PATH: 'C:\\nodejs' }, (path) => !path.includes('\\') || path === 'npm.cmd')).toBeNull();
+	it('does not search the working directory or relative PATH entries', () => {
+		const seen = [];
+		const everything = (path) => (seen.push(path), true);
+		expect(findWindowsCommand('npm', { PATH: '.;bin;C:foo;..\\tools' }, everything)).toBeNull();
+		expect(seen).toEqual([]);
+		expect(findWindowsCommand('npm', { PATH: '.;bin;C:foo;C:\\nodejs' }, everything)).toBe('C:\\nodejs\\npm.com');
+		expect(seen).toEqual(['C:\\nodejs\\npm.com']);
 		expect(findWindowsCommand('npm', { PATH: '' }, () => true)).toBeNull();
+	});
+
+	it('considers only launchable PATHEXT extensions, in PATHEXT order', () => {
+		const isFile = fakeFs(['C:\\early\\pnpm.js', 'C:\\early\\pnpm.vbs', 'C:\\late\\pnpm.cmd']);
+		const pathext = '.JS;.VBS;.CMD;.EXE';
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\early;C:\\late', PATHEXT: pathext }, isFile)).toBe('C:\\late\\pnpm.cmd');
+		// A PATHEXT naming nothing launchable falls back to the Windows default list.
+		expect(findWindowsCommand('pnpm', { PATH: 'C:\\early;C:\\late', PATHEXT: '.JS' }, isFile)).toBe('C:\\late\\pnpm.cmd');
+	});
+
+	it('splits PATH around quoted entries that contain a semicolon', () => {
+		const isFile = fakeFs(['C:\\tools;v2\\bun.exe']);
+		expect(findWindowsCommand('bun', { PATH: 'C:\\nodejs;"C:\\tools;v2";C:\\other' }, isFile)).toBe('C:\\tools;v2\\bun.exe');
+		expect(findWindowsCommand('bun', { PATH: 'C:\\tools;v2' }, isFile)).toBeNull();
+	});
+
+	it('quotes a resolved shim path with & or ^ and refuses one with % or !', () => {
+		const shims = ['C:\\R&D\\npm.cmd', 'C:\\a^b\\yarn.cmd', 'C:\\100%\\pnpm.cmd', 'C:\\Hey!\\bun.cmd'];
+		const env = { PATH: 'C:\\R&D;C:\\a^b;C:\\100%;C:\\Hey!' };
+		const isFile = fakeFs(shims);
+		expect(windowsCommand('npm', ['run', 'build'], env, isFile).file).toBe('"C:\\R&D\\npm.cmd" run build');
+		expect(windowsCommand('yarn', ['run', 'build'], env, isFile).file).toBe('"C:\\a^b\\yarn.cmd" run build');
+		expect(() => windowsCommand('pnpm', ['run', 'build'], env, isFile)).toThrow(/cannot be passed through cmd.exe: C:\\100%\\pnpm.cmd/);
+		expect(() => windowsCommand('bun', ['run', 'build'], env, isFile)).toThrow(/cannot be passed through cmd.exe: C:\\Hey!\\bun.cmd/);
 	});
 
 	it('runs an executable with an args array and a shim through one quoted command line', () => {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isBuiltin } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -61,16 +62,31 @@ describe('scaffold Node prerequisite', () => {
 	}, PROCESS_TEST_TIMEOUT);
 
 	it('keeps npm exec package selection out of the nested sv create', () => {
-		const result = runCli('24.13.1', ['example-app', '--template', 'example'], {
-			...process.env,
-			npm_config_package: 'svelte-realtime@0.0.0',
-			npm_config_call: 'svelte-realtime',
-			npm_config_registry: 'http://127.0.0.1:9/',
-			NODE_ENV: 'production'
-		});
+		// On Windows the CLI looks npx up through PATH; a placeholder npx.cmd keeps
+		// the result independent of the machine. execFileSync is stubbed, so it never runs.
+		const bin = mkdtempSync(join(tmpdir(), 'realtime-floor-bin-'));
+		let result;
+		try {
+			writeFileSync(join(bin, 'npx.cmd'), '');
+			const env = {};
+			for (const [key, value] of Object.entries(process.env)) if (!/^path(ext)?$/i.test(key)) env[key] = value;
+			result = runCli('24.13.1', ['example-app', '--template', 'example'], {
+				...env,
+				PATH: bin,
+				PATHEXT: '.COM;.EXE;.BAT;.CMD',
+				npm_config_package: 'svelte-realtime@0.0.0',
+				npm_config_call: 'svelte-realtime',
+				npm_config_registry: 'http://127.0.0.1:9/',
+				NODE_ENV: 'production'
+			});
+		} finally {
+			rmSync(bin, { recursive: true, force: true });
+		}
 		const reached = JSON.parse(result.output.match(/EXTERNAL_COMMAND_REACHED (\{[^\r\n]+\})/)[1]);
 		// A .cmd shim on Windows runs as one command line in place of an args array.
 		expect([reached.file, ...reached.args].join(' ').split(' ')).toContain('sv@1.1.1');
+		const shim = join(bin, 'npx.cmd');
+		if (process.platform === 'win32') expect([shim, '"' + shim + '"'].some(prefix => reached.file.startsWith(prefix + ' '))).toBe(true);
 		expect(reached.env).toContain('npm_config_registry');
 		expect(reached.env).not.toContain('npm_config_package');
 		expect(reached.env).not.toContain('npm_config_call');
