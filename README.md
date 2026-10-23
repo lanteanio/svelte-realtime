@@ -671,7 +671,7 @@ Handle loading in your template:
 {/if}
 ```
 
-To show errors, subscribe to `.error` and resolve `code` plus `params` through an app-owned [localized error resolver](docs/error-metadata.md). `message` is the source-English fallback, not a translation key:
+To show errors, subscribe to `.error`. `code` is the stable key and `message` is the source-English fallback, not a translation key: an English-only app can render `message` as the quickstart does, and an app that localizes resolves `code` plus `params` through an optional app-owned [error resolver](docs/error-metadata.md), which this and later examples import as `$lib/error-text`:
 
 ```svelte
 <script>

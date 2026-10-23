@@ -19,8 +19,8 @@ caller. The framework never infers metadata from a message, a cause, or arbitrar
 error properties. Ordinary server errors remain masked as `INTERNAL_ERROR`.
 Authentication and authorization checks still decide who can receive a result.
 
-Create this app-owned resolver, then import it in components as
-`$lib/error-text`. Add your own codes and connect the locale argument to your
+To localize, create this optional app-owned resolver and import it in
+components as `$lib/error-text`. Add your own codes and connect the locale argument to your
 application's locale store. The resolver validates parameters before formatting
 and uses a generic localized message for unknown codes rather than displaying
 unexpected server text.
