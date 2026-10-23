@@ -2193,7 +2193,7 @@ Custom denial reasons returned from a server-side `subscribe` hook (e.g. `'KYC_P
 
 ### Revoking access to open subscriptions
 
-Guards decide at subscribe time. When a role, assignment or session can be revoked while a stream stays open, add `realtime({ authorizeDelivery: (ctx, delivery) => ... })`: the policy runs for every outbound message to every recipient on every worker (RPC, upload and protocol responses excepted), sees the `kind`, wire `topic`, `event`, `data` and the admitting stream's `rpc` and `args`, and only a literal `true` delivers. A refusal closes that connection with 1013. It requires svelte-adapter-uws 0.6.0-next.97 or newer and fails startup without it. See [delivery authorization](docs/delivery-authorization.md).
+Guards decide at subscribe time. When a role, assignment or session can be revoked while a stream stays open, add `realtime({ authorizeDelivery: (ctx, delivery) => ... })`: the policy runs for every outbound message to every recipient on every worker (RPC, upload and protocol responses excepted), sees the `kind`, wire `topic`, `event`, `data` and the admitting stream's `rpc` and `args`, and only a literal `true` delivers. A refusal closes that connection with 1013. It requires svelte-adapter-uws 0.6.0-next.97 or newer and fails startup without it. Export `init` from the same `realtime()` call: without it, the policy and the strict wire-subscribe check only take effect once a connection reaches a realtime hook. See [delivery authorization](docs/delivery-authorization.md).
 
 ---
 

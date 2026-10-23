@@ -99,7 +99,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `realtime({ authorizeDelivery })` installs a per-recipient delivery policy on the adapter (`platform.authorizeDelivery`). It receives the live context and a frozen descriptor with `kind` (`message`, `replay`, `snapshot`, `request`), wire `topic` (`null` for requests), `event`, `data`, `binary`, and the `rpc` and a copy of the `args` of the stream that first admitted the topic, kept for frames still held after it left. RPC, upload and protocol responses pass without a check. See [delivery authorization](docs/delivery-authorization.md).
 
-- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws. Without an `init` export, `open` installs the policy; a connection the policy cannot cover is closed with 1011. One policy per process: a second `realtime()` call naming another policy throws.
+- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws. Without an `init` export, `open` installs the policy; a connection the policy cannot cover is closed with 1011. A later `realtime()` call with a policy replaces it in place, as a dev reload of `hooks.ws` does; changing the options after install throws.
+
+- Without an `init` export, both the delivery policy and the strict wire-subscribe check take effect only once a connection reaches a realtime hook; export `init` from `realtime()` so they hold from the first connection.
 
 ### Changed
 

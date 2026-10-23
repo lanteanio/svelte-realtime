@@ -247,6 +247,18 @@ describe.skipIf(!NATIVE)('delivery authorization on the adapter policy (requires
 		expect(seen.find((d) => d.data?.id === 'unsub-queued')).toMatchObject({ rpc: 'scan/log', args: ['e6'] });
 	});
 
+	it('lets a later realtime() call replace the running policy, as a dev reload does', async () => {
+		const { connect } = await start(() => true);
+		api.realtime({ authorizeDelivery: policy });
+		grant('victim', 'e9');
+		const victim = await connect('victim');
+		await subscribe(victim, 'e9');
+		revoke('victim');
+		server.platform.publish('scans:e9', 'created', { id: 'reloaded-after' });
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(has(victim, 'reloaded-after')).toBe(false);
+	});
+
 	it('passes the adapter its own option validation', async () => {
 		const hooks = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { unknownBound: 1 } });
 		await expect(createTestServer({ handler: hooks })).rejects.toThrow(/unknownBound/);

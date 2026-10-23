@@ -4470,8 +4470,9 @@ export function realtime(config) {
 		},
 	};
 	if (deliveryPolicy !== null) {
-		// Fail closed at every connection hook, so a policy is never silently
-		// skipped when the app does not export init.
+		// Without init, the first connection hook installs the policy. open and
+		// message refuse to serve a connection the policy cannot cover;
+		// unsubscribe and close still run their cleanup after closing it.
 		const policy = deliveryPolicy;
 		hooks.open = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform, policy, true)) return pushHooks.open(ws, ctx); };
 		hooks.message = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform, policy, false)) return message(ws, ctx); };

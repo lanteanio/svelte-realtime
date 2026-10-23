@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 116 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 118 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -956,6 +956,20 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>A cron handler failed; the scheduler remains active.</code>
 - Owning sources: [src/server/cron-engine.js](../src/server/cron-engine.js)
 
+<a id="diagnostic-delivery-authorization.unavailable"></a>
+### <code>delivery-authorization.unavailable</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>A delivery policy is configured but could not be installed; connections are closed.</code>
+- Owning sources: [src/server/delivery-authorization.js](../src/server/delivery-authorization.js)
+
+<a id="diagnostic-delivery-authorization.unguarded"></a>
+### <code>delivery-authorization.unguarded</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>A connection reached realtime before its delivery policy was installed; export init or open from realtime(). The connection is closed.</code>
+- Owning sources: [src/server/delivery-authorization.js](../src/server/delivery-authorization.js)
+
 <a id="diagnostic-direct-call.fallback.used"></a>
 ### <code>direct-call.fallback.used</code>
 
@@ -1144,7 +1158,6 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server.js:2235</code>
 - <code>src/server.js:3239</code>
 - <code>src/server/ctx.js:113</code>
-- <code>src/server/delivery-authorization.js:274</code>
 - <code>src/server/dispatch.js:1298</code>
 - <code>src/server/dispatch.js:1412</code>
 - <code>src/server/dispatch.js:1659</code>

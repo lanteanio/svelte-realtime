@@ -13,15 +13,22 @@ the server does not start, so a version mismatch cannot silently drop the
 check. Export `init`, or at least `open`, from the same `realtime()` call:
 without `init` the policy is installed by the first connection's `open` hook.
 If it cannot be installed, every connection is closed with 1011 and a
-`delivery-authorization.unavailable` error is logged once. A connection that
-reaches realtime's `message`, `unsubscribe` or `close` hook without passing
-its `open` hook after the policy was installed may already have received
-frames no policy checked; it is closed with 1011 and a
-`delivery-authorization.unguarded` error is logged once.
+`delivery-authorization.unavailable` error is logged once. When neither
+`init` nor `open` is exported, the first connection to reach realtime's
+`message`, `unsubscribe` or `close` hook installs the policy; that
+connection was open before any policy existed, so it is closed with 1011 and a
+`delivery-authorization.unguarded` error is logged once. Connections first seen
+after the install are covered. Frames the adapter sends to a connection before
+its first realtime hook (for example after a client subscribe frame) are
+checked only once the policy is installed, and without `init` the strict
+wire-subscribe check is armed at that point too: export `init`.
 
-The adapter runs one policy per worker, so configure it in one `realtime()`
-call. Another `realtime()` call without `authorizeDelivery` leaves it in place;
-one naming a different policy or different options throws. Without the option, nothing changes: subscription admission and native
+The adapter runs one policy per worker. A later `realtime()` call with a
+policy replaces the function in place (a dev reload of `hooks.ws` does this),
+without reinstalling it; once installed, a call with different
+`deliveryAuthorizationOptions` throws, because the adapter's bounds are fixed.
+A `realtime()` call without `authorizeDelivery` leaves the policy in place.
+Without the option, nothing changes: subscription admission and native
 delivery behave as before.
 
 <!-- doc-code: ambient names="db" -->
