@@ -395,8 +395,8 @@ try {
 			// A fresh socket must see the current registry even after route reloads.
 			await connectSocket(origin);
 			const echoed = await rpc('echo', ['route-reload']);
-			assert.equal(echoed.ok, true, JSON.stringify(echoed));
-			assert.deepEqual(echoed.data, { value: 'route-reload', token: 'fixture-secret', label: 'updated' });
+			assert.equal(echoed.ok, true, RELOAD + ': ' + JSON.stringify(echoed));
+			assert.deepEqual(echoed.data, { value: 'route-reload', token: 'fixture-secret', label: 'updated' }, RELOAD);
 			const baselineResponse = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(baselineResponse.status, 200);
 			const baseline = (await baselineResponse.json()).count;
@@ -461,7 +461,7 @@ try {
 			await writeFile(addedFile, "import { live } from 'svelte-realtime/server';\nimport { state } from '../lib/server/state.js';\nexport const read = live(() => state.count);\n");
 			await waitForRpc('extra/read', result => result.ok === true);
 			const count = await sharedStores(addedAt);
-			assert.equal((await rpc('extra/read')).data, count);
+			assert.equal((await rpc('extra/read')).data, count, SPLIT + ': the new live file reads another count');
 		});
 		await check('removed live files unregister without splitting state', async () => {
 			const removedAt = Date.now();
