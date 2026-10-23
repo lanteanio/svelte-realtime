@@ -4,13 +4,16 @@ Stream guards and loaders decide who may subscribe. They run once, at
 subscribe time. When access can change while a subscription is open (a role
 is demoted, an assignment is removed, a session is revoked), configure
 `realtime({ authorizeDelivery })`: the policy runs again for every outbound
-message to every recipient and can stop delivery to a connection that lost
-access.
+message to every recipient (RPC, upload and protocol responses excepted, see
+below) and can stop delivery to a connection that lost access.
 
 This option requires svelte-adapter-uws 0.6.0-next.97 or newer, which provides
 `platform.authorizeDelivery`. With an older adapter, the `init` hook throws and
 the server does not start, so a version mismatch cannot silently drop the
-check. Without the option, nothing changes: subscription admission and native
+check. An app that does not export `init` gets the policy installed on its
+first connection instead; if that fails, every connection is closed with 1011
+before realtime serves it, and a `delivery-authorization.unavailable` error is
+logged once. Without the option, nothing changes: subscription admission and native
 delivery behave as before.
 
 <!-- doc-code: ambient names="db" -->
@@ -36,27 +39,35 @@ export const { open, close, message, unsubscribe, init, shutdown } = realtime({
 ## What the policy receives
 
 The callback receives the connection's live context (`ctx.user`, `ctx.ws`,
-`ctx.platform`, `ctx.tenantId`) and a frozen descriptor:
+`ctx.tenantId`, and `ctx.platform`, which is the worker's platform rather than a
+per-request view) and a frozen descriptor:
 
 | Field | Meaning |
 | --- | --- |
 | `kind` | `message` (publishes and sends), `replay` (replayed frames and a stream's replay response), `snapshot` (a stream's initial data inside its RPC response), `request` (`platform.request`). Branch on it first. |
 | `topic` | Wire topic, including any tenant prefix. Replay is shown under the topic it replays. `null` for a request, which is addressed to one socket. |
 | `event` | Event name, or `null` for a binary frame, a snapshot, or an envelope that names none. |
-| `data` | The parsed payload; `undefined` for a binary frame. |
+| `data` | The parsed payload; `undefined` for a binary frame. A replayed frame carries the replay envelope (`{ seq, event, data }` for `msg`, `null` or `{ truncated: true }` for `end`, plus `reqId` when the client asked with one); a replay response carries the array of missed events. |
 | `binary` | Whether the frame is binary. |
-| `rpc`, `args` | The stream RPC path that admitted `topic` on this connection and a frozen copy of its validated arguments, or `null`. |
+| `rpc`, `args` | The stream RPC path that admitted `topic` on this connection and a copy of its validated arguments, or `null`. Plain data is frozen; arguments holding a `Map`, `Set`, `Date` or binary value are copied afresh for each call. |
 
 Dynamic derived output topics are opaque hashes: identify their resource by
-`rpc` and `args` instead of parsing the topic. Raw adapter subscriptions,
-signals, presence and other system channels have `rpc: null`; authorize them
-by their exact topic. Requests have `topic: null`; decide them on `event` and
+`rpc` and `args` instead of parsing the topic. A topic the connection joined
+outside a stream RPC (a raw adapter subscription, signals, and channels a room
+or plugin joins itself, such as presence) has `rpc: null`; authorize it by its
+exact topic. Requests have `topic: null`; decide them on `event` and
 `data`. Deny whatever the policy does not recognize.
 
 RPC results, upload responses and protocol frames are not shown to the
 policy: each answers a request that already passed its own guard. Stream
 snapshots and replay inside an RPC response are shown, one call per stream
 in a batch response.
+
+When several streams on one connection resolve to the same topic, the first
+admission names it (`rpc` and `args`) until the connection leaves the topic.
+After an unsubscribe, a frame still held for that topic keeps its
+attribution; the connection remembers its last 64 retired topics, and a
+closed connection forgets all of them.
 
 ## Answers and closes
 
@@ -98,8 +109,7 @@ every worker; `realtime()` in the shared `hooks.ws` file does that.
 
 The decision covers the state the callback read. A frame already handed to the
 transport, kernel buffers and data the client already received cannot be
-recalled. A frame still held when its stream unsubscribes reaches the policy
-with `rpc: null`. Direct `ws.send` and `ws.publish` calls bypass the adapter
+recalled. Direct `ws.send` and `ws.publish` calls bypass the adapter
 and the policy; publish and send through the platform instead.
 
 This is per-delivery authorization, not a notification that access changed:

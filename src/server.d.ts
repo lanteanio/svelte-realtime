@@ -4864,9 +4864,13 @@ export interface RealtimeDelivery {
 	/** Parsed payload; undefined for a binary frame. */
 	data: unknown;
 	binary: boolean;
-	/** RPC path of the stream that admitted `topic` on this connection, or null (raw subscriptions, requests). */
+	/**
+	 * RPC path of the stream that first admitted `topic` on this connection
+	 * (kept for frames still held after it left), or null for raw
+	 * subscriptions and requests.
+	 */
 	rpc: string | null;
-	/** Frozen copy of that stream's validated arguments, or null. */
+	/** Copy of that stream's validated arguments (frozen plain data), or null. */
 	args: readonly unknown[] | null;
 }
 
@@ -4902,8 +4906,9 @@ export interface RealtimeConfig {
 	 * protocol responses are not shown; their guards already ran.
 	 *
 	 * Requires svelte-adapter-uws 0.6.0-next.97 or newer: `init` throws when
-	 * the adapter has no `platform.authorizeDelivery`. Without this option
-	 * nothing changes. See docs/delivery-authorization.md.
+	 * the adapter has no `platform.authorizeDelivery`; without an `init` export
+	 * each connection is closed with 1011 instead. Without this option nothing
+	 * changes. See docs/delivery-authorization.md.
 	 */
 	authorizeDelivery?: (ctx: LiveContext<any>, delivery: RealtimeDelivery) => boolean | PromiseLike<boolean>;
 	/** Bounds passed to the adapter's delivery policy. Requires `authorizeDelivery`. */

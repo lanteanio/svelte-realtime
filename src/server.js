@@ -123,7 +123,7 @@ export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 import { createShortCode } from './shared/short-code.js';
-import { installDeliveryAuthorization, forgetDeliverySubscription, validateDeliveryAuthorizationConfig } from './server/delivery-authorization.js';
+import { configureDeliveryAuthorization, ensureDeliveryAuthorization, guardDeliveryAuthorization, forgetDeliverySubscription } from './server/delivery-authorization.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers };
 
@@ -4334,9 +4334,10 @@ export function realtime(config) {
 	const cfg = config || {};
 	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, authorizeDelivery, deliveryAuthorizationOptions } = cfg;
 
-	// Per-recipient delivery authorization (opt-in). Validated here; installed
-	// on the adapter in init, which fails when the adapter lacks the capability.
-	validateDeliveryAuthorizationConfig(authorizeDelivery, deliveryAuthorizationOptions);
+	// Per-recipient delivery authorization (opt-in). Validated here and installed
+	// at the first capture point: init fails without the adapter capability, and
+	// an app without an init export has each connection closed instead.
+	configureDeliveryAuthorization(authorizeDelivery, deliveryAuthorizationOptions);
 
 	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over
@@ -4445,7 +4446,7 @@ export function realtime(config) {
 					);
 				}
 			}
-			if (authorizeDelivery !== undefined) installDeliveryAuthorization(ctx.platform, authorizeDelivery, deliveryAuthorizationOptions);
+			if (authorizeDelivery !== undefined) ensureDeliveryAuthorization(ctx.platform);
 			setCronPlatform(ctx.platform);
 			_activateDerived(ctx.platform);
 		},
@@ -4458,6 +4459,12 @@ export function realtime(config) {
 			return _runShutdown(ctx);
 		},
 	};
+	if (authorizeDelivery !== undefined) {
+		// Fail closed at every connection entry point, so a policy is never
+		// silently skipped when the app does not export init.
+		hooks.open = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform)) return pushHooks.open(ws, ctx); };
+		hooks.message = (ws, ctx) => { if (guardDeliveryAuthorization(ws, ctx?.platform)) return message(ws, ctx); };
+	}
 	if (typeof upgradeFn === 'function') /** @type {any} */ (hooks).upgrade = upgradeFn;
 	// Admin / observability plane (opt-in, fail-closed): `admin: { requires }` adds
 	// a Web Request -> Response handler for the reserved `/__realtime/*` path. With

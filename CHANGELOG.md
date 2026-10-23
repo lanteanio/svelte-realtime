@@ -97,9 +97,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.metrics()` registers `svelte_realtime_webhook_dead_letter_failures_total`, counting failed webhook deliveries whose dead-letter write threw or rejected. Each one also emits the `webhook.dead-letter.persist-failed` operational event, so an empty dead-letter store can be told apart from a store that lost records.
 
-- `realtime({ authorizeDelivery })` installs a per-recipient delivery policy on the adapter (`platform.authorizeDelivery`). It receives the live context and a frozen descriptor with `kind` (`message`, `replay`, `snapshot`, `request`), wire `topic` (`null` for requests), `event`, `data`, `binary`, and the admitting stream's `rpc` and frozen `args`. RPC, upload and protocol responses pass without a check. See [delivery authorization](docs/delivery-authorization.md).
+- `realtime({ authorizeDelivery })` installs a per-recipient delivery policy on the adapter (`platform.authorizeDelivery`). It receives the live context and a frozen descriptor with `kind` (`message`, `replay`, `snapshot`, `request`), wire `topic` (`null` for requests), `event`, `data`, `binary`, and the `rpc` and a copy of the `args` of the stream that first admitted the topic, kept for frames still held after it left. RPC, upload and protocol responses pass without a check. See [delivery authorization](docs/delivery-authorization.md).
 
-- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws.
+- `deliveryAuthorizationOptions` passes `maxPendingBytes` and `timeoutMs` to the adapter, which validates them. A policy answer reaches the adapter unchanged: a refusal closes with 1013, a throw, non-boolean answer or timeout with 1011. Without the adapter capability, `init` throws; an app that exports no `init` installs the policy on its first connection and closes connections with 1011 when it cannot.
 
 ### Changed
 

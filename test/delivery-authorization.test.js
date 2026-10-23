@@ -1,5 +1,8 @@
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, vi } from 'vitest';
 import { createTestEnv } from '../src/testing.js';
+import { mockWs } from './helpers/mock-ws.js';
+import { mockPlatform } from './helpers/mock-platform.js';
+import { toArrayBuffer } from './helpers/encode.js';
 import { realtime } from '../src/server.js';
 import { installDeliveryAuthorization, rememberDeliverySubscription, forgetDeliverySubscription } from '../src/server/delivery-authorization.js';
 
@@ -77,7 +80,7 @@ describe('delivery authorization bridge', () => {
 			['replay', 'checkin/stats~opaque', 'checkin/stats', ['org', { event: 'e1' }]]
 		]);
 		expect(Object.isFrozen(seen[0].args[1])).toBe(true);
-		forgetDeliverySubscription(ws, 'checkin/stats~opaque');
+		forgetDeliverySubscription(ws);
 		gate({ topic: 'checkin/stats~opaque', event: 'set', data: 6 });
 		expect(seen[4].rpc).toBeNull();
 	});
@@ -113,10 +116,112 @@ describe('delivery authorization bridge', () => {
 		expect(order).toEqual(['a', 'b', 'c']);
 	});
 
-	it('does not retain stream metadata for a platform that did not opt in', () => {
-		const { ws, gate } = setup((_ctx, frame) => frame.rpc === null);
-		const other = createTestEnv(); environments.push(other);
-		rememberDeliverySubscription(ws, other.platform, 'other', 'private/rpc', ['secret']);
-		expect(gate({ topic: 'other', event: 'set', data: null })).toBe(true);
+	it('keeps no stream metadata while no policy is configured', async () => {
+		vi.resetModules();
+		const fresh = await import('../src/server/delivery-authorization.js');
+		const ws = {};
+		expect(fresh.rememberDeliverySubscription(ws, {}, 'other', 'private/rpc', ['secret'])).toBe(false);
+		let gate;
+		fresh.installDeliveryAuthorization({ authorizeDelivery: (callback) => { gate = callback; } }, (_ctx, frame) => frame, undefined);
+		const seen = gate({ getUserData: () => ({}) }, { kind: 'message', topic: 'other', event: 'set', data: null, binary: false });
+		expect(seen.rpc).toBeNull();
+	});
+
+	it('attributes topics admitted through a platform that does not inherit from the policy platform', () => {
+		const seen = [];
+		const { ws, gate } = setup((_ctx, frame) => { seen.push(frame); return true; });
+		const busWrapped = { publish() {}, subscribe() {} };
+		rememberDeliverySubscription(ws, busWrapped, 'scans:e1', 'scan/log', ['e1']);
+		gate({ topic: 'scans:e1', event: 'created', data: 1 });
+		expect(seen[0]).toMatchObject({ rpc: 'scan/log', args: ['e1'] });
+	});
+
+	it('keeps the attribution of a retired topic for frames still held, bounded per socket', () => {
+		const seen = [];
+		const { env, ws, gate } = setup((_ctx, frame) => { seen.push(frame); return true; });
+		rememberDeliverySubscription(ws, env.platform, 'scans:e1', 'scan/log', ['e1']);
+		forgetDeliverySubscription(ws, 'scans:e1');
+		gate({ topic: 'scans:e1', event: 'created', data: 1 });
+		expect(seen[0]).toMatchObject({ rpc: 'scan/log', args: ['e1'] });
+		// Resubscribing records the new admission.
+		rememberDeliverySubscription(ws, env.platform, 'scans:e1', 'scan/other', ['x']);
+		gate({ topic: 'scans:e1', event: 'created', data: 2 });
+		expect(seen[1].rpc).toBe('scan/other');
+		for (let i = 0; i < 65; i++) {
+			rememberDeliverySubscription(ws, env.platform, 'old:' + i, 'old/rpc', [i]);
+			forgetDeliverySubscription(ws, 'old:' + i);
+		}
+		gate({ topic: 'old:0', event: 'e', data: null });
+		gate({ topic: 'old:64', event: 'e', data: null });
+		expect(seen.slice(2).map((frame) => frame.rpc)).toEqual([null, 'old/rpc']);
+		forgetDeliverySubscription(ws);
+		gate({ topic: 'old:64', event: 'e', data: null });
+		expect(seen[4].rpc).toBeNull();
+	});
+
+	it('owns arguments that structured cloning rejects and keeps mutable values private per call', () => {
+		const seen = [];
+		const { env, ws, gate } = setup((_ctx, frame) => {
+			if (seen.push(frame) === 1) {
+				frame.args[1].set('k', 'tampered');
+				frame.args[3][0] = 9;
+			}
+			return true;
+		});
+		const fn = () => 1;
+		const sym = Symbol('id');
+		const args = [{ fn, sym, nested: { n: 1 } }, new Map([['k', 'v']]), new Date(0), new Uint8Array([1, 2]), Buffer.from('ab')];
+		expect(() => rememberDeliverySubscription(ws, env.platform, 'scans:e1', 'scan/log', args)).not.toThrow();
+		args[0].nested.n = 2;
+		args[1].set('k', 'mutated');
+		gate({ topic: 'scans:e1', event: 'created', data: 1 });
+		gate({ topic: 'scans:e1', event: 'created', data: 2 });
+		const [first, second] = seen;
+		expect(first.args[0]).toMatchObject({ fn, sym, nested: { n: 1 } });
+		expect(second.args[1].get('k')).toBe('v');
+		expect(second.args[3][0]).toBe(1);
+		expect(second.args[2].getTime()).toBe(0);
+		expect(Buffer.isBuffer(second.args[4]) && second.args[4].toString()).toBe('ab');
+		expect(first.args).not.toBe(second.args);
+		// Plain data is frozen once and shared.
+		const plain = setup((_ctx, frame) => { seen.push(frame); return true; });
+		rememberDeliverySubscription(plain.ws, plain.env.platform, 't', 'r', [{ a: [1] }]);
+		plain.gate({ topic: 't', event: 'e' });
+		plain.gate({ topic: 't', event: 'e' });
+		expect(seen[2].args).toBe(seen[3].args);
+		expect(Object.isFrozen(seen[2].args[0].a)).toBe(true);
+	});
+});
+
+describe('delivery authorization in stream dispatch', () => {
+	async function dispatchStream(api, platform, ws, path, id) {
+		expect(api.handleRpc(ws, toArrayBuffer({ rpc: path, id, args: ['e1'], stream: true }), platform)).toBe(true);
+		await vi.waitFor(() => expect(platform.sent.some((row) => row.topic === '__rpc' && row.event === id)).toBe(true));
+	}
+
+	it('attributes a topic before the adapter subscribe can deliver on it, and releases a refused admission', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const seen = [];
+		const platform = mockPlatform();
+		let gate;
+		platform.authorizeDelivery = (callback) => { gate = callback; };
+		const hooks = api.realtime({ authorizeDelivery: (_ctx, frame) => { seen.push(frame); return true; }, authorizeWireSubscribe: false });
+		hooks.init({ platform });
+		const ws = mockWs({ id: 'scanner' });
+		api.__register('scan/denied', api.live.stream((_ctx, e) => 'scans:' + e, async () => []));
+		api.__register('scan/log', api.live.stream((_ctx, e) => 'scans:' + e, async () => []));
+		const subscribe = platform.subscribe;
+		let refuse = true;
+		platform.subscribe = async (socket, topic) => {
+			// The adapter may deliver as soon as the membership exists.
+			gate(socket, { kind: 'message', topic, event: 'created', data: null, binary: false });
+			if (refuse) return 'FORBIDDEN';
+			return subscribe(socket, topic);
+		};
+		await dispatchStream(api, platform, ws, 'scan/denied', 'one');
+		refuse = false;
+		await dispatchStream(api, platform, ws, 'scan/log', 'two');
+		expect(seen.map((frame) => frame.rpc)).toEqual(['scan/denied', 'scan/log']);
 	});
 });

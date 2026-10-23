@@ -22,7 +22,7 @@ beforeEach(async () => {
 	assigned = new Map();
 	seen = [];
 	// Refusals and shutdown log diagnostics by design.
-	for (const method of ['warn', 'info', 'log']) vi.spyOn(console, method).mockImplementation(() => {});
+	for (const method of ['warn', 'info', 'log', 'error']) vi.spyOn(console, method).mockImplementation(() => {});
 });
 afterEach(async () => {
 	for (const client of clients.splice(0)) client.close();
@@ -32,12 +32,14 @@ afterEach(async () => {
 });
 
 /** @param {(ctx: any, delivery: any) => any} [authorize] @param {any} [options] */
-async function start(authorize = policy, options) {
+async function start(authorize = policy, options, { init = true } = {}) {
 	const hooks = api.realtime({ authorizeDelivery: authorize, ...(options ? { deliveryAuthorizationOptions: options } : {}) });
 	const ids = [];
 	const sockets = new Map();
+	const { init: initHook, ...rest } = hooks;
 	server = await createTestServer({ handler: {
-		...hooks,
+		...rest,
+		...(init ? { init: initHook } : {}),
 		open(ws, ctx) {
 			const id = ids.shift();
 			ws.getUserData().id = id;
@@ -82,6 +84,14 @@ describe.skipIf(NATIVE)('delivery authorization with an adapter that lacks platf
 	it('refuses to start an app that configured a delivery policy', async () => {
 		const hooks = api.realtime({ authorizeDelivery: () => true });
 		await expect(createTestServer({ handler: hooks })).rejects.toThrow('has no platform.authorizeDelivery');
+	});
+	it('closes every connection with 1011 when the app exports no init hook', async () => {
+		const { connect } = await start(policy, undefined, { init: false });
+		const client = await connect('victim');
+		client.ws.send(JSON.stringify({ rpc: 'scan/log', id: 'never', args: ['e1'], stream: true }));
+		await vi.waitFor(() => expect(client.closeCode).toBe(1011));
+		expect(client.frames.some((frame) => frame.event === 'never')).toBe(false);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('delivery-authorization.unavailable'));
 	});
 	it('starts an app without a delivery policy unchanged', async () => {
 		server = await createTestServer({ handler: api.realtime({}) });
@@ -175,8 +185,48 @@ describe.skipIf(!NATIVE)('delivery authorization on the adapter policy (requires
 		expect(has(victim, 'queued')).toBe(false);
 	});
 
+	it('installs the policy on the first connection when the app exports no init hook', async () => {
+		const { connect } = await start(policy, undefined, { init: false });
+		grant('victim', 'e7'); grant('control', 'e7');
+		const victim = await connect('victim');
+		const control = await connect('control');
+		await subscribe(victim, 'e7');
+		await subscribe(control, 'e7');
+		revoke('victim');
+		server.platform.publish('scans:e7', 'created', { id: 'no-init-after' });
+		await vi.waitFor(() => expect(has(control, 'no-init-after')).toBe(true));
+		await vi.waitFor(() => expect(victim.closeCode).toBe(REFUSED));
+		expect(has(victim, 'no-init-after')).toBe(false);
+	});
+
+	it('keeps a frame held across an unsubscribe attributed to its stream', async () => {
+		let release;
+		const gate = new Promise((resolve) => { release = resolve; });
+		let held = false;
+		const { connect, sockets } = await start((ctx, delivery) => {
+			if (ctx.user.id === 'victim' && delivery.kind === 'message' && delivery.data?.id === 'unsub-held' && !held) {
+				held = true;
+				const decision = policy(ctx, delivery);
+				return gate.then(() => decision);
+			}
+			return policy(ctx, delivery);
+		});
+		grant('victim', 'e6');
+		const victim = await connect('victim');
+		await subscribe(victim, 'e6');
+		server.platform.publish('scans:e6', 'created', { id: 'unsub-held' });
+		server.platform.publish('scans:e6', 'created', { id: 'unsub-queued' });
+		victim.ws.send(JSON.stringify({ type: 'unsubscribe', topic: 'scans:e6' }));
+		await vi.waitFor(() => expect(sockets.get('victim').isSubscribed('scans:e6')).toBe(false));
+		release();
+		await vi.waitFor(() => expect(has(victim, 'unsub-queued')).toBe(true));
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(victim.closeCode).toBeNull();
+		expect(seen.find((d) => d.data?.id === 'unsub-queued')).toMatchObject({ rpc: 'scan/log', args: ['e6'] });
+	});
+
 	it('passes the adapter its own option validation', async () => {
-		const hooks = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { maxPendingMessages: 1 } });
-		await expect(createTestServer({ handler: hooks })).rejects.toThrow(/maxPendingMessages/);
+		const hooks = api.realtime({ authorizeDelivery: () => true, deliveryAuthorizationOptions: { unknownBound: 1 } });
+		await expect(createTestServer({ handler: hooks })).rejects.toThrow(/unknownBound/);
 	});
 });

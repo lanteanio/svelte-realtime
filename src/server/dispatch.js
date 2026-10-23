@@ -29,7 +29,7 @@ import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceCla
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol, _takeUploadCapAnnouncement } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
-import { rememberDeliverySubscription } from './delivery-authorization.js';
+import { rememberDeliverySubscription, forgetDeliverySubscription } from './delivery-authorization.js';
 
 const textDecoder = new TextDecoder();
 
@@ -832,6 +832,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// working: if the method isn't there, we fall back to raw
 	// `ws.subscribe` and only the in-realtime gates (`__streamFilter`,
 	// `live.room({ guard })`) remain the stream-RPC access checks.
+	// Attribute the topic before the adapter can deliver on it: a frame
+	// published as soon as the subscribe takes effect reaches the delivery
+	// policy with this stream's rpc and args. A refused admission retires it.
+	const _attributed = rememberDeliverySubscription(ws, platform, topic, msg.rpc, streamArgs);
 	let _subscribeDenial = null;
 	try {
 		if (typeof platform.subscribe === 'function') {
@@ -848,9 +852,11 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			_subscribeDenial = _subscribeTracked(ws, topic);
 		}
 	} catch {
+		if (_attributed) forgetDeliverySubscription(ws, topic);
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
+	if (_subscribeDenial && _attributed) forgetDeliverySubscription(ws, topic);
 	if (_subscribeDenial === 'CONNECTION_CLOSED') {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
@@ -879,7 +885,6 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		_respond(ws, platform, id, { attach: true, topic });
 	}
 	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
-	rememberDeliverySubscription(ws, platform, topic, msg.rpc, streamArgs);
 	subscribedRef.topic = topic;
 
 	// Replay-topic + dynamic-piiRedact registration, performed only now that
