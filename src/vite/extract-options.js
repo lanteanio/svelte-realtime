@@ -1405,3 +1405,77 @@ export function _extractBraceContent(str) {
 	}
 	return null;
 }
+
+// - Stream wrappers -----------------------------------------------------------
+//
+// `live.public`, `live.gate` and `live.scoped` keep a wrapped stream a stream:
+// the server answers it only to a subscribe. The codegen reads declarations as
+// `export const name = live.stream(...)`, so a wrapped stream is read as the
+// stream it wraps; the wrapper changes access, not the client surface.
+
+const _WRAPPER_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.(public|gate|scoped)\s*\(/g;
+const _STREAM_KIND_RE = /^live\.(stream|channel|derived|aggregate|flag)\s*\(/;
+const _WRAPPER_CALL_RE = /^live\.(public|gate|scoped)\s*\(/;
+
+/**
+ * Rewrite each `export const name = live.public|gate|scoped(..., live.<stream kind>(...))`
+ * so the declaration reads `export const name = live.<stream kind>(...)`. Line
+ * breaks are kept so positions in messages stay right. `live.public` leaves a
+ * `realtime-allow-public` comment, which carries its module-wide meaning.
+ * `live.gate` and `live.scoped` wrap the stream function itself, which a
+ * derived, aggregate or flag export cannot be registered through, so those
+ * fail the build.
+ * @param {string} source
+ * @param {string} [file]
+ * @returns {string}
+ */
+export function _unwrapStreamWrappers(source, file) {
+	if (!source.includes('live.public') && !source.includes('live.gate') && !source.includes('live.scoped')) return source;
+	const blank = (/** @type {string} */ text) => text.replace(/[^\n]/g, ' ');
+	let out = '';
+	let last = 0;
+	_WRAPPER_EXPORT_RE.lastIndex = 0;
+	let m;
+	scan: while ((m = _WRAPPER_EXPORT_RE.exec(source)) !== null) {
+		const name = m[1];
+		/** @type {string[]} */
+		const wrappers = [];
+		/** @type {Array<[number, number]>} */
+		const cuts = [];
+		let pos = m.index + m[0].lastIndexOf('live.');
+		for (;;) {
+			const w = _WRAPPER_CALL_RE.exec(source.slice(pos, pos + 24));
+			if (!w) break;
+			const open = pos + w[0].length;
+			let innerStart = _skipBlank(source, open);
+			if (w[1] !== 'public') {
+				const predEnd = _expressionEnd(source, open);
+				if (source[predEnd] !== ',') continue scan;
+				innerStart = _skipBlank(source, predEnd + 1);
+			}
+			const innerEnd = _expressionEnd(source, innerStart);
+			let close = innerEnd;
+			if (source[close] === ',') close = _skipBlank(source, close + 1);
+			if (source[close] !== ')') continue scan;
+			wrappers.push(w[1]);
+			cuts.push([pos, innerStart], [innerEnd, close + 1]);
+			pos = innerStart;
+		}
+		const kind = _STREAM_KIND_RE.exec(source.slice(pos, pos + 32));
+		if (!kind) continue;
+		const wrapping = wrappers.find((w) => w !== 'public');
+		if (wrapping && kind[1] !== 'stream' && kind[1] !== 'channel') {
+			throw new Error(
+				`[svelte-realtime] ${file ? file + ': ' : ''}'${name}' wraps live.${kind[1]}() in live.${wrapping}(), which cannot be registered as a ${kind[1]}. ` +
+				`Export the live.${kind[1]}() itself and gate access with the module _guard.\n  See: https://svti.me/streams`
+			);
+		}
+		cuts.sort((x, y) => x[0] - y[0]);
+		for (const [from, to] of cuts) {
+			out += source.slice(last, from) + blank(source.slice(from, to));
+			last = to;
+		}
+		if (wrappers.includes('public')) out += ' /* realtime-allow-public */';
+	}
+	return last === 0 ? source : out + source.slice(last);
+}

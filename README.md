@@ -825,7 +825,7 @@ This removes the `{#if}/{:else}` boilerplate from every page that uses a stream.
 
 ## Per-module auth
 
-Every file in `src/live/` can export a `_guard` that runs before all functions in that file. For an intentionally open RPC, use `live.public(fn)`, for example `export const serverTime = live.public(() => Date.now())`. It preserves the handler and generates the usual `$live` client callable; it does not bypass an existing `_guard`, middleware or transport authorization. One public marker suppresses the missing-guard build warning for the whole module, so keep protected handlers in guarded modules.
+Every file in `src/live/` can export a `_guard` that runs before all functions in that file. For an intentionally open RPC, use `live.public(fn)`, for example `export const serverTime = live.public(() => Date.now())`. It preserves the handler and generates the usual `$live` client callable, or the stream store when it wraps a stream (`live.public(live.stream(...))`); it does not bypass an existing `_guard`, middleware or transport authorization. One public marker suppresses the missing-guard build warning for the whole module, so keep protected handlers in guarded modules.
 
 ```js
 // src/live/admin.js
