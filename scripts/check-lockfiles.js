@@ -112,10 +112,12 @@ function regenerateHint(label, flags) {
 
 /**
  * npm ci accepts a lock whose recorded versions trail the manifests they came
- * from: the lock's own name and version, and the packed copy that a lock written
- * with --install-links keeps of each file: dependency (its version and
- * dependency ranges). A version bump of this checkout leaves both behind, so
- * compare them with their sources directly.
+ * from: the lock's own name and version, the packed copy that a lock written
+ * with --install-links keeps of each file: dependency, and the link target
+ * entry that a linked lock keeps of each file: dependency (keyed by its
+ * relative path, with no resolved field). A version bump of this checkout
+ * leaves all of them behind, so compare their version and dependency ranges
+ * with their sources directly.
  */
 function checkRecordedManifests(directory, flags, label) {
 	const lockPath = join(directory, 'package-lock.json');
@@ -129,16 +131,24 @@ function checkRecordedManifests(directory, flags, label) {
 		}
 	}
 	for (const [path, entry] of Object.entries(lock.packages || {})) {
-		if (!path || entry.link || typeof entry.resolved !== 'string' || !entry.resolved.startsWith('file:')) continue;
-		const manifestPath = join(resolve(directory, entry.resolved.slice('file:'.length)), 'package.json');
+		if (!path || entry.link) continue;
+		let target, fields;
+		if (typeof entry.resolved === 'string' && entry.resolved.startsWith('file:')) {
+			target = entry.resolved;
+			fields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+		} else if (entry.resolved === undefined && !/(?:^|\/)node_modules\//.test(path)) {
+			target = path;
+			fields = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];
+		} else continue;
+		const manifestPath = join(resolve(directory, target.replace(/^file:/, '')), 'package.json');
 		if (!existsSync(manifestPath)) continue;
 		const source = JSON.parse(readFileSync(manifestPath, 'utf8'));
 		if (entry.version !== source.version) {
-			problems.push('  ' + path + ' records version ' + entry.version + ' but ' + entry.resolved + ' is ' + source.version);
+			problems.push('  ' + path + ' records version ' + entry.version + ' but ' + target + ' is ' + source.version);
 		}
-		for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+		for (const field of fields) {
 			if (JSON.stringify(sorted(entry[field])) !== JSON.stringify(sorted(source[field]))) {
-				problems.push('  ' + path + ' records stale ' + field + ' of ' + entry.resolved);
+				problems.push('  ' + path + ' records stale ' + field + ' of ' + target);
 			}
 		}
 	}

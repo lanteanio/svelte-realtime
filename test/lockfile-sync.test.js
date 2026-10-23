@@ -89,4 +89,28 @@ describe('committed lockfile sync guard', () => {
 			removeFixture(directory, 'lockfile-sync-');
 		}
 	}, PROCESS_TEST_TIMEOUT);
+
+	it('rejects a linked lock whose link target entry trails the linked package', () => {
+		const directory = project();
+		const app = join(directory, 'app');
+		const local = join(directory, 'local', 'package.json');
+		try {
+			writeLock(app);
+			const lock = JSON.parse(readFileSync(join(app, 'package-lock.json'), 'utf8'));
+			expect(lock.packages['node_modules/local-dep']).toMatchObject({ resolved: '../local', link: true });
+			expect(lock.packages['../local']).toMatchObject({ version: '1.0.0' });
+			expect(() => checkLockSync(app, [], { npm })).not.toThrow();
+
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.1' }));
+			expect(() => checkLockSync(app, [], { npm, label: 'app' })).toThrow(
+				/app\/package-lock\.json records stale manifest data[\s\S]*\.\.\/local records version 1\.0\.0 but \.\.\/local is 1\.0\.1[\s\S]*npm install --package-lock-only --ignore-scripts inside app/
+			);
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.0', devDependencies: { 'left-pad': '^1.3.0' } }));
+			expect(() => checkLockSync(app, [], { npm })).toThrow(/\.\.\/local records stale devDependencies of \.\.\/local/);
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.0' }));
+			expect(() => checkLockSync(app, [], { npm })).not.toThrow();
+		} finally {
+			removeFixture(directory, 'lockfile-sync-');
+		}
+	}, PROCESS_TEST_TIMEOUT);
 });

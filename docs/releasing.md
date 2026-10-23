@@ -132,12 +132,20 @@ The publish-ready version bump is one commit that changes these together:
    `npm install --package-lock-only --install-links --ignore-scripts` inside
    each one. Then run `node scripts/check-svelte-support.js --write` from the
    repository root to refresh the generated Svelte 4 support table.
-3. The `CHANGELOG.md` heading for the version, dated, with `Unreleased` folded
+3. The `test/fixture` lock, which links this checkout instead of packing it but
+   still records its version and dependency ranges: run
+   `npm install --package-lock-only --ignore-scripts` inside `test/fixture`.
+4. The `CHANGELOG.md` heading for the version, dated, with `Unreleased` folded
    into it.
 
 `npm run check` must pass on that commit. Its lockfile check names any
 committed lock that still records the previous version, with the command that
 regenerates it.
+
+The fixture locks record this checkout's dependency ranges as well as its
+version, so a dependency change in the root `package.json` outside a version
+bump regenerates them in the same commit: a runtime dependency change needs
+steps 2 and 3, and a devDependency change needs step 3.
 
 ## Artifact records
 
