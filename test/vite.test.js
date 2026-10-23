@@ -2106,6 +2106,30 @@ export const messages = live.stream(
 		expect(clientCode).toMatch(/__stream\("rooms\/messages",[\s\S]*,\s*true\);/);
 	});
 
+	it('enumerable room SSR stub renders an empty lobby whose list() resolves to an empty array', async () => {
+		setup({
+			'game.js': `
+import { live } from 'svelte-realtime/server';
+export const game = live.room({
+	topic: (ctx, id) => 'game:' + id,
+	topicArgs: 1,
+	init: async () => [],
+	enumerable: true
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const ssrCode = plugin.load('\0live:game', { ssr: true });
+		const factory = ssrCode.match(/rooms: (\(\) => \(\{.*?\}\))/);
+		expect(factory).not.toBeNull();
+		const lobby = new Function('return ' + factory[1])()();
+		expect(lobby.rooms).toBeInstanceOf(Map);
+		expect(lobby.rooms.size).toBe(0);
+		await expect(lobby.list()).resolves.toEqual([]);
+		expect(() => lobby.destroy()).not.toThrow();
+	});
+
 	it('simple re-export when module has no streams', () => {
 		setup({
 			'rpc.js': `

@@ -2,7 +2,11 @@
 export interface RoomEntry<Meta = any> {
 	/** The room-identifying args (e.g. `[gameId]`), as the topic function received them. */
 	args: any[];
-	/** Live subscriber count (connections subscribed to the room on this instance). */
+	/**
+	 * Live subscriber count: connections subscribed to the room's data stream,
+	 * summed across the cluster when `platform.redis` is wired. Two tabs count
+	 * twice. A room with no subscribers is absent from the view rather than 0.
+	 */
 	count: number;
 	/** The value the export's `meta(args)` returned when the room opened, or `undefined`. */
 	meta: Meta;
@@ -25,7 +29,10 @@ export class RoomsList<Meta = any> {
 	readonly rooms: Map<string, RoomEntry<Meta>>;
 	/** The connection-status passthrough. */
 	readonly status: string;
-	/** One-shot snapshot of the active rooms without opening a live subscription. */
+	/**
+	 * One-shot snapshot of the active rooms without opening a live subscription.
+	 * A browser read: during the server render the generated stub resolves `[]`.
+	 */
 	list(): Promise<Array<RoomEntry<Meta>>>;
 	/** Stop the live subscription. Call from the component's cleanup. */
 	destroy(): void;

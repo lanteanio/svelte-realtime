@@ -3230,7 +3230,12 @@ export interface RoomConfig {
 	/**
 	 * Opt into room enumeration. `true` lists this export's active rooms to
 	 * every caller of the generated `<export>.rooms()` (a count-only lobby
-	 * without `meta`; implied by `meta`).
+	 * without `meta`; implied by `meta`). This is the supported read of a
+	 * room's occupancy from outside the room: `count` is the number of
+	 * connections subscribed to its data stream, and a room absent from the
+	 * view has none. It is a browser read; the server render gets an empty
+	 * view. The extensions `createPresence()` store is a separate registry and
+	 * does not see `live.room` presence or membership.
 	 *
 	 * A predicate makes visibility per-caller: it runs with the requesting
 	 * connection's ctx against each room - in the snapshot AND on every live

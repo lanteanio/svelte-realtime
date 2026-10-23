@@ -98,6 +98,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The README links to the shared translation and privacy integration contracts point at their current location in the adapter's `docs/` folder (`docs/translating.md`, `docs/privacy-integration.md`).
 
+- The room enumeration docs name `live.room({ enumerable: true })` with `rooms()` / `list()` as the read of a room's occupancy from outside it: a room absent from the view has no subscribers, `count` counts data-stream connections and carries no identities, and the extensions `createPresence()` store does not see room membership. They no longer claim `list()` serves a `+page.server` load; both reads run in the browser, and the server render gets an empty view.
+
 - The [Svelte 4 support profile](docs/svelte-support.md) is checked with svelte-check 4 (4.7.7, previously 3.8.6).
 
 ### Fixed
