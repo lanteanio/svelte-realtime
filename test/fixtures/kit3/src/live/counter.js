@@ -4,6 +4,7 @@ import { token } from '../lib/server/environment.js';
 
 export const echo = live((_ctx, value) => ({ value, token, label: 'initial' }));
 export const connection = live((ctx) => ctx.user?.id ?? null);
+export const instance = live(() => state.instance);
 export const counter = live.stream('compat:counter', () => state.count, { merge: 'set' });
 export const increment = live((ctx, amount) => {
 	state.count += amount;

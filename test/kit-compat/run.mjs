@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, expect as baseExpect } from '@playwright/test';
 import { waitForFixture } from './server-ready.mjs';
+import { matchKnown, RELOAD, SPLIT } from './known-failures.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const args = process.argv.slice(2);
@@ -35,11 +36,11 @@ assert.ok(viteMajor === 'locked' || kit === '2', '--vite 5 requires Kit 2');
 // its error matches the signature. "restart" starts a fresh server after the
 // failure, because the adapter left this one in a state later checks cannot
 // use. Every check still runs.
-const knownFailures = JSON.parse(option('--known-adapter-failures', '[]')).map(entry => {
+const knownFailures = JSON.parse(option('--known-adapter-failures', '[]'));
+for (const entry of knownFailures) {
 	assert.ok(entry.checks === null || (Array.isArray(entry.checks) && entry.checks.length), 'A known adapter failure names its checks or null');
 	assert.ok(typeof entry.signature === 'string' && entry.signature, 'A known adapter failure needs an error signature');
-	return { ...entry, signature: new RegExp(entry.signature) };
-});
+}
 const driveCase = option('--drive-case', 'as-invoked');
 assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
 assert.ok(driveCase === 'as-invoked' || (process.platform === 'win32' && kit === '3'), '--drive-case requires Windows and Kit 3');
@@ -77,16 +78,30 @@ const readinessToken = randomUUID();
 const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_SESSION: readinessToken, KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
 // The server masks a call to an unregistered path as FORBIDDEN by default.
 const UNREGISTERED = 'FORBIDDEN';
-// Every assertion that compares HTTP state with WebSocket state carries this
-// text, so a known adapter failure is matched by what failed, not just where.
-const SPLIT = 'state split between HTTP and WebSocket';
-// Likewise for assertions that the WebSocket handlers follow a reload.
-const RELOAD = 'WebSocket handlers did not follow the reload';
-// A page store must show the count HTTP reads. Playwright keeps a custom
-// expect message out of the error text, so the signature is added here.
+// A shared-state failure carries SPLIT only when HTTP and WebSocket really
+// run different instances of the fixture's state module; any other mismatch
+// (a store that never renders, a stale value) is an ordinary failure.
+async function sharedStateFailure(message, cause) {
+	let split = false;
+	let detail;
+	try {
+		const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+		const http = (await response.json()).instance;
+		if (socket?.readyState !== WebSocket.OPEN) await connectSocket(origin);
+		const ws = (await rpc('instance')).data;
+		split = typeof http === 'string' && typeof ws === 'string' && http !== ws;
+		detail = 'HTTP instance ' + http + ', WebSocket instance ' + ws;
+	} catch (error) { detail = 'instance check failed: ' + error.message; }
+	return new Error((split ? SPLIT + ': ' : '') + message + ' (' + detail + ')', { cause });
+}
+async function sameState(actual, expected, what) {
+	try { assert.deepEqual(actual, expected); }
+	catch (error) { throw await sharedStateFailure(what + ': got ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(expected), error); }
+}
+// A page store must show the count HTTP reads.
 async function showsHttpCount(page, count) {
 	try { await expect(page.getByTestId('counter')).toHaveText(String(count)); }
-	catch (error) { throw new Error(SPLIT + ': a page store differs from the HTTP count\n' + error.message, { cause: error }); }
+	catch (error) { throw await sharedStateFailure('a page store differs from the HTTP count ' + count + '\n' + error.message, error); }
 }
 // A dev reload closes sockets with 1012; the client reconnects after its
 // jittered backoff (3 s base), so stores need longer than the 5 s default.
@@ -113,7 +128,7 @@ async function check(name, fn) {
 		console.log('PASS ' + name);
 	} catch (error) {
 		const text = error.stack || String(error);
-		const known = knownFailures.findIndex(entry => (entry.checks === null || entry.checks.includes(name)) && entry.signature.test(text));
+		const known = matchKnown(knownFailures, name, text);
 		report.checks.push({ name, status: known < 0 ? 'failed' : 'known-adapter-failure', known: known < 0 ? undefined : known, error: text });
 		if (known < 0) throw error;
 		console.log('KNOWN ADAPTER FAILURE ' + name);
@@ -294,7 +309,7 @@ try {
 	await check('HTTP and WebSocket share state', async () => {
 		const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 		assert.equal(response.status, 200);
-		assert.deepEqual(await response.json(), { count: 2 }, SPLIT + ': HTTP reads another count');
+		await sameState((await response.json()).count, 2, 'HTTP reads another count');
 	});
 	await check('devtools runtime', async () => {
 		for (const page of pages) {
@@ -343,11 +358,12 @@ try {
 				await pause(100);
 			}
 			assert.equal(added?.ok, true, RELOAD + ': ' + (JSON.stringify(added) || reconnectError?.message));
-			assert.equal(added.data, 'replacement', RELOAD);
+			assert.equal(added.data, 'replacement', RELOAD + ': ' + JSON.stringify(added));
 			const removed = await rpc('removed');
 			assert.equal(removed.ok, false, RELOAD + ': ' + JSON.stringify(removed));
-			assert.equal(removed.code, UNREGISTERED, RELOAD);
-			assert.equal((await rpc('echo', ['changed'])).data.label, 'updated', RELOAD);
+			assert.equal(removed.code, UNREGISTERED, RELOAD + ': ' + JSON.stringify(removed));
+			const relabeled = await rpc('echo', ['changed']);
+			assert.equal(relabeled.data?.label, 'updated', RELOAD + ': ' + JSON.stringify(relabeled));
 		});
 		await check('live stores after HMR', async () => {
 			// A full SSR graph reload may recreate module-scoped state. All
@@ -361,11 +377,11 @@ try {
 				await page.waitForFunction(() => window.compat);
 			}
 			const count = await pages[0].evaluate(() => window.compat.increment(3));
-			assert.equal(count, baseline + 3, SPLIT + ': the RPC count differs from the HTTP count');
+			await sameState(count, baseline + 3, 'the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
+			await sameState((await after.json()).count, count, 'HTTP reads another count');
 		});
 		await check('one registry reload per live-file save', () => {
 			// Vite can report one save once per spelling of the file's path.
@@ -376,9 +392,9 @@ try {
 		await check('route-only HMR shares HTTP and WebSocket state', async () => {
 			originalRoute = await readFile(routeFile);
 			const route = originalRoute.toString('utf8');
-			const anchor = 'Response.json({ count: state.count })';
+			const anchor = 'Response.json({ count: state.count, instance: state.instance })';
 			assert.equal(route.split(anchor).length, 2, 'Route source anchor must occur once');
-			const changed = route.replace(anchor, "Response.json({ count: state.count }, { headers: { 'x-route-version': 'updated' } })");
+			const changed = route.replace(anchor, "Response.json({ count: state.count, instance: state.instance }, { headers: { 'x-route-version': 'updated' } })");
 			await writeFile(routeFile, changed);
 			assert.notEqual(hash(await readFile(routeFile)), hash(originalRoute), 'Route edit reached disk');
 			const deadline = Date.now() + 15000;
@@ -396,7 +412,7 @@ try {
 			await connectSocket(origin);
 			const echoed = await rpc('echo', ['route-reload']);
 			assert.equal(echoed.ok, true, RELOAD + ': ' + JSON.stringify(echoed));
-			assert.deepEqual(echoed.data, { value: 'route-reload', token: 'fixture-secret', label: 'updated' }, RELOAD);
+			assert.deepEqual(echoed.data, { value: 'route-reload', token: 'fixture-secret', label: 'updated' }, RELOAD + ': ' + JSON.stringify(echoed));
 			const baselineResponse = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(baselineResponse.status, 200);
 			const baseline = (await baselineResponse.json()).count;
@@ -406,11 +422,11 @@ try {
 				await page.waitForFunction(() => window.compat);
 			}
 			const count = await pages[0].evaluate(() => window.compat.increment(5));
-			assert.equal(count, baseline + 5, SPLIT + ': the RPC count differs from the HTTP count');
+			await sameState(count, baseline + 5, 'the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
+			await sameState((await after.json()).count, count, 'HTTP reads another count');
 		});
 	}
 	if (hmr) {
@@ -447,11 +463,11 @@ try {
 			assert.equal(typeof baseline, 'number');
 			for (const page of pages) await showsHttpCount(page, baseline);
 			const count = await pages[0].evaluate(() => window.compat.increment(1));
-			assert.equal(count, baseline + 1, SPLIT + ': the RPC count differs from the HTTP count');
+			await sameState(count, baseline + 1, 'the RPC count differs from the HTTP count');
 			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
-			assert.deepEqual(await after.json(), { count }, SPLIT + ': HTTP reads another count');
+			await sameState((await after.json()).count, count, 'HTTP reads another count');
 			return count;
 		}
 		await check('new live files share HTTP and WebSocket state', async () => {
@@ -461,7 +477,7 @@ try {
 			await writeFile(addedFile, "import { live } from 'svelte-realtime/server';\nimport { state } from '../lib/server/state.js';\nexport const read = live(() => state.count);\n");
 			await waitForRpc('extra/read', result => result.ok === true);
 			const count = await sharedStores(addedAt);
-			assert.equal((await rpc('extra/read')).data, count, SPLIT + ': the new live file reads another count');
+			await sameState((await rpc('extra/read')).data, count, 'the new live file reads another count');
 		});
 		await check('removed live files unregister without splitting state', async () => {
 			const removedAt = Date.now();
@@ -488,10 +504,11 @@ try {
 		// land after the reload a check waited for, so each call may reconnect.
 		async function registryAnswers(label) {
 			const echoed = await freshRpc('echo', result => result.ok === true, ['hooks']);
-			assert.deepEqual(echoed.data, { value: 'hooks', token: 'fixture-secret', label }, RELOAD);
+			assert.deepEqual(echoed.data, { value: 'hooks', token: 'fixture-secret', label }, RELOAD + ': ' + JSON.stringify(echoed));
 			const removed = await freshRpc('removed', result => result.ok === false);
 			assert.equal(removed.code, UNREGISTERED, RELOAD + ': ' + JSON.stringify(removed));
-			assert.equal((await freshRpc('added', result => result.ok === true)).data, 'replacement', RELOAD);
+			const added = await freshRpc('added', result => result.ok === true);
+			assert.equal(added.data, 'replacement', RELOAD + ': ' + JSON.stringify(added));
 		}
 		// The label the live module answers with once the checks above have run.
 		let liveLabel = 'updated';
@@ -553,11 +570,13 @@ try {
 	await check('no unsupported HTML hook warning', () => {
 		assert.doesNotMatch(output, /following plugins[\s\S]{0,500}transformIndexHtml/i);
 	});
-	if (hmr) await check('HMR emits no Cloudflare Tunnel warning', () => {
+	if (hmr) await check('HMR closes sockets with a restart code and no Cloudflare Tunnel warning', () => {
 		assert.doesNotMatch(output, /Cloudflare-Tunnel|Set-Cookie on 101|svti\.me\/cf-cookies/i);
-		// A restart close the client treats as expected is 1001 or 1012.
+		// The reloads above close open sockets; the client treats only 1001 and
+		// 1012 as an expected restart.
+		assert.ok(report.serverCloseCodes.includes(1012), 'No server close with 1012 during HMR: ' + JSON.stringify(report.serverCloseCodes));
 		const unexpected = report.serverCloseCodes.filter(code => code !== 1001 && code !== 1012);
-		assert.deepEqual(unexpected, [], 'Server closes used codes the client warns about: ' + report.serverCloseCodes.join(', '));
+		assert.deepEqual(unexpected, [], 'Server closes used codes the client warns about: ' + JSON.stringify(report.serverCloseCodes));
 	});
 	report.status = report.checks.some(entry => entry.status === 'known-adapter-failure') ? 'known-adapter-failure' : 'passed';
 } catch (error) {

@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { entriesFor, matchKnown } from './known-failures.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runner = fileURLToPath(new URL('./run.mjs', import.meta.url));
@@ -14,29 +15,6 @@ const commonChecks = [
 	'server startup', 'cold WebSocket RPC before any page load', 'browser initial live stores',
 	'browser RPC roundtrip', 'server-published live stores', 'HTTP and WebSocket share state',
 	'devtools runtime', 'browser has no runtime errors', 'no unsupported HTML hook warning'
-];
-// Checks that fail because of svelte-adapter-uws, not this package. Each entry
-// applies only to the adapter version and the runs that reproduce it, and only
-// to a failure of one of its checks whose error matches its signature, so an
-// unrelated failure in the same check still fails the matrix. Every check runs:
-// "restart" starts a fresh server after the failure so the later checks get a
-// server the adapter has not broken.
-const SPLIT = 'state split between HTTP and WebSocket';
-const RELOAD = 'WebSocket handlers did not follow the reload';
-const knownAdapterFailures = [
-	{
-		adapter: '0.6.0-next.96', runs: /^kit3-dev-hmr-adapter(?:wrapped|none)$/, checks: null, signature: SPLIT + '|' + RELOAD, restart: false,
-		reason: 'With a wrapped or omitted adapter entry, the SvelteKit 3 dev server and the WebSocket handler load separate module instances'
-	},
-	{
-		adapter: '0.6.0-next.96', runs: /^kit3-dev-hmr(?:-drive-caselower)?$/, checks: ['route-only HMR shares HTTP and WebSocket state'], signature: SPLIT, restart: true,
-		reason: 'After a route edit reloads the SvelteKit 3 SSR runner, the adapter does not import the WebSocket handler again, so HTTP and WebSocket state split (some runs, not all)'
-	},
-	{
-		adapter: '0.6.0-next.96', runs: /^kit(?:2|2-vite5|3)-dev-hmr(?:-drive-caselower)?$/, checks: ['deleted and recreated hooks.ws restore live handlers and shared state'],
-		signature: RELOAD + ': a new connection did not reach the expected state: connection', restart: false,
-		reason: 'The adapter does not reload src/hooks.ws.js when the file is deleted and created again; it keeps serving the previous handler (most runs, not all)'
-	}
 ];
 async function installedAdapter(fixtureName) {
 	const manifest = path.join(root, 'test', 'fixtures', fixtureName, 'node_modules', 'svelte-adapter-uws', 'package.json');
@@ -64,7 +42,7 @@ for (const [kit, vite] of [['2', 'locked'], ['2', '5'], ['3', 'locked']]) {
 		console.log('\nRunning ' + name);
 		try {
 			const adapter = await installedAdapter('kit' + kit + (vite === '5' ? '-vite5' : ''));
-			const known = knownAdapterFailures.filter(entry => entry.adapter === adapter && entry.runs.test(name));
+			const known = entriesFor(adapter, name);
 			// Require a report produced by this invocation.
 			await unlink(reportPath).catch(error => {
 				if (error.code !== 'ENOENT') throw error;
@@ -91,12 +69,12 @@ for (const [kit, vite] of [['2', 'locked'], ['2', '5'], ['3', 'locked']]) {
 			const expected = [...commonChecks];
 			if (variant.mode === 'production') expected.push('production build');
 			if (variant.driveCase) expected.push('Vite and SvelteKit spell the root differently');
-			if (variant.args.includes('--hmr')) expected.push('HMR replaces and removes handlers', 'live stores after HMR', 'one registry reload per live-file save', 'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state', 'removed live files unregister without splitting state', 'broken live modules recover without splitting state', 'hooks.ws edits keep live handlers and shared state', 'deleted and recreated hooks.ws restore live handlers and shared state', 'HMR emits no Cloudflare Tunnel warning');
+			if (variant.args.includes('--hmr')) expected.push('HMR replaces and removes handlers', 'live stores after HMR', 'one registry reload per live-file save', 'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state', 'removed live files unregister without splitting state', 'broken live modules recover without splitting state', 'hooks.ws edits keep live handlers and shared state', 'deleted and recreated hooks.ws restore live handlers and shared state', 'HMR closes sockets with a restart code and no Cloudflare Tunnel warning');
 			// The runner records the entry each known failure matched; check it again
 			// against this run's own list and the recorded error.
 			const knownFor = check => {
 				const entry = known[check.known];
-				return entry && (entry.checks === null || entry.checks.includes(check.name)) && new RegExp(entry.signature).test(check.error) ? entry : null;
+				return entry && matchKnown([entry], check.name, check.error) === 0 ? entry : null;
 			};
 			assert.ok(report.checks.every(check => check.status === 'passed' || (check.status === 'known-adapter-failure' && knownFor(check))),
 				name + ' contains a failed check');
