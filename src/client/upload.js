@@ -419,17 +419,19 @@ async function _pumpUpload(handle) {
 				if (handle._cancelled || handle._settled) return;
 			}
 
-			// Chunk 0 carries the header and at least one payload byte. Under
-			// a known cap a header that leaves no room would make the adapter
-			// close the connection (1009), so the upload is refused instead.
-			if (seq === 0 && clientState.uploadCap > 0
-				&& _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES + handle._argsLen + 1 > clientState.uploadCap) {
-				handle._settle(false, new RpcError('PAYLOAD_TOO_LARGE', 'Upload arguments do not fit the server frame size'));
-				return;
-			}
 			const { value, last } = await reader.read(_payloadSizeForFrame(_computeUploadFrameSize(), handle._argsLen));
 			if (handle._cancelled || handle._settled) return;
 			const bytes = value ? value.byteLength : 0;
+
+			// Chunk 0 carries the header and at least one payload byte unless
+			// the upload is empty. Under a known cap a chunk 0 past it would
+			// make the adapter close the connection (1009), so the upload is
+			// refused instead.
+			if (seq === 0 && clientState.uploadCap > 0
+				&& _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES + handle._argsLen + bytes > clientState.uploadCap) {
+				handle._settle(false, new RpcError('PAYLOAD_TOO_LARGE', 'Upload arguments do not fit the server frame size'));
+				return;
+			}
 
 			if (seq === 0 && handle._flow) {
 				// Progress for chunk 0 waits for the server's first answer: a

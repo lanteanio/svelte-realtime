@@ -351,6 +351,18 @@ describe('upload receiver credits through the real client and server', () => {
 		expect(ctx.chunks().every((f) => f.length <= 4096)).toBe(true);
 	});
 
+	it('sends an empty upload whose header exactly fills the known frame cap', async () => {
+		const ctx = await setup({ frameSize: 4096 });
+		env.register('files', { ping: ctx.live(async () => 'pong'), save: counting(ctx.live) });
+		await ctx.__rpc('files/ping')();
+		const exact = 'x'.repeat(4096 - 12 - JSON.stringify({ path: 'files/save', args: [''] }).length);
+		expect(await ctx.__upload('files/save')(new Uint8Array(0), exact)).toBe(0);
+		expect(ctx.chunks().map((f) => [f.length, f.isLast])).toEqual([[4096, true]]);
+		const err = await ctx.__upload('files/save')(new Uint8Array(0), exact + 'x').then(() => null, (e) => e);
+		expect(err).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+		expect(ctx.chunks()).toHaveLength(1);
+	});
+
 	it('relearns the frame cap after reconnecting', async () => {
 		const ctx = await setup({ frameSize: 8192 });
 		env.register('files', { ping: ctx.live(async () => 'pong'), save: counting(ctx.live) });
