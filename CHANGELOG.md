@@ -213,6 +213,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Security
 
+- A stream path answers only a subscribe frame. A plain RPC frame (no `stream: true`) naming a `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, `live.flag` or room sub-stream is refused with `INVALID_REQUEST` after the module guard, also inside a batch and as a fire-and-forget call. Before, such a frame ran the stream's loader directly, skipping its `access`/`filter` predicate, args schema and gate, and returned the snapshot to a caller that could not subscribe. Server-side `.load()` is unchanged.
+
+- `live.stream` no longer writes its metadata onto the loader function it is given. A loader also exported as a plain `live()` RPC, or shared by two streams, kept the last stream's options: one stream's `access` predicate could replace another's, and the RPC export answered as a stream.
+
 - Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
 
 - Dead-letter replay is bounded: `replayDeadLetter()` and `POST /__realtime/dlq/<topic>/replay` handle at most `limit` records per call (default 100, at most 1000) or up to 1000 explicit `ids`, and the admin route answers 400 on invalid input. Each call emits a `webhook.dead-letter.replayed` operational event with its initiator and counts. Before, one call re-fired every queued record.

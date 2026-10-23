@@ -124,7 +124,9 @@ describe('live.stream()', () => {
 	it('attaches stream metadata', () => {
 		const initFn = async (ctx) => [];
 		const result = live.stream('messages', initFn, { merge: 'crud', key: 'id', prepend: true });
-		expect(result).toBe(initFn);
+		// The loader is wrapped, not tagged in place: it may also back an RPC export.
+		expect(result).not.toBe(initFn);
+		expect(initFn.__isStream).toBeUndefined();
 		expect(result.__isStream).toBe(true);
 		expect(result.__isLive).toBe(true);
 		expect(result.__streamTopic).toBe('messages');

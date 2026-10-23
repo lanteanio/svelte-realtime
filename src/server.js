@@ -1606,6 +1606,15 @@ live.stream = function stream(topic, initFn, options) {
 			throw new Error("[svelte-realtime] live.stream rowVersion orders rows of a merge: 'crud' stream; '" + merged.merge + "' streams do not take it");
 		}
 	}
+	// Tag a fresh function, never the caller's loader: the same loader may also
+	// be exported as a plain `live()` RPC or back a second stream, and stream
+	// metadata written onto it would leak into those entries.
+	if (typeof initFn === 'function') {
+		const loader = initFn;
+		initFn = Object.assign(function streamLoader(/** @type {any} */ ctx, /** @type {any[]} */ ...args) {
+			return loader(ctx, ...args);
+		}, loader);
+	}
 	if (replay) {
 		/** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 		// Auto-routing registry: static topics register at declaration time so

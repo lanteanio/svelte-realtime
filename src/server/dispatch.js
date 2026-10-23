@@ -1242,11 +1242,20 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 		const guardFn = await _resolveGuard(modulePath);
 		if (guardFn) await _runGuard(guardFn, ctx);
 
+		// A stream entry is its loader: calling it as a plain RPC would skip
+		// the subscribe-side access/filter, args schema and gate, and return
+		// the snapshot. Only a subscribe frame reaches a stream. Checked after
+		// the guard so the endpoint kind stays private until access is granted.
+		const isStreamEntry = /** @type {any} */ (fn).__isStream;
+		if (isStreamEntry && !isStream) {
+			throw new LiveError('INVALID_REQUEST', 'Streams must be subscribed, not called');
+		}
+
 		if (options?.beforeExecute) {
 			await options.beforeExecute(ws, path, args);
 		}
 
-		if (isStream && /** @type {any} */ (fn).__isStream) {
+		if (isStreamEntry) {
 			return await _executeStreamRpc(ws, platform, fn, ctx, args, msg, _subscribedRef);
 		} else {
 			// Registry-level rate limit. Per-handler `live.rateLimit(...)`
