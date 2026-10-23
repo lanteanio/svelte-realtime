@@ -773,6 +773,83 @@ describe('__stream() mutate', () => {
 		}
 	});
 
+	/** The rpc frames sent since `before`. */
+	const rpcFramesSince = (before) => sendQueuedFn.mock.calls.slice(before).map((c) => c[0]).filter((f) => f && f.rpc);
+
+	it.each([
+		['succeeds', { ok: true, data: 'a' }],
+		['fails', { ok: false, code: 'A_FAILED', error: 'a failed' }]
+	])('another queued change that throws on replay is hidden while a mutate %s', async (_outcome, replyA) => {
+		const ctx = await setupCrudStream('mut/replay-throws', 'mut-replay-throws', [{ id: 1 }]);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		try {
+			const before = sendQueuedFn.mock.calls.length;
+			// B leaves the rows as they are, so it touches no key and no server
+			// event supersedes it; it throws once row 1 is gone.
+			const b = ctx.store.mutate(() => __rpc('mut/replay-b')(1), (draft) => {
+				if (!draft.some((row) => row.id === 1)) throw new TypeError('row 1 is gone');
+			});
+			const a = ctx.store.mutate(() => __rpc('mut/replay-a')(2), { event: 'created', data: { id: 2 } });
+			const [frameB, frameA] = rpcFramesSince(before);
+			expect([frameB.rpc, frameA.rpc]).toEqual(['mut/replay-b', 'mut/replay-a']);
+			// The event that breaks B does not throw out of the message handler.
+			expect(() => simulateTopicMessage('mut-replay-throws', { event: 'deleted', data: { id: 1 } })).not.toThrow();
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(report.mock.calls[0][0]).toEqual(expect.objectContaining({ message: 'row 1 is gone' }));
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 2 }]);
+			expect(() => simulateTopicMessage('mut-replay-throws', { event: 'created', data: { id: 3 } })).not.toThrow();
+			// The server's rows, with A's pending row on top.
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 3 }, { id: 2 }]);
+			simulateRpcResponse(frameA.id, replyA);
+			if (replyA.ok) {
+				await expect(a).resolves.toBe('a');
+				expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 3 }, { id: 2 }]);
+			} else {
+				await expect(a).rejects.toMatchObject({ code: 'A_FAILED' });
+				expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 3 }]);
+			}
+			simulateRpcResponse(frameB.id, { ok: true, data: 'b' });
+			await expect(b).resolves.toBe('b');
+			expect(report).toHaveBeenCalledTimes(1);
+			// The queue is empty: a server event applies directly.
+			simulateTopicMessage('mut-replay-throws', { event: 'created', data: { id: 4 } });
+			expect(ctx.values[ctx.values.length - 1]).toEqual(replyA.ok ? [{ id: 3 }, { id: 2 }, { id: 4 }] : [{ id: 3 }, { id: 4 }]);
+		} finally {
+			vi.unstubAllGlobals();
+			ctx.unsub();
+		}
+	});
+
+	it('a queued change that throws when another mutate replays it is hidden, and both mutates follow their calls', async () => {
+		const ctx = await setupCrudStream('mut/replay-once', 'mut-replay-once', [{ id: 1 }]);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		let runs = 0;
+		try {
+			const before = sendQueuedFn.mock.calls.length;
+			const b = ctx.store.mutate(() => __rpc('mut/once-b')('b'), (draft) => {
+				if (++runs > 1) throw new Error('second run');
+				draft.push({ id: 'b' });
+			});
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 'b' }]);
+			const a = ctx.store.mutate(() => __rpc('mut/once-a')('a'), { event: 'created', data: { id: 'a' } });
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 'a' }]);
+			const [frameB, frameA] = rpcFramesSince(before);
+			simulateRpcResponse(frameA.id, { ok: true, data: 'a' });
+			await expect(a).resolves.toBe('a');
+			simulateRpcResponse(frameB.id, { ok: true, data: 'b' });
+			await expect(b).resolves.toBe('b');
+			expect(runs).toBe(2);
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 'a' }]);
+		} finally {
+			vi.unstubAllGlobals();
+			ctx.unsub();
+		}
+	});
+
 	it('a change that throws when applied to the server state is left out and reported', async () => {
 		const ctx = await setupCrudStream('mut/graduate-throws', 'mut-graduate-throws', [{ id: 1 }]);
 		const save = __rpc('mut/save-graduate-throws');

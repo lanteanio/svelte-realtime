@@ -1452,19 +1452,35 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/**
 	 * Replay the in-flight queue against a fresh copy of `_serverValue`,
-	 * skipping `serverConfirmed` entries. Returns the resulting (value,
-	 * index) pair. Caller writes them into `currentValue` / `_index`.
+	 * skipping `serverConfirmed` and `hidden` entries. Returns the resulting
+	 * (value, index) pair. Caller writes them into `currentValue` / `_index`.
 	 *
+	 * A change that throws is reported once and hidden from later replays; it
+	 * stays queued until its own call settles, and the replay goes on without
+	 * it, so a queued change that no longer fits the data fails neither the
+	 * event that changed the data nor another mutate. Only `own`, the entry a
+	 * mutate is adding, throws out of here: that mutate rejects with no call
+	 * made. A function change throws on its draft, before the index is
+	 * rebuilt, so the value and index replayed so far stay intact.
+	 *
+	 * @param {any} [own]
 	 * @returns {{ value: any, index: Map<any, number> }}
 	 */
-	function _replayQueue() {
+	function _replayQueue(own = null) {
 		let value = Array.isArray(_serverValue) ? _serverValue.slice() : _serverValue;
 		const index = new Map(_serverIndex);
 		const keyed = merge === 'crud' || merge === 'presence' || merge === 'cursor';
 		for (const entry of _optimisticQueue) {
-			if (entry.serverConfirmed) continue;
+			if (entry.serverConfirmed || entry.hidden) continue;
 			const before = value;
-			value = _applyChange(value, index, entry.change, true);
+			try {
+				value = _applyChange(value, index, entry.change, true);
+			} catch (err) {
+				if (entry === own) throw err;
+				entry.hidden = true;
+				_reportMutateError('an optimistic change threw when replayed, so it is not shown', err);
+				continue;
+			}
 			// A function change's keys, read off its first application: it runs
 			// on a copy, so `before` still holds the rows it started from.
 			if (entry.touched === undefined && keyed && typeof entry.change === 'function') entry.touched = _diffKeys(before, value);
@@ -2686,7 +2702,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_serverValue = Array.isArray(baseline) ? baseline.slice() : baseline;
 				_serverIndex = new Map(_index);
 			}
-			const entry = { change: optimisticChange, optimisticKey, touched: /** @type {Set<any> | null | undefined} */ (undefined), serverConfirmed: false, superseded: false };
+			const entry = { change: optimisticChange, optimisticKey, touched: /** @type {Set<any> | null | undefined} */ (undefined), serverConfirmed: false, superseded: false, hidden: false };
 			_optimisticQueue.push(entry);
 			const _discard = () => {
 				_optimisticQueue.splice(_optimisticQueue.indexOf(entry), 1);
@@ -2704,7 +2720,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			let replayed;
 			let op;
 			try {
-				replayed = _replayQueue();
+				replayed = _replayQueue(entry);
 				op = asyncOp();
 			} catch (err) {
 				_discard();
@@ -2724,11 +2740,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				assert(entry.change != null && typeof entry.serverConfirmed === 'boolean', 'realtime/optimistic.queue.entry.shape', { hasChange: entry.change != null, serverConfirmedType: typeof entry.serverConfirmed });
 				const idx = _optimisticQueue.indexOf(entry);
 				if (idx >= 0) _optimisticQueue.splice(idx, 1);
-				if (success && !entry.serverConfirmed && !entry.superseded) {
+				// A change hidden after it threw on a replay is not applied either.
+				if (success && !entry.serverConfirmed && !entry.superseded && !entry.hidden) {
 					// A function change that throws on the server state is left
 					// out of it: the stream shows what the server sent until its
 					// events carry the committed change. It throws on its draft,
-					// before the index is rebuilt, so neither slot is touched.
+					// before the index is rebuilt, so neither slot is touched;
+					// rows it changed in place before throwing are shared with the
+					// server state and stay changed.
 					try {
 						_serverValue = _applyChange(
 							_serverValue,
