@@ -48,6 +48,22 @@ describe('aggregate and derived observer lifecycle', () => {
 		expect(hooks.onUnsubscribe).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'stats:trending:last10min', 0);
 	});
 
+	it.each(['static', 'dynamic', 'aggregate'])('supports release-only observer declarations (%s)', async kind => {
+		const onUnsubscribe = vi.fn();
+		if (kind === 'aggregate') {
+			env.register('stats', { out: live.aggregate('events', { count: { init: () => 0 } }, { topic: 'stats:out', onUnsubscribe }) });
+		} else {
+			const derived = kind === 'dynamic'
+				? live.derived(() => ['source'], () => true, { onUnsubscribe })
+				: live.derived(['source'], () => true, { onUnsubscribe });
+			env.register('stats', { derived });
+		}
+		await peer.subscribe(kind === 'aggregate' ? 'stats/out' : 'stats/derived').waitFor(() => true);
+		peer.disconnect();
+		await flush();
+		expect(onUnsubscribe).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([false, true])('composes static and dynamic derived lifecycle with internal activation (dynamic: %s)', async dynamic => {
 		const hooks = lifecycle();
 		const derived = dynamic
