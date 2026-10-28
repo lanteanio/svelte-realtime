@@ -709,10 +709,13 @@ function _currentDerivedContext(entry, platform, select = true, cursor = null) {
 				// context only for a custom scope callback or the selected compute.
 				if (scopeKey) {
 					ctx = subscriber.scopeCtx;
-					if (!ctx || subscriber.scopePlatform !== platform || ctx.requestId !== platform?.requestId ||
+					if (!ctx || ctx.user !== (user || null) || subscriber.scopePlatform !== platform ||
+						subscriber.scopeTenancy !== _isTenancyEnabled() ||
+						ctx.requestId !== platform?.requestId ||
 						ctx.connectionId !== (ws ? platform?.connectionId ?? platform?.requestId : undefined)) {
 						ctx = subscriber.scopeCtx = _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
 						subscriber.scopePlatform = platform;
+						subscriber.scopeTenancy = _isTenancyEnabled();
 					}
 					ctx.user = user || null;
 					ctx.traceContext = platform?.traceContext ?? null;

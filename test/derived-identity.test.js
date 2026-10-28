@@ -90,7 +90,7 @@ describe('dynamic derived identity', () => {
 		const observations = [];
 		const { publish } = setup(() => 'shared', { scopeKey: ctx => {
 			socket = ctx.ws;
-			observations.push({ label: ctx.user.label, requestId: ctx.requestId, platformRequestId: ctx.platform.requestId, traceContext: ctx.traceContext });
+			observations.push({ label: ctx.user.label, requestId: ctx.requestId, platformRequestId: ctx.platform.requestId, traceContext: ctx.traceContext, clock: ctx.now() });
 			return ctx.user.group;
 		} });
 		Object.defineProperties(env.platform, {
@@ -101,8 +101,9 @@ describe('dynamic derived identity', () => {
 		publish(); await flush();
 		socket.getUserData = () => ({ id: 'member', label: 'after', group: 'team' });
 		requestId = 'request-two'; traceContext = { traceId: 'trace-two' };
+		env.platform.now = () => 12345;
 		publish(); await flush();
-		expect(observations.at(-1)).toEqual({ label: 'after', requestId, platformRequestId: requestId, traceContext });
+		expect(observations.at(-1)).toEqual({ label: 'after', requestId, platformRequestId: requestId, traceContext, clock: 12345 });
 	});
 
 	it.each(['now', 'random', 'hlc'])('revokes a cached scope after its %s source changes', async (name) => {
