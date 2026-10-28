@@ -904,7 +904,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
 	const result = await _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef);
-	subscribedRef.loaded = result?.ok === true;
+	subscribedRef.loaded = result?.ok === true && result.gated !== true;
 	return result;
 }
 
@@ -1547,10 +1547,24 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 				_subscribedRef.validate?.();
 			}
 		}
-		if (/** @type {any} */ (fn).__isStream && _result.ok === true && _subscribedRef.loaded &&
-			(!_subscribedRef.isActive || _subscribedRef.isActive()) && /** @type {any} */ (fn).__onSubscribeSuccess) {
-			if (_subscribedRef.owner) _subscribedRef.owner.publicAttached = true;
+		if (/** @type {any} */ (fn).__isStream && _result.ok === true && _subscribedRef.loaded && _subscribedRef.owner &&
+			_subscribedRef.isActive() && /** @type {any} */ (fn).__onSubscribeSuccess) {
+			_subscribedRef.owner.publicAttached = true;
+			const joining = { topic: _subscribedRef.topic, complete: null, promise: null, next: _pendingSubscribeHooks.get(ws) || null };
+			_pendingSubscribeHooks.set(ws, joining);
 			try { await /** @type {any} */ (fn).__onSubscribeSuccess(ctx, _subscribedRef.topic ?? _result.topic); } catch {}
+			finally {
+				joining.complete?.();
+				const head = _pendingSubscribeHooks.get(ws);
+				if (head === joining) {
+					if (joining.next) _pendingSubscribeHooks.set(ws, joining.next);
+					else _pendingSubscribeHooks.delete(ws);
+				} else {
+					for (let previous = head; previous; previous = previous.next) {
+						if (previous.next === joining) { previous.next = joining.next; break; }
+					}
+				}
+			}
 		}
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/

@@ -1175,7 +1175,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 		}).catch(() => {});
 	}
 	const publicOwner = _wsStreamOwners.get(ws)?.get(topic)?.find((owner) => owner.fn === fn);
-	if (publicOwner?.publicAttached && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
+	if (publicOwner?.count === 0 && publicOwner.publicAttached && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
 		_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (fn).__onUnsubscribePublic(ctx, topic, current ?? remainingSubscribers)).catch(() => {});
 	}
 }

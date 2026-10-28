@@ -122,6 +122,65 @@ describe('aggregate and derived observer lifecycle', () => {
 		expect(hooks.onUnsubscribe).toHaveBeenCalledTimes(1);
 	});
 
+	it('does not announce a gated no-op as an observer', async () => {
+		const hooks = lifecycle();
+		env.register('stats', { derived: live.gate(() => false, live.derived(['source'], () => true, hooks)) });
+		await peer.subscribe('stats/derived').waitFor(() => true);
+		expect(hooks.onSubscribe).not.toHaveBeenCalled();
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])('does not release an aggregate observer whose initial load failed (windowed: %s)', async windowed => {
+		const hooks = lifecycle();
+		const reducers = { count: { compute: () => { throw new Error('compute failed'); } } };
+		const aggregate = windowed
+			? live.aggregate('events', reducers, { topic: 'stats:out', windows: { last10min: { type: 'lifetime' } }, ...hooks })
+			: live.aggregate('events', reducers, { topic: 'stats:out', ...hooks });
+		env.register('stats', { out: aggregate });
+		if (windowed) __register('stats/last10min', aggregate.__windowStreams.last10min);
+		const stream = peer.subscribe(windowed ? 'stats/last10min' : 'stats/out');
+		await vi.waitFor(() => expect(stream.error).not.toBeNull());
+		expect(hooks.onSubscribe).not.toHaveBeenCalled();
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+	});
+
+	it('pairs a later failed attach independently of an earlier success', async () => {
+		const hooks = lifecycle();
+		let calls = 0;
+		env.register('stats', { derived: live.derived(['source'], () => {
+			if (++calls === 2) throw new Error('second load failed');
+			return true;
+		}, hooks) });
+		await peer.subscribe('stats/derived').waitFor(() => true);
+		const ws = hooks.onSubscribe.mock.calls[0][0].ws;
+		const topic = hooks.onSubscribe.mock.calls[0][1];
+		const failed = peer.subscribe('stats/derived');
+		await vi.waitFor(() => expect(failed.error).not.toBeNull());
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+		close(ws, { platform: env.platform });
+		await flush();
+		expect(hooks.onUnsubscribe).toHaveBeenCalledExactlyOnceWith(expect.anything(), topic, 0);
+	});
+
+	it('finishes an asynchronous subscribe before releasing it', async () => {
+		const hooks = lifecycle();
+		const events = [];
+		let release;
+		const gate = new Promise(resolve => { release = resolve; });
+		hooks.onSubscribe = vi.fn(async () => { events.push('start'); await gate; events.push('end'); });
+		hooks.onUnsubscribe = vi.fn(() => { events.push('release'); });
+		let ws;
+		env.register('stats', { derived: live.derived(['source'], ctx => { ws = ctx.ws; return true; }, hooks) });
+		const stream = peer.subscribe('stats/derived');
+		await flush();
+		close(ws, { platform: env.platform });
+		expect(events).toEqual(['start']);
+		release();
+		await stream.waitFor(() => true);
+		await flush();
+		expect(events).toEqual(['start', 'end', 'release']);
+	});
+
 	it('handles repeated subscriptions and drains each logical attachment once', async () => {
 		const hooks = lifecycle();
 		env.register('stats', { derived: live.derived(['source'], () => true, hooks) });

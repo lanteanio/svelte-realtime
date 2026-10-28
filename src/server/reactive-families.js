@@ -357,7 +357,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 			/** @type {any} */ (perWindowInit).__aggregateRoot = root;
 			/** @type {any} */ (perWindowInit).__aggregateWindowName = wn;
 			/** @type {any} */ (perWindowInit).__onSubscribeSuccess = options?.onSubscribe;
-			/** @type {any} */ (perWindowInit).__onUnsubscribe = options?.onUnsubscribe;
+			/** @type {any} */ (perWindowInit).__onUnsubscribePublic = options?.onUnsubscribe;
 			windowStreams[wn] = perWindowInit;
 		}
 		/** @type {any} */ (root).__windowStreams = windowStreams;
@@ -391,6 +391,6 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
 	/** @type {any} */ (initFn).__aggregatePrivacy = privacy;
 	/** @type {any} */ (initFn).__onSubscribeSuccess = options?.onSubscribe;
-	/** @type {any} */ (initFn).__onUnsubscribe = options?.onUnsubscribe;
+	/** @type {any} */ (initFn).__onUnsubscribePublic = options?.onUnsubscribe;
 	return initFn;
 };
