@@ -947,6 +947,27 @@ describe('live.smooth close drain', () => {
 		expect(removeFrame.topic).toBe('__smooth:shape:r1');
 	});
 
+	it('calls onEmpty once per discarded room and preserves cleanup when it throws', async () => {
+		const onEmpty = vi.fn(() => { throw new Error('teardown failed'); });
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const { name } = declareShape({ onEmpty });
+		const ws = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		close(ws, { platform });
+		close(ws, { platform });
+		expect(onEmpty).toHaveBeenCalledExactlyOnceWith('__smooth:shape:r1');
+		expect(_smoothTopics.has('shape:r1')).toBe(false);
+		const rejoined = mockWs({ id: 'u2' });
+		await call(rejoined, platform, name + '/shape/__smooth/sync', ['r1']);
+		close(rejoined, { platform });
+		expect(onEmpty).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects a non-function onEmpty at registration', () => {
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, onEmpty: 5 })).toThrow('onEmpty must be a function');
+	});
+
 	it('the tick self-heals an entity bound to a closed socket: removed and broadcast, never acked', async () => {
 		const { name } = declareShape({ tickMs: 20 });
 		const ghost = mockWs({ id: 'u1' });

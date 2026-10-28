@@ -3,7 +3,7 @@
   "owner": "svelte-realtime",
   "compatibilitySource": "src/cli-utils.js",
   "entryBudgetLines": 60,
-  "readmeMaxLines": 5637,
+  "readmeMaxLines": 5639,
   "paths": [
     {
       "key": "identity",
@@ -142,6 +142,10 @@
     {
       "from": 5638,
       "to": 5655
+    },
+    {
+      "from": 5637,
+      "to": 5639
     }
   ]
 }

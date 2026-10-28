@@ -3584,6 +3584,14 @@ export interface SmoothConfig {
 	 */
 	onTick?: (world: SmoothWorld, t: number) => void | boolean;
 	/**
+	 * Called once when this instance discards the room record after its last
+	 * entity or local subscriber leaves. Use it to release state keyed by the
+	 * resolved topic. It does not fire for an ownership handoff that keeps local
+	 * subscribers. Synchronous and best-effort: a throwing hook does not stop
+	 * cleanup, and a later join creates a fresh room record.
+	 */
+	onEmpty?: (topic: string) => void;
+	/**
 	 * The topic's wire views: app-owned codec pairs applied at the CLIENT wire
 	 * boundary and nowhere else. `state` packs every state the clients receive
 	 * (tick updates, acknowledgements, the sync roster) into a compact
