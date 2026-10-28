@@ -54,6 +54,9 @@ function _followBinding(subscribe) {
 // while remaining attached to the closed connection until that happens.
 const _following = {
 	send: (...args) => _bound.send(...args),
+	get sendSerialized() {
+		return typeof _bound.sendSerialized === 'function' ? (...args) => _bound.sendSerialized(...args) : undefined;
+	},
 	sendQueued: (...args) => _bound.sendQueued(...args),
 	get bufferedAmount() { return _bound.bufferedAmount; },
 	status: { subscribe: _followBinding((connection, fn) => connection.status.subscribe(fn)) },

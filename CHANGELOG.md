@@ -265,6 +265,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
 
+- Promise RPCs reject unserializable arguments with `INVALID_REQUEST` and the original `cause` before sending, queuing, or allocating request timers. JSON snapshots are taken once at call time and reused for deduplication, durable offline values, parked sends, and the adapter's serialized-send path; an invalid member rejects the whole unsent batch.
+
 ### Security
 
 - A stream path answers only a subscribe frame. A plain RPC frame (no `stream: true`) naming a `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, `live.flag` or room sub-stream is refused with `INVALID_REQUEST` after the module guard, also inside a batch and as a fire-and-forget call. Before, such a frame ran the stream's loader directly, skipping its `access`/`filter` predicate, args schema and gate, and returned the snapshot to a caller that could not subscribe. Server-side `.load()` is unchanged. In `createTestEnv`, `.call()` on a stream path now rejects with `INVALID_REQUEST`; use `.subscribe()`.

@@ -113,9 +113,10 @@ export function _resetClientPublishRateWarning() {
  * Build a dedup key from path and args, avoiding JSON.stringify for common cases.
  * @param {string} path
  * @param {any[]} args
+ * @param {string} [serialized]
  * @returns {string}
  */
-function _buildDedupKey(path, args) {
+function _buildDedupKey(path, args, serialized) {
 	if (args.length === 0) return path;
 	if (args.length === 1) {
 		const a = args[0];
@@ -126,7 +127,22 @@ function _buildDedupKey(path, args) {
 		if (t === 'number') return path + '\0#' + a;
 		if (t === 'boolean') return path + '\0B' + a;
 	}
-	return path + '\0' + JSON.stringify(args);
+	return path + '\0' + (serialized ?? JSON.stringify(args));
+}
+
+/** @type {RpcError | null} */
+let _batchArgsError = null;
+
+/** Capture object arguments as JSON once, before deduplication or queuing. */
+function _serializeArgs(args, path) {
+	if (typeof process === 'undefined' || (typeof import.meta !== 'undefined' && import.meta.env?.DEV)) _checkArgs(path, args);
+	for (const arg of args) {
+		const type = typeof arg;
+		if (arg !== null && type !== 'string' && type !== 'boolean' && !(type === 'number' && Number.isFinite(arg))) {
+			return JSON.stringify(args);
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -138,29 +154,31 @@ function _buildDedupKey(path, args) {
  * @returns {((...args: any[]) => Promise<any>) & { fresh: (...args: any[]) => Promise<any>, with: (opts: { idempotencyKey?: string, timeout?: number }) => (...args: any[]) => Promise<any> }}
  */
 export function __rpc(path, defaults) {
+	const textPrefix = '{"rpc":' + JSON.stringify(path) + ',"id":';
 	function rpcCall(...args) {
+		let serialized;
+		try { serialized = _serializeArgs(args, path); }
+		catch (cause) { return _invalidArgs(path, args, cause); }
 		// Dedup: coalesce identical calls within the same microtask
 		if (!clientState.batchCollector) {
-			let dedupKey;
-			try { dedupKey = _buildDedupKey(path, args); }
-			catch (cause) { return _invalidArgs(path, args, cause); }
+			const dedupKey = _buildDedupKey(path, args, serialized);
 			const existing = _dedupMap.get(dedupKey);
 			if (existing) {
 				_warnCoalesceOnce(path);
 				return existing;
 			}
 
-			const promise = _sendRpc(path, args, undefined, defaults?.timeout);
+			const promise = _sendRpc(path, args, undefined, defaults?.timeout, false, true, serialized, textPrefix);
 			_dedupMap.set(dedupKey, promise);
 			microtask(() => _dedupMap.delete(dedupKey));
 			return promise;
 		}
-		return _sendRpc(path, args, undefined, defaults?.timeout);
+		return _sendRpc(path, args, undefined, defaults?.timeout, false, true, serialized, textPrefix);
 	}
 
 	/** Bypass deduplication - always send a fresh request. */
 	rpcCall.fresh = function freshCall(...args) {
-		return _sendRpc(path, args, undefined, defaults?.timeout);
+		return _sendRpc(path, args, undefined, defaults?.timeout, false, false, undefined, textPrefix);
 	};
 
 	/**
@@ -287,6 +305,9 @@ export function __rpc(path, defaults) {
 		if (!idempotencyKey && !opts?.timeout) return rpcCall;
 		const timeout = opts?.timeout ?? defaults?.timeout;
 		return function withCall(...args) {
+			let serialized;
+			try { serialized = _serializeArgs(args, path); }
+			catch (cause) { return _invalidArgs(path, args, cause); }
 			// Dedup only when an idempotency key is bound. Timeout-only calls
 			// bypass dedup - the longer-waiting caller would otherwise be
 			// rejected at the shorter call's timeout.
@@ -297,12 +318,12 @@ export function __rpc(path, defaults) {
 					_warnCoalesceOnce(path);
 					return existing;
 				}
-				const promise = _sendRpc(path, args, idempotencyKey, timeout);
+				const promise = _sendRpc(path, args, idempotencyKey, timeout, false, true, serialized, textPrefix);
 				_dedupMap.set(dedupKey, promise);
 				microtask(() => _dedupMap.delete(dedupKey));
 				return promise;
 			}
-			return _sendRpc(path, args, idempotencyKey, timeout);
+			return _sendRpc(path, args, idempotencyKey, timeout, false, true, serialized, textPrefix);
 		};
 	};
 
@@ -411,13 +432,14 @@ export function __mpFields() {
  * @param {any} conn
  * @param {any} frame
  * @param {string | string[]} requestIds
+ * @param {string} [serialized]
  */
-function _parkPendingFrame(conn, frame, requestIds) {
+function _parkPendingFrame(conn, frame, requestIds, serialized) {
 	const ids = typeof requestIds === 'string' ? [requestIds] : requestIds;
 	// Capture cold-path JSON now: user getters and toJSON must never run from
 	// a status subscriber, where a throw would interrupt every store update.
 	try {
-		if (!(frame instanceof ArrayBuffer) && !ArrayBuffer.isView(frame)) frame = JSON.parse(JSON.stringify(frame));
+		if (serialized === undefined && !(frame instanceof ArrayBuffer) && !ArrayBuffer.isView(frame)) frame = JSON.parse(JSON.stringify(frame));
 	} catch (cause) {
 		for (const id of ids) _rejectSend(id, cause);
 		return;
@@ -426,15 +448,22 @@ function _parkPendingFrame(conn, frame, requestIds) {
 		if (!clientState.socketUp) return;
 		const active = ids.filter(id => pending.has(id));
 		if (active.length === 0) return;
+		// A settled call must never ride along in an otherwise live batch.
+		if (frame.batch && active.length !== ids.length) frame = { ...frame, batch: frame.batch.filter(call => pending.has(call.id)) };
+		try {
+			if (serialized !== undefined) {
+				if (!conn.sendSerialized(serialized)) return;
+			} else conn.send(frame);
+		} catch (cause) {
+			for (const id of active) _rejectSend(id, cause);
+			return;
+		}
 		for (const id of active) {
 			const entry = pending.get(id);
+			if (!entry) continue;
 			entry.rpcWaiting = false;
 			delete entry.wake;
 		}
-		// A settled call must never ride along in an otherwise live batch.
-		if (frame.batch && active.length !== ids.length) frame = { ...frame, batch: frame.batch.filter(call => pending.has(call.id)) };
-		try { conn.send(frame); }
-		catch (cause) { for (const id of active) _rejectSend(id, cause); }
 	};
 	for (const id of ids) {
 		const entry = pending.get(id);
@@ -455,6 +484,7 @@ function _serializationError(cause) {
 /** @param {string} path @param {any[]} args @param {unknown} cause */
 function _invalidArgs(path, args, cause) {
 	const error = _serializationError(cause);
+	if (clientState.batchCollector && !_batchArgsError) _batchArgsError = error;
 	const id = _nextId();
 	_devtoolsStart(path, id, args);
 	_devtoolsEnd(id, false, error);
@@ -482,9 +512,16 @@ function _rejectSend(id, cause) {
  *   the socket is open: the drain keeps a call the connection cuts off, and a
  *   frame left in the adapter's send queue would go out again after the
  *   reconnect, next to the drain's own resend.
+ * @param {boolean} [prepared] Arguments already captured as JSON by the callable.
+ * @param {string} [serialized] Captured argument JSON, reused by text-capable adapters.
+ * @param {string} [textPrefix] Encoded static path from the callable.
  * @returns {Promise<any>}
  */
-export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
+export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared = false, serialized, textPrefix) {
+	if (!prepared) {
+		try { serialized = _serializeArgs(args, path); }
+		catch (cause) { return _invalidArgs(path, args, cause); }
+	}
 	ensureListener();
 	ensureDisconnectListener();
 
@@ -493,28 +530,15 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 		return Promise.reject(_connectionClosedError());
 	}
 
-	if (typeof process === 'undefined' || (typeof import.meta !== 'undefined' && import.meta.env?.DEV)) {
-		_checkArgs(path, args);
-	}
-
 	// Offline queue: if disconnected and queue is enabled, defer the call
 	if (clientState.isOffline && clientState.config.offline?.queue && !clientState.batchCollector) {
-		// Copied now, as the wire carries it (JSON): the call replays the args
-		// it was made with, not what an object it was passed (a `$state` proxy,
-		// say) holds by then, and IndexedDB can store the copy. Args that
-		// cannot be serialized fail the call here, as they do when it is sent.
-		/** @type {any[]} */
-		let queuedArgs;
-		try {
-			queuedArgs = JSON.parse(JSON.stringify(args));
-		} catch (err) {
-			return _invalidArgs(path, args, err);
-		}
+		// Durable queues expose JSON values to hooks and persistence adapters.
+		if (serialized !== undefined) args = JSON.parse(serialized);
 		const maxQueue = _queueLimit(clientState.config.offline);
 		return new Promise((resolve, reject) => {
 			// Room for this one: the oldest go, settled once it is queued.
 			const dropped = _trimQueue(maxQueue - 1);
-			const entry = { path, args: queuedArgs, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
+			const entry = { path, args, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
 			_offlineQueue.push(entry);
 			// Durability write-through: stamps the monotone seq, synthesizes an
 			// idempotency key when absent (a live.idempotent handler keyed by it
@@ -531,6 +555,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 	// timer governs all collected calls; per-call `timeout` is intentionally
 	// dropped here (documented limitation).
 	if (clientState.batchCollector) {
+		if (serialized !== undefined) args = JSON.parse(serialized);
 		clientState.batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
 		// Batched calls used to be invisible in DevTools entirely: this branch
 		// returns before the `_devtoolsStart` below, and stored the RAW resolve and
@@ -552,6 +577,13 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 	// its captured args with nothing to sweep them, since no timer is armed
 	// until below.
 	const conn = _conn();
+	let text;
+	if (serialized !== undefined) {
+		if (typeof conn.sendSerialized === 'function') {
+			text = (textPrefix ?? ('{"rpc":' + JSON.stringify(path) + ',"id":')) + JSON.stringify(id) + ',"args":' + serialized
+				+ (idempotencyKey ? ',"idempotencyKey":' + JSON.stringify(idempotencyKey) : '') + '}';
+		} else args = JSON.parse(serialized);
+	}
 	_devtoolsStart(path, id, args);
 	const effectiveTimeout = timeout || _getTimeout();
 	// Sleep-detect threshold scales with the effective timeout so longer
@@ -581,10 +613,14 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 			timer,
 			replay: replay === true
 		});
-		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
 		try {
-			if (replay || clientState.socketUp) conn.send(envelope);
-			else _parkPendingFrame(conn, envelope, id);
+			if (text !== undefined) {
+				if (!(replay || clientState.socketUp) || !conn.sendSerialized(text)) _parkPendingFrame(conn, {}, id, text);
+			} else {
+				const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
+				if (replay || clientState.socketUp) conn.send(envelope);
+				else _parkPendingFrame(conn, envelope, id);
+			}
 		} catch (cause) { _rejectSend(id, cause); }
 	});
 }
@@ -598,6 +634,11 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
  */
 export function __binaryRpc(path) {
 	return function binaryRpcCall(buffer, ...args) {
+		let serialized;
+		try {
+			serialized = _serializeArgs(args, path);
+			if (serialized !== undefined) args = JSON.parse(serialized);
+		} catch (cause) { return _invalidArgs(path, args, cause); }
 		ensureListener();
 		ensureDisconnectListener();
 		if (clientState.terminated) {
@@ -721,6 +762,7 @@ export function batch(fn, options) {
 
 	// Collect RPC calls during fn() execution
 	clientState.batchCollector = [];
+	_batchArgsError = null;
 	/** @type {any} */
 	let promises;
 	try {
@@ -729,6 +771,7 @@ export function batch(fn, options) {
 		// Clean up collector and any pending entries on synchronous throw
 		const collected = clientState.batchCollector;
 		clientState.batchCollector = null;
+		_batchArgsError = null;
 		if (collected) {
 			for (const call of collected) {
 				const entry = pending.get(call.id);
@@ -742,8 +785,20 @@ export function batch(fn, options) {
 	}
 	const collected = clientState.batchCollector;
 	clientState.batchCollector = null;
+	const argsError = _batchArgsError;
+	_batchArgsError = null;
+	if (argsError) {
+		for (const call of collected) {
+			const entry = pending.get(call.id);
+			if (entry) {
+				pending.delete(call.id);
+				entry.reject(argsError);
+			}
+		}
+		return Promise.all(promises).then(() => { throw argsError; });
+	}
 
-	if (collected.length === 0) return Promise.resolve([]);
+	if (collected.length === 0) return Promise.all(promises);
 
 	if (collected.length > MAX_RPC_BATCH_CALLS) {
 		for (const call of collected) {

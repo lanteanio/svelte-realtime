@@ -3767,3 +3767,21 @@ it('a stored checkpoint carries the retention expiry of its queue', async () => 
 	expect(expiresAt).toBeGreaterThanOrEqual(before + 60000);
 	expect(expiresAt).toBeLessThanOrEqual(Date.now() + 60000);
 });
+
+it('persists JSON nulls for lossy primitive arguments and exposes those same values before replay', async () => {
+	const store = fakeStore();
+	const put = store.put;
+	store.put = async (key, value) => put(key, structuredClone(value));
+	const beforeReplay = vi.fn(() => true);
+	const values = [undefined, Symbol('value'), NaN, Infinity, -Infinity, () => 1];
+	const promises = await goOfflineAndQueue({ persist: store, beforeReplay }, values.map((value, index) => ['primitive/' + index, [value]]));
+	await until(() => storedKeys(store).length === values.length);
+	expect(storedKeys(store)).toHaveLength(values.length);
+	for (const key of storedKeys(store)) expect(store.map.get(key).args).toEqual([null]);
+	simulateStatus('open');
+	await until(() => sentCalls().length > 0);
+	await respondAll(() => ({ ok: true, data: 'ok' }));
+	await Promise.all(promises);
+	expect(beforeReplay).toHaveBeenCalledTimes(values.length);
+	for (const [entry] of beforeReplay.mock.calls) expect(entry.args).toEqual([null]);
+});

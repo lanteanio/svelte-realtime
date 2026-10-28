@@ -1141,7 +1141,7 @@ const [board, column] = await batch(() => [
 ], { sequential: true });
 ```
 
-Each call resolves or rejects independently - one failure does not cancel the others. Batches are limited to 50 calls - enforced both client-side (rejects before sending) and server-side.
+Each sent call resolves or rejects independently. Batches are limited to 50 calls, enforced client-side before sending and server-side. Promise-returning RPCs reject with `RpcError` code `INVALID_REQUEST` when arguments cannot be serialized as JSON (including nested `BigInt`, cycles, or a throwing `toJSON`). The original error is available as `cause`; no request is sent or queued. This applies to regular calls, `.fresh()`, `.with()`, binary RPC metadata, and offline calls. Object arguments are captured as JSON once at call time. If one collected call cannot serialize, `batch()` rejects all collected calls before sending its frame.
 
 A `batch()` containing only one call sends a bare RPC frame (no batch envelope) and the server replies through the normal RPC path - so the defensive "always wrap writes in batch() for symmetry" pattern pays no envelope overhead. Batches of 2+ keep the envelope.
 
