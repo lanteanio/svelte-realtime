@@ -85,6 +85,7 @@ import { validateFunctionTimeout } from './shared/function-timeout.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
 export { setOperationalEventSink, emitOperationalEvent } from './shared/diagnostic.js';
+export { sourceGap } from './server/source-gap.js';
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
 export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';

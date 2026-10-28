@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- `sourceGap(platform, topic, { source, reason, jitterMs })` reports lost delivery from an external change source over the subscribed data topic with `seq: false`. Mounted streams discard their resume cursors and reload authoritative state through the coalesced, de-herded gap-recovery path without merging the reserved signal into application data.
+
 - Degradation mitigation and recovery notices accept bounded `messageKey` and typed `messageParams` fields for application-owned localization catalogs, while preserving `bannerCopy` as the source-English fallback. Invalid notice fields are omitted independently. The browser fixture covers localized transition announcements, action gating, focus-preserving recovery, and stable retry deadlines.
 
 - `live.smooth({ onEmpty })` calls a synchronous teardown hook when an instance discards a room after its last entity or local subscriber leaves, giving per-room simulation state a reliable cleanup edge without treating an ownership handoff as room death.

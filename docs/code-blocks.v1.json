@@ -6,13 +6,13 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 247,
+		"total": 248,
 		"classifications": {
 			"command": 4,
 			"tutorial": 75,
 			"executed": 33,
 			"output": 5,
-			"syntax": 128,
+			"syntax": 129,
 			"fragment": 1,
 			"config": 1
 		},
@@ -21,7 +21,7 @@
 			"app-context": 75,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
-			"acorn": 121,
+			"acorn": 122,
 			"svelte": 6,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
@@ -29,7 +29,7 @@
 		},
 		"notRunnable": {
 			"app-context": 75,
-			"ambient-identifiers": 119,
+			"ambient-identifiers": 120,
 			"browser-component": 6,
 			"type-declarations-only": 1,
 			"requires-browser": 1
@@ -2188,6 +2188,16 @@
 			"classification": "tutorial",
 			"channel": "app-context",
 			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f9048fed3298f091f0649467e88487f7b41555fdbb1508371a1091f161c85a6b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Delta sync and replay > External change-source gaps",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers platform,topic"
 		},
 		{
 			"document": "README.md",

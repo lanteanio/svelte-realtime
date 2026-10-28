@@ -128,6 +128,17 @@ describe('relay gap markers', () => {
 		off();
 	});
 
+	it('reloads authoritative state for an external change-source gap marker', async () => {
+		const { ws, off } = await loadedStream();
+		runtime.setRuntimeEnv({ rng: { float: () => 0 } });
+		ws.receive({ topic: 'items', event: '__realtime.gap', data: { source: 'postgres-notify', reason: 'reconnect' }, j: 1000 });
+		await tick();
+		const resumed = subscribes(ws, 'items/list');
+		expect(resumed).toHaveLength(2);
+		expect(resumed[1].seq).toBeUndefined();
+		off();
+	});
+
 	it('a marker that arrives after the re-snapshot was requested gets its own', async () => {
 		const { ws, off } = await loadedStream();
 		gap(ws);

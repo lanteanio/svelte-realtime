@@ -63,6 +63,17 @@ export interface SharedRandom {
 export function createSharedRandom(seed?: number): SharedRandom;
 
 /**
+ * Report an external change-source delivery gap for one concrete stream topic.
+ * Mounted streams discard resume cursors and reload authoritative state.
+ * Returns false when the adapter refuses the publish; retry the signal.
+ */
+export function sourceGap(
+	platform: Platform,
+	topic: string,
+	options: { source: string; reason?: string; jitterMs?: number }
+): boolean;
+
+/**
  * Context passed to `live.cron()` functions.
  * No `user` or `ws` since cron jobs run outside a connection.
  */

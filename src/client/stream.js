@@ -1,6 +1,7 @@
 // @ts-check
 import * as _adapterClient from 'svelte-adapter-uws/client';
 import { MAX_RPC_BATCH_CALLS, STREAM_BATCH_BYTES } from '../shared/rpc-limits.js';
+import { SOURCE_GAP_EVENT } from '../shared/source-gap.js';
 // Server-managed subscription marking. Older adapters (before the wire-subscribe
 // authorization surface) lack it; degrade to a no-op, which leaves the prior
 // behavior exactly (the client sends its redundant subscribe frame, and no gate
@@ -1735,6 +1736,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			// a resubscribe loads, so replaying it would overwrite fresher data.
 			if (!envelope || envelope === _lastEnvelope) return;
 			_lastEnvelope = envelope;
+			if (envelope.event === SOURCE_GAP_EVENT) { _onGapMarker(envelope); return; }
 			if (_hiddenAt !== null) _hiddenAt = now();
 			if (!initialLoaded) buffer.push(envelope);
 			else _jitter.dispatch(envelope);

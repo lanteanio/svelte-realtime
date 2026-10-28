@@ -4658,6 +4658,23 @@ const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
 
 ## Delta sync and replay
 
+### External change-source gaps
+
+An external change bridge that loses delivery while reconnecting or changing leaders must signal each affected concrete stream topic after delivery is re-established. Use the trusted server helper with the bridge's platform:
+
+<!-- doc-code: ambient names="platform,topic" -->
+```js
+import { sourceGap } from 'svelte-realtime/server';
+
+sourceGap(platform, topic, {
+  source: 'postgres-notify',
+  reason: 'reconnect',
+  jitterMs: 1000
+});
+```
+
+`source` identifies the bridge and `reason` is an optional diagnostic string; the client does not use either to reconstruct events. `jitterMs` is an optional de-herd window. The helper publishes the reserved `__realtime.gap` event on the subscribed data topic with `seq: false`, so default relay behavior fans it out across workers without claiming a sequence authority. Resolve patterns to their concrete topics before calling, check the boolean result, and retry a refused signal: an egress refusal delivers nothing. Mounted streams discard their resume cursors and reload authoritative state without a `seq` cursor; the reserved event is never merged into application data. Signals before that reload coalesce, while a later signal triggers another reload. A fresh subscription already loads current state. This signal repairs subscribers after a known source gap; it does not make the external event stream durable or identify the lost events.
+
 ### Delta sync
 
 Enable delta sync for efficient reconnection on streams with large datasets. Instead of refetching all data, the server sends only what changed since the client's last known version.
