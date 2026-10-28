@@ -84,6 +84,9 @@ describe('retry error metadata', () => {
 		const optional = new RpcError('RATE_LIMITED', 'Slow down', { retryAfter: undefined, params: { kept: true }, details: 'ok' });
 		expect(optional).toMatchObject({ params: { kept: true }, details: 'ok' });
 		expect(optional.retryAfter).toBeUndefined();
+		const accessor = new RpcError('RATE_LIMITED', 'Slow down', Object.defineProperty({ params: { kept: false } }, 'retryAfter', { get() { return 5; } }));
+		expect(accessor.retryAfter).toBeUndefined();
+		expect(accessor.params).toBeUndefined();
 	});
 
 	it('validates middleware retry metadata on direct calls and uploads', async () => {
