@@ -1281,23 +1281,30 @@ export const quiescent: Readable<boolean>;
  */
 export const health: Readable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>;
 
+/** Localizable notice metadata. Application catalogs own the translated text. */
+export interface DegradationNotice {
+	/** Dot-separated catalog key, at most 128 UTF-8 bytes. Unknown keys use bannerCopy or the app's generic fallback. */
+	messageKey?: string;
+	/** Plain interpolation object: at most 64 entries, 1024 UTF-8 bytes per string, 4096 bytes serialized. */
+	messageParams?: Record<string, string | number | boolean | null>;
+	/** Source-English fallback, nonblank plain text without control characters, at most 2048 UTF-8 bytes. */
+	bannerCopy?: string;
+}
+
 /** The precomputed client mitigation a degradation policy attached to the `degraded` event. */
-export interface DegradationMitigation {
+export interface DegradationMitigation extends DegradationNotice {
 	/** Stream topics to treat as unavailable while degraded. */
 	streams?: string[];
 	/** RPC paths to treat as unavailable while degraded. */
 	rpcs?: string[];
 	/** How long (ms) to hold off before retrying. */
 	retryAfterMs?: number;
-	/** Ready-to-render notice text. */
-	bannerCopy?: string;
 }
 
 /** The recovered-event hint a degradation policy attached. */
-export interface DegradationRecovery {
+export interface DegradationRecovery extends DegradationNotice {
 	refetch?: boolean;
 	clearCache?: boolean;
-	bannerCopy?: string;
 }
 
 /**

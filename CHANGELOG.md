@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Degradation mitigation and recovery notices accept bounded `messageKey` and typed `messageParams` fields for application-owned localization catalogs, while preserving `bannerCopy` as the source-English fallback. Invalid notice fields are omitted independently. The browser fixture covers localized transition announcements, action gating, focus-preserving recovery, and stable retry deadlines.
+
 - `live.smooth({ onEmpty })` calls a synchronous teardown hook when an instance discards a room after its last entity or local subscriber leaves, giving per-room simulation state a reliable cleanup edge without treating an ownership handoff as room death.
 
 - `live.aggregate` and `live.derived` accept `onSubscribe` and `onUnsubscribe` lifecycle hooks, including per-window aggregate outputs. Subscription fires only after a successful initial snapshot or replay; release reports remaining observers on that worker for expiring per-worker observer leases.

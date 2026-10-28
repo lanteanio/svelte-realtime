@@ -53,6 +53,55 @@ describe('degradation store (mitigation consumer)', () => {
 		u();
 	});
 
+	it('preserves localizable notice keys and typed parameters through both transitions', () => {
+		let d;
+		const u = degradation.subscribe((v) => { d = v; });
+		const messageKey = 'realtime.unavailable';
+		const messageParams = { service: 'Redis', retry: 30, transient: true, detail: null };
+		deliver({ event: 'degraded', data: { mitigation: { messageKey, messageParams, bannerCopy: 'Updates paused', retryAfterMs: 4000 } } });
+		expect(d.mitigation).toEqual({ messageKey, messageParams, bannerCopy: 'Updates paused', retryAfterMs: 4000 });
+		deliver({ event: 'recovered', data: { recovery: { messageKey: 'realtime.restored', messageParams: { service: 'Redis' }, bannerCopy: 'Updates restored', refetch: true } } });
+		expect(d.recovery).toEqual({ messageKey: 'realtime.restored', messageParams: { service: 'Redis' }, bannerCopy: 'Updates restored', refetch: true });
+		u();
+	});
+
+	it('omits each invalid notice field without dropping valid mitigation fields', () => {
+		let d;
+		const u = degradation.subscribe((v) => { d = v; });
+		const invalid = [
+			{ messageKey: 'not a key' },
+			{ messageKey: 'x'.repeat(129) },
+			{ bannerCopy: 'line\nbreak' },
+			{ bannerCopy: 'x'.repeat(2049) },
+			{ bannerCopy: '   ' },
+			{ messageParams: [] },
+			{ messageParams: 'not-an-object' },
+			{ messageParams: Object.fromEntries(Array.from({ length: 65 }, (_, i) => ['key' + i, i])) },
+			{ messageParams: { reason: 'x'.repeat(1025) } },
+			{ messageParams: { reason: 'x'.repeat(4096) } },
+			{ messageParams: { 'not a key': 'value' } },
+			{ messageParams: { count: Infinity } },
+			{ messageParams: { nested: {} } }
+		];
+		for (const notice of invalid) {
+			deliver({ event: 'degraded', data: { mitigation: { ...notice, streams: ['todos'], retryAfterMs: 1000 } } });
+			expect(d.mitigation).toEqual({ streams: ['todos'], retryAfterMs: 1000 });
+		}
+		u();
+	});
+
+	it('accepts omitted parameters and prevents special keys from changing prototypes', () => {
+		let d;
+		const u = degradation.subscribe((v) => { d = v; });
+		deliver({ event: 'degraded', data: { mitigation: { messageKey: 'updates.paused', messageParams: undefined } } });
+		expect(d.mitigation).toEqual({ messageKey: 'updates.paused' });
+		deliver({ event: 'degraded', data: { mitigation: { messageParams: JSON.parse('{"__proto__":"safe"}') } } });
+		expect(Object.hasOwn(d.mitigation.messageParams, '__proto__')).toBe(true);
+		expect(d.mitigation.messageParams.__proto__).toBe('safe');
+		expect({}.polluted).toBeUndefined();
+		u();
+	});
+
 	it('honors the de-herd window: a jittered degraded event defers the store update', () => {
 		let fired = null;
 		setRuntimeEnv(

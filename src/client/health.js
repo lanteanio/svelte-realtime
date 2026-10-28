@@ -101,6 +101,45 @@ let _healthCrdtDegraded = 0;
  * @type {import('svelte/store').Writable<{ active: boolean, mitigation: any, recovery: any }>}
  */
 const _degradationStore = writable({ active: false, mitigation: null, recovery: null });
+const _noticeEncoder = new TextEncoder();
+
+function _noticeText(value) {
+	return typeof value === 'string' && value.trim().length > 0 && !/[\u0000-\u001F\u007F-\u009F]/.test(value) && _noticeEncoder.encode(value).byteLength <= 2048;
+}
+
+function _noticeKey(value) {
+	return typeof value === 'string' && /^[A-Za-z0-9_.-]+$/.test(value) && _noticeEncoder.encode(value).byteLength <= 128;
+}
+
+function _noticeParams(value) {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return undefined;
+	const result = Object.create(null);
+	for (const [key, item] of Object.entries(value)) {
+		if (Object.keys(result).length >= 64) return undefined;
+		if (!_noticeKey(key)) return undefined;
+		if (item !== null && typeof item !== 'string' && typeof item !== 'boolean' && !(typeof item === 'number' && Number.isFinite(item))) return undefined;
+		if (typeof item === 'string' && _noticeEncoder.encode(item).byteLength > 1024) return undefined;
+		result[key] = item;
+	}
+	if (_noticeEncoder.encode(JSON.stringify(result)).byteLength > 4096) return undefined;
+	return result;
+}
+
+function _notice(value) {
+	if (!value || typeof value !== 'object') return value;
+	const result = { ...value };
+	if ('bannerCopy' in value && !_noticeText(value.bannerCopy)) delete result.bannerCopy;
+	if ('messageKey' in value && !_noticeKey(value.messageKey)) delete result.messageKey;
+	if ('messageParams' in value) {
+		const params = _noticeParams(value.messageParams);
+		if (params === undefined) delete result.messageParams;
+		else result.messageParams = params;
+	}
+	return result;
+}
 
 function _recomputeHealth() {
 	if (_healthIncompatible) { _healthStore.set('incompatible'); return; }
@@ -188,11 +227,11 @@ function _applyHealthEvent(envelope) {
 	const detail = envelope.data && typeof envelope.data === 'object' ? envelope.data : null;
 	if (envelope.event === 'degraded') {
 		_healthServerDegraded = true;
-		_degradationStore.set({ active: true, mitigation: (detail && detail.mitigation) || null, recovery: null });
+		_degradationStore.set({ active: true, mitigation: _notice(detail && detail.mitigation) || null, recovery: null });
 		_recomputeHealth();
 	} else if (envelope.event === 'recovered') {
 		_healthServerDegraded = false;
-		_degradationStore.set({ active: false, mitigation: null, recovery: (detail && detail.recovery) || null });
+		_degradationStore.set({ active: false, mitigation: null, recovery: _notice(detail && detail.recovery) || null });
 		_recomputeHealth();
 	} else if (envelope.event === 'protocol-stale') {
 		// The server told THIS connection its bundle is older than the server's
