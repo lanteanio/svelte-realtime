@@ -6,10 +6,10 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 248,
+		"total": 247,
 		"classifications": {
 			"command": 4,
-			"tutorial": 76,
+			"tutorial": 75,
 			"executed": 33,
 			"output": 5,
 			"syntax": 128,
@@ -18,7 +18,7 @@
 		},
 		"channels": {
 			"manual-command": 4,
-			"app-context": 76,
+			"app-context": 75,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
 			"acorn": 121,
@@ -28,7 +28,7 @@
 			"json": 1
 		},
 		"notRunnable": {
-			"app-context": 76,
+			"app-context": 75,
 			"ambient-identifiers": 119,
 			"browser-component": 6,
 			"type-declarations-only": 1,
@@ -302,16 +302,6 @@
 			"classification": "tutorial",
 			"channel": "app-context",
 			"reason": "app-context imports: $live/todos, $live/todos"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "2fc8138d94806155baa86e3c29d20f296d56f8e94b896fc3f6145ffb80274507",
-			"occurrence": 1,
-			"language": "svelte",
-			"section": "Error handling",
-			"classification": "tutorial",
-			"channel": "app-context",
-			"reason": "app-context imports: $live/chat"
 		},
 		{
 			"document": "README.md",

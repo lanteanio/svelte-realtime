@@ -672,21 +672,7 @@ The data store value never changes shape. It is always your data type or `undefi
 
 For a spinner without fast-response flicker, subscribe to `store.pending`. It becomes true only while an initial attach, reconnect, or resume takes longer than `pendingDelay`, and clears immediately on completion, failure, or detachment. Set `pendingDelay` in the `live.stream()` options to another nonnegative integer of milliseconds, or `0` for an immediate indicator; the build reads it, so write it in the options or in a module-level const. Observing this indicator alone does not attach the stream. Connection `status` and page quiescence still report work immediately. RPC promises, pagination and predicted writes do not expose this attach indicator.
 
-Handle loading in your template:
-
-```svelte
-<script>
-  import { messages } from '$live/chat';
-</script>
-
-{#if $messages === undefined}
-  <p>Loading...</p>
-{:else}
-  {#each $messages as msg (msg.id)}
-    <p>{msg.text}</p>
-  {/each}
-{/if}
-```
+See [client timing](docs/client-timing.md#loading-indicators) for a loading template.
 
 To show errors, subscribe to `.error`. `code` is the stable key and `message` is the source-English fallback, not a translation key: an English-only app can render `message` as the quickstart does, and an app that localizes resolves `code` plus `params` through an optional app-owned [error resolver](docs/error-metadata.md), which this and later examples import as `$lib/error-text`:
 
@@ -1493,11 +1479,7 @@ await createOrder.with({ idempotencyKey: id, timeout: 60_000 })(payload);
 | `idempotencyKey` | Carried in the envelope for the server's `live.idempotent` wrapper |
 | `timeout` | Per-call timeout in ms; overrides the function declaration and global `configure({ timeout })` default. Sleep-detect threshold scales with the override |
 
-Timeouts have three layers. A function declares its own budget where it is registered, `export const report = live(buildReport, { timeout: 300_000 })`, and its generated client stub waits that long; `report.with({ timeout })` overrides it for one call; `configure({ timeout })` (30,000 ms by default) covers functions that declare none. `.fresh()` and idempotency-only `.with()` calls keep the function budget. Calls inside `batch()` share its batch timer, `live.binary()` calls use the app-wide timeout, and fire-and-forget calls have no response timer.
-
-`live.stream(topic, init, { timeout })` applies the same budget to the stream's subscribe, refetch and `loadMore()` requests, not to the lifetime of the subscription. `live.upload(fn, { timeout })` gives an upload a total client deadline and sends the upload cancellation frame on expiry; undeclared uploads have no deadline. A client timeout does not stop an RPC handler; upload handlers can observe cancellation through `ctx.abortSignal`.
-
-The Vite plugin reads budgets without running server code: write an integer from 1 through 2,147,483,647 ms, or a module-local constant holding one (options objects and spreads may be module-local constants too). A visible `timeout` the build cannot resolve fails the build. Options built at runtime still work on the server, but their timeout does not reach the client stub; use `.with()` there.
+Declare client budgets with `live(fn, { timeout })`; per-call overrides win over function and app defaults. See [client timing](docs/client-timing.md) for precedence, stream/upload semantics, and build-time option requirements.
 
 ---
 
