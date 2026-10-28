@@ -1943,6 +1943,8 @@ export { message, close, unsubscribe } from 'svelte-realtime/server';
 
 `onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and fires the correct hook. The `unsubscribe` hook fires as soon as the client drops a topic; `close` only fires for topics still active at disconnect time. There is no double-firing.
 
+`live.aggregate` and `live.derived` accept the same hooks, including per-window aggregate outputs. Their `onSubscribe` runs only after the initial snapshot or replay succeeds, never for a denied or failed attach. `remainingSubscribers` is a per-worker count, not a cluster-wide total. For demand-driven work such as simulation, maintain an expiring observer lease per worker and resolved topic, refresh it on subscribe, and release it at zero; this also covers observers connected to nonleader replicas.
+
 > **Writing your own `unsubscribe` hook?** If your app exports a custom `unsubscribe` (for example to notify an adapter plugin), it REPLACES the framework's - so every drain that rides it stops running on live-socket topic drops: a room's enumeration registry never decrements, the presence `leave` never publishes, and owner succession never runs until the socket closes. Chain the framework's handler from yours:
 >
 > ```js

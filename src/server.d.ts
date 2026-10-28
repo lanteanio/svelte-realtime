@@ -2708,6 +2708,10 @@ export namespace live {
 			 * Per-window override available via `WindowSpec.debounce`.
 			 */
 			debounce?: number;
+			/** Called after a client successfully attaches to an aggregate output. */
+			onSubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
+			/** Called when an observer unsubscribes or disconnects. Counts other local sockets. */
+			onUnsubscribe?(ctx: LiveContext, topic: string, remainingSubscribers: number): void | Promise<void>;
 			/**
 			 * Optional time-windowing. When set, the aggregate maintains
 			 * one state slice per declared window, emits one output topic
@@ -2805,6 +2809,10 @@ export namespace live {
 		options?: {
 			merge?: string;
 			debounce?: number;
+			/** Called after a client successfully attaches to the resolved derived output. */
+			onSubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
+			/** Called when an observer unsubscribes or disconnects. Counts other local sockets. */
+			onUnsubscribe?(ctx: LiveContext, topic: string, remainingSubscribers: number): void | Promise<void>;
 			/**
 			 * Defines which callers share one output. Defaults to authenticated identity; guests are per connection.
 			 * Include permissions in this key when sessions of the same identity can have different authorized views.
@@ -2815,7 +2823,14 @@ export namespace live {
 	function derived<T extends () => any>(
 		sources: string[],
 		fn: T,
-		options?: { merge?: string; debounce?: number }
+		options?: {
+			merge?: string;
+			debounce?: number;
+			/** Called after a client successfully attaches to the derived output. */
+			onSubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
+			/** Called when an observer unsubscribes or disconnects. Counts other local sockets. */
+			onUnsubscribe?(ctx: LiveContext, topic: string, remainingSubscribers: number): void | Promise<void>;
+		}
 	): T;
 
 	/**

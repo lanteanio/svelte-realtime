@@ -204,6 +204,9 @@ export const _derivedRegister = function derived(sources, fn, options) {
 		/** @type {any} */ (fn).__streamTopic = baseTopic;
 		/** @type {any} */ (fn).__derivedSources = sources;
 	}
+	/** @type {any} */ (fn).__onSubscribeSuccess = options?.onSubscribe;
+	/** @type {any} */ (fn).__onUnsubscribePublic = options?.onUnsubscribe;
+	if (!dynamic && options?.onUnsubscribe) /** @type {any} */ (fn).__onUnsubscribe = options.onUnsubscribe;
 
 	return fn;
 };
@@ -221,9 +224,10 @@ export function _configureDynamicDerived(fn, baseTopic) {
 	fn.__streamTopic = topicFn;
 	fn.__derivedTopicArgs = topicArgs;
 	fn.__onSubscribe = (ctx, topic, args) => _activateDynamicDerived(fn, topic, ctx, args);
-	fn.__onUnsubscribe = (ctx, topic) => {
+	fn.__onUnsubscribe = (ctx, topic, remaining) => {
 		// A revoked scope already drained this lifetime synchronously.
 		if (ctx?._releasedDerived !== fn) _deactivateDynamicDerived(fn, topic, ctx);
+		return fn.__onUnsubscribePublic?.(ctx, topic, remaining);
 	};
 }
 
@@ -354,6 +358,8 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 			/** @type {any} */ (perWindowInit).__streamOptions = { merge: 'set' };
 			/** @type {any} */ (perWindowInit).__aggregateRoot = root;
 			/** @type {any} */ (perWindowInit).__aggregateWindowName = wn;
+			/** @type {any} */ (perWindowInit).__onSubscribeSuccess = options?.onSubscribe;
+			/** @type {any} */ (perWindowInit).__onUnsubscribe = options?.onUnsubscribe;
 			windowStreams[wn] = perWindowInit;
 		}
 		/** @type {any} */ (root).__windowStreams = windowStreams;
@@ -386,5 +392,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	/** @type {any} */ (initFn).__aggregateSnapshot = options?.snapshot || null;
 	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
 	/** @type {any} */ (initFn).__aggregatePrivacy = privacy;
+	/** @type {any} */ (initFn).__onSubscribeSuccess = options?.onSubscribe;
+	/** @type {any} */ (initFn).__onUnsubscribe = options?.onUnsubscribe;
 	return initFn;
 };

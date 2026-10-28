@@ -903,6 +903,14 @@ function _settleClaimBarriers(ws, topic, fn) {
  * @returns {Promise<any>}
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
+	const result = await _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef);
+	if (result?.ok === true && /** @type {any} */ (fn).__onSubscribeSuccess) {
+		try { await /** @type {any} */ (fn).__onSubscribeSuccess(ctx, subscribedRef.topic ?? result.topic); } catch {}
+	}
+	return result;
+}
+
+async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef) {
 	const { id, seq: clientSeq, schemaVersion: clientSchemaVersion } = msg;
 
 	// Validate args BEFORE topic resolution - prevents topic injection
