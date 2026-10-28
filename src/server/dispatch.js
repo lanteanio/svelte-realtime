@@ -1938,7 +1938,6 @@ async function _runDirectCall(path, args, platform, options) {
 	if (_isEnvelope(_answer)) {
 		if (_answer.ok === true) return _answer.data;
 		const err = new LiveError(typeof _answer.code === 'string' ? _answer.code : 'INTERNAL_ERROR', typeof _answer.error === 'string' ? _answer.error : undefined, _answer);
-		if (typeof _answer.retryAfter === 'number') /** @type {any} */ (err).retryAfter = _answer.retryAfter;
 		throw err;
 	}
 	return _answer;

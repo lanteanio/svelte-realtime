@@ -54,7 +54,7 @@ export function copyErrorMetadata(value) {
 			if (descriptor.value !== undefined) result[key] = clone(descriptor.value, 0);
 		}
 		if ('params' in result && (!result.params || typeof result.params !== 'object' || Array.isArray(result.params))) return EMPTY;
-		if (retryAfter) {
+		if (retryAfter && retryAfter.value !== undefined) {
 			if (!('value' in retryAfter) || typeof retryAfter.value !== 'number' || !Number.isFinite(retryAfter.value) || retryAfter.value < 0) return EMPTY;
 			result.retryAfter = retryAfter.value;
 		}

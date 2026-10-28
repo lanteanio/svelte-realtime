@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTestEnv } from '../src/testing.js';
-import { live, LiveError } from '../src/server.js';
+import { live, LiveError, __directCall, _prepareHmr } from '../src/server.js';
 import { RpcError } from '../src/client/internal-state.js';
 
 let env, peer;
@@ -11,7 +11,7 @@ beforeEach(() => {
 	env = createTestEnv();
 	peer = env.connect({ id: 'member' });
 });
-afterEach(() => { peer?.disconnect(); env?.cleanup(); });
+afterEach(() => { peer?.disconnect(); env?.cleanup(); _prepareHmr(); });
 
 function uploadChunk(streamId, rpc) {
 	const header = encoder.encode(JSON.stringify({ rpc, args: [] }));
@@ -81,5 +81,28 @@ describe('retry error metadata', () => {
 		}
 		const error = new RpcError('RATE_LIMITED', 'Slow down', { retryAfter: 0 });
 		expect(error.retryAfter).toBe(0);
+		const optional = new RpcError('RATE_LIMITED', 'Slow down', { retryAfter: undefined, params: { kept: true }, details: 'ok' });
+		expect(optional).toMatchObject({ params: { kept: true }, details: 'ok' });
+		expect(optional.retryAfter).toBeUndefined();
+	});
+
+	it('validates middleware retry metadata on direct calls and uploads', async () => {
+		live.middleware(async () => ({ ok: false, code: 'RATE_LIMITED', error: 'Slow down', retryAfter: -1, params: { dropped: true } }));
+		env.register('limited', {
+			text: live(() => true),
+			upload: live.upload(() => true)
+		});
+		const direct = await __directCall('limited/text', [], env.platform).catch(error => error);
+		expect(direct).toMatchObject({ code: 'RATE_LIMITED' });
+		expect(direct.retryAfter).toBeUndefined();
+		expect(direct.params).toBeUndefined();
+		const replies = [];
+		peer.onMessage(message => { if (message.topic === '__upload') replies.push(message.data); });
+		await peer.sendRaw(uploadChunk(42, 'limited/upload'));
+		await flush();
+		expect(replies).toHaveLength(1);
+		expect(replies[0].code).toBe('RATE_LIMITED');
+		expect(replies[0].retryAfter).toBeUndefined();
+		expect(replies[0].params).toBeUndefined();
 	});
 });

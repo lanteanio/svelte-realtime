@@ -738,7 +738,6 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	/** @type {any} */ let ctx = null;
 	let handlerStarted = false;
 	/** @type {Promise<void> | null} */ let chainRun = null;
-	/** @type {number | undefined} */ let refusalRetryAfter;
 	let refusedByMiddleware = false;
 	let chainFailed = false;
 	// Set where the server itself answered the upload. A client cancel, a cap
@@ -906,7 +905,6 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			// stands, including a failure the middleware caught. A middleware
 			// that never called next() is a server bug.
 			if (middlewareResult && middlewareResult.ok === false && typeof middlewareResult.code === 'string') {
-				if (typeof middlewareResult.retryAfter === 'number' && Number.isFinite(middlewareResult.retryAfter)) refusalRetryAfter = middlewareResult.retryAfter;
 				refusedByMiddleware = true;
 				throw new LiveError(middlewareResult.code, typeof middlewareResult.error === 'string' ? middlewareResult.error : middlewareResult.code, middlewareResult);
 			}
@@ -935,7 +933,6 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				/** @type {any} */
 				const result = { ok: false, code: err.code, error: err.message };
 				if ('params' in err || 'details' in err || 'retryAfter' in err) Object.assign(result, copyErrorMetadata(err));
-				if (refusalRetryAfter !== undefined) result.retryAfter = refusalRetryAfter;
 				_respondUpload(ws, platform, streamId, result);
 			} else {
 				if (options?.onError) {

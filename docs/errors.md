@@ -503,9 +503,9 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 ### `RATE_LIMITED`
 
 - Cause: A `live.rateLimit` or registry `rateLimits` bucket is exhausted, the limiter reaches its cap on tracked identities, or a smooth client re-syncs more often than its per-identity window allows.
-- Consequence: The call is refused before the handler runs. The client receives an RpcError carrying only the code and message. A server-side direct call receives the LiveError, which carries `retryAfter` in milliseconds.
+- Consequence: The call is refused before the handler runs. Client and direct-call errors carry `retryAfter` in milliseconds when the limiter supplied it.
 - Automatic recovery: None. Buckets refill as their window passes, but refused calls are not retried.
-- Next action: Back off on the client with your own delay; the client error does not say when the bucket refills. Server code can wait for `retryAfter`. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.
+- Next action: Wait for `retryAfter` before retrying when present. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.
 - Message patterns: <code>Too many concurrent rate-limit identities</code>; <code>Too many requests</code>; <code>smooth re-sync rate exceeded (max 5 per 1000ms per identity); back off and retry</code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js), [src/server/rate-limit.js](../src/server/rate-limit.js), [src/server/smooth.js](../src/server/smooth.js)
 

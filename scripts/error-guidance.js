@@ -197,9 +197,9 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	RATE_LIMITED: Object.freeze({
 		cause: 'A `live.rateLimit` or registry `rateLimits` bucket is exhausted, the limiter reaches its cap on tracked identities, or a smooth client re-syncs more often than its per-identity window allows.',
-		consequence: 'The call is refused before the handler runs. The client receives an RpcError carrying only the code and message. A server-side direct call receives the LiveError, which carries `retryAfter` in milliseconds.',
+		consequence: 'The call is refused before the handler runs. Client and direct-call errors carry `retryAfter` in milliseconds when the limiter supplied it.',
 		automaticRecovery: 'None. Buckets refill as their window passes, but refused calls are not retried.',
-		nextAction: 'Back off on the client with your own delay; the client error does not say when the bucket refills. Server code can wait for `retryAfter`. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.'
+		nextAction: 'Wait for `retryAfter` before retrying when present. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.'
 	}),
 	SERVICE_UNAVAILABLE: Object.freeze({
 		cause: 'A function wrapped with `live.breaker` is called while its circuit breaker is open and no `fallback` is configured.',
