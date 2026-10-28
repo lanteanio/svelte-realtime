@@ -138,7 +138,7 @@ function _serializeArgs(args, path) {
 	if (typeof process === 'undefined' || (typeof import.meta !== 'undefined' && import.meta.env?.DEV)) _checkArgs(path, args);
 	for (const arg of args) {
 		const type = typeof arg;
-		if (arg !== null && type !== 'string' && type !== 'boolean' && !(type === 'number' && Number.isFinite(arg))) {
+		if (arg !== null && type !== 'string' && type !== 'boolean' && !(type === 'number' && Number.isFinite(arg) && !Object.is(arg, -0))) {
 			return JSON.stringify(args);
 		}
 	}

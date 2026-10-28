@@ -3785,3 +3785,17 @@ it('persists JSON nulls for lossy primitive arguments and exposes those same val
 	expect(beforeReplay).toHaveBeenCalledTimes(values.length);
 	for (const [entry] of beforeReplay.mock.calls) expect(entry.args).toEqual([null]);
 });
+
+it('persists negative zero as the positive zero carried by the wire', async () => {
+	const store = fakeStore();
+	const beforeReplay = vi.fn(() => true);
+	const promise = await goOfflineAndQueue({ persist: store, beforeReplay }, [['counter/set', [-0]]]);
+	await until(() => storedKeys(store).length === 1);
+	const queued = store.map.get(storedKeys(store)[0]).args[0];
+	expect(Object.is(queued, 0)).toBe(true);
+	simulateStatus('open');
+	await until(() => sentCalls().length === 1);
+	await respondAll(() => ({ ok: true, data: 'ok' }));
+	await promise;
+	expect(Object.is(beforeReplay.mock.calls[0][0].args[0], 0)).toBe(true);
+});
