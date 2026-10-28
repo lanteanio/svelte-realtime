@@ -1175,7 +1175,8 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 		}).catch(() => {});
 	}
 	const publicOwner = _wsStreamOwners.get(ws)?.get(topic)?.find((owner) => owner.fn === fn);
-	if (publicOwner?.count === 0 && publicOwner.publicAttached && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
+	if (publicOwner?.count === 0 && publicOwner.publicAttached > 0 && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
+		publicOwner.publicAttached--;
 		_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (fn).__onUnsubscribePublic(ctx, topic, current ?? remainingSubscribers)).catch(() => {});
 	}
 }
@@ -4055,7 +4056,8 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 				_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 			}
-			if (entry.publicAttached && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+			if (entry.publicAttached > 0 && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+				entry.publicAttached--;
 				_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribePublic(unsubCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 			}
 		}
@@ -4137,7 +4139,8 @@ export function close(ws, { platform, subscriptions }) {
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 						_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 					}
-					if (entry.publicAttached && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+					if (entry.publicAttached > 0 && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+						entry.publicAttached--;
 						_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribePublic(closeCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 					}
 				}

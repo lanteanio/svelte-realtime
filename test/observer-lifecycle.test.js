@@ -181,6 +181,27 @@ describe('aggregate and derived observer lifecycle', () => {
 		expect(events).toEqual(['start', 'end', 'release']);
 	});
 
+	it.each(['close', 'unsubscribe'])('does not release a later attach still loading during %s', async ending => {
+		const hooks = lifecycle();
+		let release, socket;
+		let calls = 0;
+		env.register('stats', { derived: live.derived(['source'], ctx => {
+			socket = ctx.ws;
+			if (++calls === 2) return new Promise(resolve => { release = resolve; });
+			return true;
+		}, hooks) });
+		await peer.subscribe('stats/derived').waitFor(() => true);
+		const second = peer.subscribe('stats/derived');
+		await flush();
+		if (ending === 'close') close(socket, { platform: env.platform });
+		else unsubscribe(socket, hooks.onSubscribe.mock.calls[0][1], { platform: env.platform });
+		release(true);
+		await second.waitFor(() => true).catch(() => {});
+		await flush();
+		expect(hooks.onSubscribe).toHaveBeenCalledTimes(1);
+		expect(hooks.onUnsubscribe).toHaveBeenCalledTimes(1);
+	});
+
 	it('handles repeated subscriptions and drains each logical attachment once', async () => {
 		const hooks = lifecycle();
 		env.register('stats', { derived: live.derived(['source'], () => true, hooks) });

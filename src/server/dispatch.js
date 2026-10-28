@@ -1549,7 +1549,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 		}
 		if (/** @type {any} */ (fn).__isStream && _result.ok === true && _subscribedRef.loaded && _subscribedRef.owner &&
 			_subscribedRef.isActive() && /** @type {any} */ (fn).__onSubscribeSuccess) {
-			_subscribedRef.owner.publicAttached = true;
+			_subscribedRef.owner.publicAttached = (_subscribedRef.owner.publicAttached || 0) + 1;
 			const joining = { topic: _subscribedRef.topic, complete: null, promise: null, next: _pendingSubscribeHooks.get(ws) || null };
 			_pendingSubscribeHooks.set(ws, joining);
 			try { await /** @type {any} */ (fn).__onSubscribeSuccess(ctx, _subscribedRef.topic ?? _result.topic); } catch {}
