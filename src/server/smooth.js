@@ -1910,14 +1910,14 @@ function _smoothForget(rec) {
 	if (rec.interest) rec.interest.reset();
 	if (rec.cells) { rec.cells.entityCell.clear(); rec.cells.subs.clear(); rec.cells.centers.clear(); rec.cells.lastPos.clear(); }
 	if (rec.lagComp !== null) rec.lagComp.reset();
-	const removed = _smoothTopics.delete(rec.name);
+	const removed = _smoothTopics.get(rec.name) === rec && _smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
-	if (rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
+	if (removed && rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
 		rec.owned = false;
 		try { cluster.releaseOwner(rec.wireTopic); } catch { /* best-effort; the lease TTL is the safety net */ }
 	}
 	if (removed && rec.cfg.onEmpty) {
-		try { rec.cfg.onEmpty(rec.wireTopic); }
+		try { rec.cfg.onEmpty(rec.name); }
 		catch (err) {
 			if (_IS_DEV) console.warn('[svelte-realtime] live.smooth() onEmpty threw; room cleanup continued.', err);
 		}

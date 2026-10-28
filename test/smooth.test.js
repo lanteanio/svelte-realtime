@@ -956,7 +956,7 @@ describe('live.smooth close drain', () => {
 		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
 		close(ws, { platform });
 		close(ws, { platform });
-		expect(onEmpty).toHaveBeenCalledExactlyOnceWith('__smooth:shape:r1');
+		expect(onEmpty).toHaveBeenCalledExactlyOnceWith('shape:r1');
 		expect(_smoothTopics.has('shape:r1')).toBe(false);
 		const rejoined = mockWs({ id: 'u2' });
 		await call(rejoined, platform, name + '/shape/__smooth/sync', ['r1']);
@@ -1663,6 +1663,28 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(res.ok).toBe(false);
 		expect(res.code).toBe('CONNECTION_CLOSED');
 		expect(sc.calls.relayLeave).toEqual([[WT, 'u2', 'B']]);
+	});
+
+	it('keeps a live replacement room when an earlier lease renewal settles late', async () => {
+		const onEmpty = vi.fn();
+		const { name } = declareShape({ tickMs: 20, onEmpty });
+		const sc = scriptedSmoothCluster({ owner: true });
+		let settleRenew;
+		sc.cluster.renewOwner = () => new Promise(resolve => { settleRenew = resolve; });
+		const platform = clusterPlatform(sc);
+		const first = mockWs({ id: 'u1' });
+		await call(first, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(first, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		close(first, { platform });
+		expect(onEmpty).toHaveBeenCalledTimes(1);
+		const replacement = mockWs({ id: 'u2' });
+		await call(replacement, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(_smoothTopics.get('shape:r1').authority.size).toBe(1);
+		settleRenew(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(_smoothTopics.get('shape:r1').authority.size).toBe(1);
+		expect(onEmpty).toHaveBeenCalledTimes(1);
 	});
 
 	it('a demoted owner (failed renew) stops ticking and relaying', async () => {
