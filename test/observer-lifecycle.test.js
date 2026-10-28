@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { live, unsubscribe, __register, _prepareHmr } from '../src/server.js';
+import { live, unsubscribe, close, __register, _prepareHmr, _resetMiddleware } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 
 let env, peer;
@@ -9,7 +9,7 @@ beforeEach(() => {
 	env = createTestEnv();
 	peer = env.connect({ id: 'observer' });
 });
-afterEach(() => { peer?.disconnect(); env?.cleanup(); _prepareHmr(); });
+afterEach(() => { peer?.disconnect(); env?.cleanup(); _resetMiddleware(); _prepareHmr(); });
 
 function lifecycle() {
 	return {
@@ -77,6 +77,49 @@ describe('aggregate and derived observer lifecycle', () => {
 		const stream = peer.subscribe('stats/derived');
 		await vi.waitFor(() => expect(stream.error).not.toBeNull());
 		expect(hooks.onSubscribe).not.toHaveBeenCalled();
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+	});
+
+	it('does not announce a middleware-denied attach', async () => {
+		const hooks = lifecycle();
+		live.middleware(async (_ctx, next) => {
+			await next();
+			return { ok: false, code: 'FORBIDDEN', error: 'Access denied' };
+		});
+		env.register('stats', { derived: live.derived(['source'], () => true, hooks) });
+		const stream = peer.subscribe('stats/derived');
+		await vi.waitFor(() => expect(stream.error).not.toBeNull());
+		expect(hooks.onSubscribe).not.toHaveBeenCalled();
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+	});
+
+	it('does not announce success after disconnecting during the initial load', async () => {
+		const hooks = lifecycle();
+		let release, socket;
+		env.register('stats', { derived: live.derived(['source'], ctx => {
+			socket = ctx.ws;
+			return new Promise(resolve => { release = resolve; });
+		}, hooks) });
+		peer.subscribe('stats/derived');
+		await flush();
+		close(socket, { platform: env.platform });
+		release(true);
+		await flush();
+		expect(hooks.onSubscribe).not.toHaveBeenCalled();
+		expect(hooks.onUnsubscribe).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])('preserves public hooks through stream wrappers (dynamic: %s)', async dynamic => {
+		const hooks = lifecycle();
+		const derived = dynamic
+			? live.gate(() => true, live.derived(() => ['source'], () => true, hooks))
+			: live.gate(() => true, live.derived(['source'], () => true, hooks));
+		env.register('stats', { derived });
+		await peer.subscribe('stats/derived').waitFor(() => true);
+		expect(hooks.onSubscribe).toHaveBeenCalledTimes(1);
+		peer.disconnect();
+		await flush();
+		expect(hooks.onUnsubscribe).toHaveBeenCalledTimes(1);
 	});
 
 	it('handles repeated subscriptions and drains each logical attachment once', async () => {

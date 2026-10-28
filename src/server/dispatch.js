@@ -904,9 +904,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
 	const result = await _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef);
-	if (result?.ok === true && /** @type {any} */ (fn).__onSubscribeSuccess) {
-		try { await /** @type {any} */ (fn).__onSubscribeSuccess(ctx, subscribedRef.topic ?? result.topic); } catch {}
-	}
+	subscribedRef.loaded = result?.ok === true;
 	return result;
 }
 
@@ -1120,6 +1118,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	}
 	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;
+	subscribedRef.owner = subscribedRef.isActive.owner;
 
 	// Replay-topic + dynamic-piiRedact registration, performed only now that
 	// the subscribe is ADMITTED (access filter passed, platform.subscribe
@@ -1547,6 +1546,11 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			} else {
 				_subscribedRef.validate?.();
 			}
+		}
+		if (/** @type {any} */ (fn).__isStream && _result.ok === true && _subscribedRef.loaded &&
+			(!_subscribedRef.isActive || _subscribedRef.isActive()) && /** @type {any} */ (fn).__onSubscribeSuccess) {
+			if (_subscribedRef.owner) _subscribedRef.owner.publicAttached = true;
+			try { await /** @type {any} */ (fn).__onSubscribeSuccess(ctx, _subscribedRef.topic ?? _result.topic); } catch {}
 		}
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/

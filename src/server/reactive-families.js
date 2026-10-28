@@ -206,7 +206,6 @@ export const _derivedRegister = function derived(sources, fn, options) {
 	}
 	/** @type {any} */ (fn).__onSubscribeSuccess = options?.onSubscribe;
 	/** @type {any} */ (fn).__onUnsubscribePublic = options?.onUnsubscribe;
-	if (!dynamic && options?.onUnsubscribe) /** @type {any} */ (fn).__onUnsubscribe = options.onUnsubscribe;
 
 	return fn;
 };
@@ -224,10 +223,9 @@ export function _configureDynamicDerived(fn, baseTopic) {
 	fn.__streamTopic = topicFn;
 	fn.__derivedTopicArgs = topicArgs;
 	fn.__onSubscribe = (ctx, topic, args) => _activateDynamicDerived(fn, topic, ctx, args);
-	fn.__onUnsubscribe = (ctx, topic, remaining) => {
+	fn.__onUnsubscribe = (ctx, topic) => {
 		// A revoked scope already drained this lifetime synchronously.
 		if (ctx?._releasedDerived !== fn) _deactivateDynamicDerived(fn, topic, ctx);
-		return fn.__onUnsubscribePublic?.(ctx, topic, remaining);
 	};
 }
 

@@ -359,7 +359,9 @@ function _copyStreamMeta(target, source) {
 	if (source.__replay) target.__replay = source.__replay;
 	if (source.__delta) target.__delta = source.__delta;
 	if (source.__onSubscribe) target.__onSubscribe = source.__onSubscribe;
+	if (source.__onSubscribeSuccess) target.__onSubscribeSuccess = source.__onSubscribeSuccess;
 	if (source.__onUnsubscribe) target.__onUnsubscribe = source.__onUnsubscribe;
+	if (source.__onUnsubscribePublic) target.__onUnsubscribePublic = source.__onUnsubscribePublic;
 	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
 	if (source.__streamArgs) target.__streamArgs = source.__streamArgs;
 	if (source.__streamTransform) target.__streamTransform = source.__streamTransform;
@@ -1028,7 +1030,9 @@ function _trackStreamSub(ws, topic, fn) {
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.inc();
 	// A later subscription for the same fn/topic gets a different owner after
 	// revocation. Pending replies and rollbacks must refer to their own lifetime.
-	return () => topicMap.get(topic) === owners && owners.includes(owner) && owner.count > 0;
+	const active = () => topicMap.get(topic) === owners && owners.includes(owner) && owner.count > 0;
+	active.owner = owner;
+	return active;
 }
 
 /**
@@ -1169,6 +1173,10 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 					if (set) { set.delete(topic); if (set.size === 0) _rollingBack.delete(ws); }
 				});
 		}).catch(() => {});
+	}
+	const publicOwner = _wsStreamOwners.get(ws)?.get(topic)?.find((owner) => owner.fn === fn);
+	if (publicOwner?.publicAttached && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
+		_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (fn).__onUnsubscribePublic(ctx, topic, current ?? remainingSubscribers)).catch(() => {});
 	}
 }
 
@@ -4047,6 +4055,9 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 				_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 			}
+			if (entry.publicAttached && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+				_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribePublic(unsubCtx, topic, current ?? remainingSubscribers)).catch(() => {});
+			}
 		}
 	}
 	topicMap.delete(topic);
@@ -4126,7 +4137,11 @@ export function close(ws, { platform, subscriptions }) {
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 						_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 					}
+					if (entry.publicAttached && /** @type {any} */ (entry.fn).__onUnsubscribePublic) {
+						_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribePublic(closeCtx, topic, current ?? remainingSubscribers)).catch(() => {});
+					}
 				}
+				entry.count = 0;
 			}
 		}
 	}
