@@ -55,6 +55,11 @@ carry `params` and `details` as optional sibling fields beside the existing
 them on `LiveError`; `realtimeTransport()` preserves them through SSR hydration.
 Validation `issues` keep their existing shape and tuple position.
 
+`retryAfter` is an optional non-negative number of milliseconds to wait before
+retrying. Rate-limit refusals expose it through the same bounded metadata path.
+A `LOCK_TIMEOUT` includes `params.key` and `params.maxWaitMs`, so clients can
+identify the contested lock and the configured wait bound.
+
 A new client accepts old replies without metadata. Old clients ignore the added
 fields and keep the original code and English fallback. The SSR preset appends
 metadata after existing tuple elements, so old decoders ignore it and new
@@ -65,14 +70,14 @@ upgrade is required.
 
 Metadata is copied and nested objects are frozen when an error is constructed;
 mutating the original input cannot change the public payload. Each transport
-validates again before sending. Together, the serialized `{ params, details }`
+validates again before sending. Together, the serialized `{ params, details, retryAfter }`
 object must fit 4096 UTF-8 bytes, at most 128 visited values and eight nested
 levels. Parameter keys count toward the byte bound. Dates, class instances,
 accessors, serialization hooks, sparse arrays, cycles, bigint, symbols,
 functions, non-finite numbers and prototype-related keys are not accepted.
 Optional fields may be omitted or undefined.
 
-If either supplied field is invalid or the combined bound is exceeded, both
+If any supplied field is invalid or the combined bound is exceeded, all
 metadata fields are omitted. Code and message still propagate, so callers can
 always use their normal fallback. These bounds apply to structured metadata;
 the existing message and transport frame behavior is unchanged.

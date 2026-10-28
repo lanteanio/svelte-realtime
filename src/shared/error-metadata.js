@@ -17,7 +17,8 @@ export function copyErrorMetadata(value) {
 	try {
 		const params = Object.getOwnPropertyDescriptor(value, 'params');
 		const details = Object.getOwnPropertyDescriptor(value, 'details');
-		if (!params && !details) return EMPTY;
+		const retryAfter = Object.getOwnPropertyDescriptor(value, 'retryAfter');
+		if (!params && !details && !retryAfter) return EMPTY;
 		let nodes = 0;
 		const seen = new Set();
 		const clone = (item, depth) => {
@@ -53,6 +54,10 @@ export function copyErrorMetadata(value) {
 			if (descriptor.value !== undefined) result[key] = clone(descriptor.value, 0);
 		}
 		if ('params' in result && (!result.params || typeof result.params !== 'object' || Array.isArray(result.params))) return EMPTY;
+		if (retryAfter) {
+			if (!('value' in retryAfter) || typeof retryAfter.value !== 'number' || !Number.isFinite(retryAfter.value) || retryAfter.value < 0) return EMPTY;
+			result.retryAfter = retryAfter.value;
+		}
 		if (encoder.encode(JSON.stringify(result)).byteLength > MAX_BYTES) return EMPTY;
 		return result;
 	} catch {

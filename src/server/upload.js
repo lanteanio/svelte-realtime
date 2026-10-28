@@ -934,7 +934,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			if (err instanceof LiveError) {
 				/** @type {any} */
 				const result = { ok: false, code: err.code, error: err.message };
-				if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
+				if ('params' in err || 'details' in err || 'retryAfter' in err) Object.assign(result, copyErrorMetadata(err));
 				if (refusalRetryAfter !== undefined) result.retryAfter = refusalRetryAfter;
 				_respondUpload(ws, platform, streamId, result);
 			} else {

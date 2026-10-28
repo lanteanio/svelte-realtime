@@ -23,6 +23,8 @@ export class RpcError extends Error {
 	message: string;
 	readonly params?: ErrorMetadata['params'];
 	readonly details?: ErrorJsonValue;
+	/** Milliseconds the server asked the caller to wait before retrying. */
+	readonly retryAfter?: number;
 	code: string;
 	/** Structured validation issues (present when code === 'VALIDATION'). */
 	issues?: Array<{ path: string[]; message: string }>;

@@ -1568,7 +1568,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 		if (err instanceof LiveError) {
 			/** @type {any} */
 			const result = { id, ok: false, code: err.code, error: err.message };
-			if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
+			if ('params' in err || 'details' in err || 'retryAfter' in err) Object.assign(result, copyErrorMetadata(err));
 			if (/** @type {any} */ (err).issues) result.issues = /** @type {any} */ (err).issues;
 			return result;
 		}
@@ -1697,7 +1697,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
 			const result = { ok: false, code: err.code, error: err.message };
-			if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
+			if ('params' in err || 'details' in err || 'retryAfter' in err) Object.assign(result, copyErrorMetadata(err));
 			_respond(ws, platform, id, result, requestId, path);
 		} else {
 			if (options?.onError) {

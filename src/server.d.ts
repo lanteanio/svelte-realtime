@@ -4187,6 +4187,8 @@ export class LiveError extends Error {
 	message: string;
 	readonly params?: ErrorMetadata['params'];
 	readonly details?: ErrorJsonValue;
+	/** Milliseconds the caller should wait before retrying the failed operation. */
+	readonly retryAfter?: number;
 	code: string;
 	constructor(code: string, message?: string, metadata?: ErrorMetadata);
 }

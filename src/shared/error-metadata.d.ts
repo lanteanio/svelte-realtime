@@ -5,6 +5,8 @@ export type ErrorJsonValue = null | boolean | number | string | readonly ErrorJs
 export interface ErrorMetadata {
 	readonly params?: { readonly [key: string]: ErrorJsonValue };
 	readonly details?: ErrorJsonValue;
+	/** Milliseconds the caller should wait before retrying the failed operation. */
+	readonly retryAfter?: number;
 }
 
 /** @internal */

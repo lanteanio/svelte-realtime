@@ -9385,7 +9385,7 @@ describe('DevTools connection metadata', () => {
 });
 describe('structured RPC error metadata', () => {
 	for (const mode of ['single', 'batch']) it(`preserves params and details from ${mode} replies`, async () => {
-		const metadata = { params: { count: 3 }, details: { retry: true } };
+		const metadata = { params: { count: 3 }, details: { retry: true }, retryAfter: 50 };
 		const call = __rpc('errors/structured');
 		const promise = mode === 'batch' ? batch(() => [call(), __rpc('errors/other')()]) : call();
 		const sent = sendQueuedFn.mock.calls[0][0];
@@ -9399,8 +9399,8 @@ describe('structured RPC error metadata', () => {
 it('preserves public upload error metadata', async () => {
 	const handle = __upload('uploads/metadata')(new Uint8Array([1]).buffer);
 	await flushUpload();
-	simulateUploadResponse(handle.streamId, { ok: false, code: 'LIMIT', error: 'Limit reached', params: { count: 3 }, details: ['retry'] });
-	await expect(handle).rejects.toMatchObject({ code: 'LIMIT', params: { count: 3 }, details: ['retry'] });
+	simulateUploadResponse(handle.streamId, { ok: false, code: 'LIMIT', error: 'Limit reached', params: { count: 3 }, details: ['retry'], retryAfter: 75 });
+	await expect(handle).rejects.toMatchObject({ code: 'LIMIT', params: { count: 3 }, details: ['retry'], retryAfter: 75 });
 });
 
 describe('stream pending indicator', () => {

@@ -273,6 +273,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Dynamic coalesced-topic declarations cache rejected topics with the same 1,000-entry bound as accepted topics, avoiding repeated user-factory calls on every refused publish. Topic probing now includes rest and default arguments instead of resolving them as `undefined`.
 
+- Clients expose `retryAfter` on RPC and upload errors, and `LOCK_TIMEOUT` includes `params.key` and `params.maxWaitMs` across text, binary, batch, and upload replies. The additive fields use the existing bounded metadata contract.
+
 ### Security
 
 - A stream path answers only a subscribe frame. A plain RPC frame (no `stream: true`) naming a `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, `live.flag` or room sub-stream is refused with `INVALID_REQUEST` after the module guard, also inside a batch and as a fire-and-forget call. Before, such a frame ran the stream's loader directly, skipping its `access`/`filter` predicate, args schema and gate, and returned the snapshot to a caller that could not subscribe. Server-side `.load()` is unchanged. In `createTestEnv`, `.call()` on a stream path now rejects with `INVALID_REQUEST`; use `.subscribe()`.

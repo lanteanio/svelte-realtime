@@ -478,7 +478,7 @@ function _createInMemoryLock() {
 						waiter.timer = null;
 						unlink(state, waiter);
 						_recordLockEvent('wait_timeout');
-						const err = new LiveError('LOCK_TIMEOUT', 'lock: timed out after ' + maxWaitMs + 'ms waiting for the lock');
+						const err = new LiveError('LOCK_TIMEOUT', 'lock: timed out after ' + maxWaitMs + 'ms waiting for the lock', { params: { key, maxWaitMs } });
 						/** @type {any} */ (err).key = key;
 						/** @type {any} */ (err).maxWaitMs = maxWaitMs;
 						reject(err);
@@ -877,9 +877,10 @@ const _liveLock = function lock(keyOrConfig, fn) {
 			return await lockInst.withLock(key, () => fn(ctx, ...args), lockOpts);
 		} catch (err) {
 			if (err && /** @type {any} */ (err).code === 'LOCK_TIMEOUT' && !(err instanceof LiveError)) {
-				const wrapped = new LiveError('LOCK_TIMEOUT', /** @type {Error} */ (err).message);
-				/** @type {any} */ (wrapped).key = /** @type {any} */ (err).key;
-				/** @type {any} */ (wrapped).maxWaitMs = /** @type {any} */ (err).maxWaitMs;
+				const source = /** @type {any} */ (err);
+				const wrapped = new LiveError('LOCK_TIMEOUT', source.message, { params: { key: source.key, maxWaitMs: source.maxWaitMs } });
+				/** @type {any} */ (wrapped).key = source.key;
+				/** @type {any} */ (wrapped).maxWaitMs = source.maxWaitMs;
 				throw wrapped;
 			}
 			throw err;
