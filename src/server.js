@@ -1348,7 +1348,7 @@ function _deriveCoalesceTopicPattern(factory, providedArgs) {
 	let inspected = false;
 	const deny = () => { inspected = true; throw new Error('Topic probe inspected runtime data'); };
 	const traps = { get: deny, set: deny, has: deny, ownKeys: deny, getOwnPropertyDescriptor: deny, getPrototypeOf: deny, setPrototypeOf: deny, defineProperty: deny, deleteProperty: deny, isExtensible: deny, preventExtensions: deny };
-	const args = providedArgs || new Array(Math.max(1, factory.length));
+	const args = providedArgs || new Array(Math.max(2, factory.length));
 	args[0] = new Proxy({}, traps);
 	for (let index = 1; !providedArgs && index < args.length; index++) {
 		const marker = '{arg' + index + '}';
@@ -1371,23 +1371,26 @@ function _coalesceTopicVerifier(factory, pattern) {
 	}).join('');
 	const matcher = new RegExp('^' + source + '$');
 	// Pure factories have stable results; bound retained resolved topic strings.
-	const verified = new Set();
+	const verdicts = new Map();
+	function remember(topic, valid) {
+		if (verdicts.size === 1000) verdicts.delete(verdicts.keys().next().value);
+		verdicts.set(topic, valid);
+		return valid;
+	}
 	return topic => {
-		if (verified.has(topic)) return true;
+		const cached = verdicts.get(topic);
+		if (cached !== undefined) return cached;
 		const match = matcher.exec(topic);
-		if (!match) return false;
-		const args = new Array(Math.max(1, factory.length));
+		if (!match) return remember(topic, false);
+		const args = new Array(Math.max(2, factory.length));
 		for (let index = 0; index < positions.length; index++) {
 			const position = positions[index], value = match[index + 1];
-			if (args[position] !== undefined && args[position] !== value) return false;
+			if (args[position] !== undefined && args[position] !== value) return remember(topic, false);
 			args[position] = value;
 		}
 		// Conditional prefixes and context-dependent branches must reproduce the
 		// candidate topic before its payload can be transformed or coalesced.
-		if (_deriveCoalesceTopicPattern(factory, args) !== topic) return false;
-		if (verified.size === 1000) verified.delete(verified.values().next().value);
-		verified.add(topic);
-		return true;
+		return remember(topic, _deriveCoalesceTopicPattern(factory, args) === topic);
 	};
 }
 

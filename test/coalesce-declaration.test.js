@@ -120,6 +120,31 @@ describe('declared coalescing', () => {
     expect(env.platform.relayCoalesced).toHaveBeenCalledTimes(1003);
   });
 
+  it.each([
+    ['rest', (...args) => 'quotes:' + args[1]],
+    ['default', (_ctx, id = 'fallback') => 'quotes:' + id]
+  ])('probes a topic argument declared through %s parameters', async (_name, factory) => {
+    const { publisher } = setup(factory);
+    await publisher.call('prices/write', 'quotes:asset', { id: 'asset', price: 3 });
+    expect(env.platform.relayCoalesced).toHaveBeenCalledExactlyOnceWith('quotes:asset', 'set', { price: 3 }, 'asset');
+  });
+
+  it('caches non-matching topics and bounds their negative results', async () => {
+    let calls = 0;
+    const { publisher } = setup((_ctx, id) => { calls++; return id === 'private' ? 'secret:' + id : 'public:' + id; });
+    await publisher.call('prices/write', 'public:private', { id: 'a' });
+    const first = calls;
+    await publisher.call('prices/write', 'public:private', { id: 'a' });
+    expect(calls).toBe(first);
+    for (let i = 0; i < 1000; i++) await publisher.call('prices/write', 'public:' + i, { id: 'a' });
+    const full = calls;
+    await publisher.call('prices/write', 'public:private', { id: 'a' });
+    expect(calls).toBe(full + 1);
+    await publisher.call('prices/write', 'public:1', { id: 'a' });
+    expect(calls).toBe(full + 1);
+    expect(env.platform.relayCoalesced).toHaveBeenCalledTimes(1001);
+  });
+
   it('restores the original declaration after a failed reload replaces it', async () => {
     const { publisher } = setup('quotes');
     const snapshot = _prepareHmr();
