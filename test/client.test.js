@@ -3632,6 +3632,39 @@ describe('__stream() reconnect cursor time-check', () => {
 		// rehydrate lands (the cursor drop keeps currentValue).
 		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
 
+		// The rehydrate replaces the view: row 2 was deleted while the socket
+		// was down and is gone, not kept from the stale base.
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 1 }, { id: 3 }], topic: 'stale-topic', merge: 'crud', key: 'id', seq: 40 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3 }]);
+		simulateTopicMessage('stale-topic', { event: 'updated', data: { id: 3, v: 1 }, seq: 41 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3, v: 1 }]);
+
+		unsub();
+	});
+
+	it('replaces the view when the server cannot fill the gap and answers a full snapshot', async () => {
+		// The cursor is in range, but the server's replay buffer no longer
+		// reaches back to it, so it answers with the loader's snapshot instead
+		// of a replay. The client must not merge that onto the stale rows.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('evicted/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 2, v: 1 }, { id: 4 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 90, replay: false });
+		expect(values[values.length - 1]).toEqual([{ id: 2, v: 1 }, { id: 4 }]);
+
 		unsub();
 	});
 

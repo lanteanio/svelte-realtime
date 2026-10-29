@@ -196,4 +196,97 @@ describe('relay gap markers', () => {
 		off2();
 		holder();
 	});
+
+	// The frames a gap lost can be deletes as well as writes: the re-snapshot
+	// has to replace the view, not merge into it.
+	it('a re-snapshot replaces the view, so a row deleted inside the gap disappears', async () => {
+		const { ws, off, value } = await loadedStream();
+		ws.receive({ topic: 'items', event: 'created', data: { id: 2 }, seq: 8 });
+		await tick();
+		expect(value()).toEqual([{ id: 1 }, { id: 2 }]);
+		// Lost: seq 9 deleted 2, seq 10 created 3.
+		gap(ws);
+		await tick();
+		const again = subscribes(ws, 'items/list');
+		expect(again).toHaveLength(2);
+		expect(again[1].seq).toBeUndefined();
+		answer(ws, again[1], { ok: true, data: [{ id: 1 }, { id: 3 }], topic: 'items', merge: 'crud', key: 'id', seq: 10 });
+		await tick();
+		expect(value()).toEqual([{ id: 1 }, { id: 3 }]);
+		// The next resume gap-fills from the snapshot's cursor.
+		ws.receive({ topic: 'items', event: 'updated', data: { id: 3, v: 1 }, seq: 11 });
+		await tick();
+		expect(value()).toEqual([{ id: 1 }, { id: 3, v: 1 }]);
+		off();
+	});
+
+	it('a duplicated or reordered live frame leaves the keyed view intact', async () => {
+		const { ws, off, value } = await loadedStream();
+		const created = { topic: 'items', event: 'created', data: { id: 2, v: 0 }, seq: 8 };
+		ws.receive(created);
+		ws.receive(created);
+		await tick();
+		expect(value()).toEqual([{ id: 1 }, { id: 2, v: 0 }]);
+		// Two publishers' frames crossing on a cluster relay: seq 10 lands before 9.
+		ws.receive({ topic: 'items', event: 'updated', data: { id: 1, v: 2 }, seq: 10 });
+		ws.receive({ topic: 'items', event: 'updated', data: { id: 2, v: 1 }, seq: 9 });
+		await tick();
+		expect(value()).toEqual([{ id: 1, v: 2 }, { id: 2, v: 1 }]);
+		// A gap marker after them still re-snapshots in full.
+		gap(ws);
+		await tick();
+		const again = subscribes(ws, 'items/list');
+		expect(again).toHaveLength(2);
+		expect(again[1].seq).toBeUndefined();
+		off();
+	});
+
+	it('a presence roster drops duplicate and overtaken updates and re-snapshots a lost leave away', async () => {
+		const store = client.__stream('room/presence', { merge: 'presence' });
+		let value;
+		const off = store.subscribe((v) => { value = v; });
+		await tick();
+		await tick();
+		const ws = MockWebSocket.sockets[0];
+		answer(ws, subscribes(ws, 'room/presence')[0], {
+			ok: true, data: [{ key: 'a', typing: false }, { key: 'b', typing: false }], topic: 'room', merge: 'presence', seq: 1
+		});
+		await tick();
+		const update = (n, typing) => ws.receive({ topic: 'room', event: 'update', data: { key: 'b', typing, _p: 'pb', _n: n } });
+		update(2, true);
+		update(2, false);
+		update(1, false);
+		await tick();
+		expect(value).toEqual([{ key: 'a', typing: false }, { key: 'b', typing: true }]);
+		// Lost: b left, c joined.
+		ws.receive({ topic: '__replay:room', event: 'gap', data: { lost: 2 } });
+		await tick();
+		const again = subscribes(ws, 'room/presence');
+		expect(again).toHaveLength(2);
+		expect(again[1].seq).toBeUndefined();
+		answer(ws, again[1], { ok: true, data: [{ key: 'a', typing: false }, { key: 'c', typing: false }], topic: 'room', merge: 'presence', seq: 4 });
+		await tick();
+		expect(value).toEqual([{ key: 'a', typing: false }, { key: 'c', typing: false }]);
+		off();
+	});
+
+	it('a set stream takes the re-snapshot value over a value the gap made stale', async () => {
+		const store = client.__stream('flag/state', { merge: 'set' });
+		let value;
+		const off = store.subscribe((v) => { value = v; });
+		await tick();
+		await tick();
+		const ws = MockWebSocket.sockets[0];
+		answer(ws, subscribes(ws, 'flag/state')[0], { ok: true, data: { mode: 'a' }, topic: 'flag', merge: 'set', seq: 3 });
+		await tick();
+		ws.receive({ topic: '__replay:flag', event: 'gap', data: { lost: 1 } });
+		await tick();
+		const again = subscribes(ws, 'flag/state');
+		expect(again).toHaveLength(2);
+		expect(again[1].seq).toBeUndefined();
+		answer(ws, again[1], { ok: true, data: { mode: 'c' }, topic: 'flag', merge: 'set', seq: 5 });
+		await tick();
+		expect(value).toEqual({ mode: 'c' });
+		off();
+	});
 });
