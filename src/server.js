@@ -2464,7 +2464,7 @@ export function __registerEffect(path, fn) {
 	const sources = /** @type {any} */ (fn).__effectSources;
 	const debounce = /** @type {any} */ (fn).__effectDebounce || 0;
 	if (!sources) return;
-	effectRegistry.set(path, { sources, fn, debounce, timer: null });
+	effectRegistry.set(path, { id: path, sources, fn, debounce, timer: null, limits: /** @type {any} */ (fn).__effectLimits });
 	for (const src of sources) {
 		let set = _effectBySource.get(src);
 		if (!set) { set = new Set(); _effectBySource.set(src, set); }
@@ -2564,7 +2564,10 @@ function _installFlagWatcher(topic) {
 		sources: [topic],
 		fn: function flagWatcher(event, data) { if (event === 'set') cell.value = data; },
 		debounce: 0,
-		timer: null
+		timer: null,
+		// The cell only needs the newest value: a burst of sets coalesces into
+		// one waiting update, and the watcher stays out of the effect metrics.
+		limits: { maxConcurrent: 1, maxQueued: 1, overflow: 'coalesce', metered: false }
 	};
 	_flagWatchers.set(topic, watcher);
 	let watcherSet = _effectBySource.get(topic);

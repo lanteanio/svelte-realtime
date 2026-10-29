@@ -172,10 +172,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Settle or clear the queue before switching identity or storage. Treat these rejections as expected during an account or storage switch.'
 	}),
 	OVERLOADED: Object.freeze({
-		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, or the pending-upload aggregate byte cap is exceeded while uploads wait for authorization.',
-		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected.',
-		automaticRecovery: 'None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers.',
-		nextAction: 'Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules.'
+		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
+		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure` and the dead-letter store.',
+		automaticRecovery: 'None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers. An effect or webhook takes new publishes again as soon as its queue has room.',
+		nextAction: 'Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules. For an effect or webhook, find why its calls are slow, then raise `maxConcurrent` or `maxQueued` only if the work can keep up.'
 	}),
 	PAYLOAD_TOO_LARGE: Object.freeze({
 		cause: 'Binary RPC headers or upload arguments exceed 65535 bytes or leave no room in the frame, a binary payload exceeds `live.binary` `maxSize` (default 10 MiB), or upload bytes exceed `maxSize` or the pending-phase cap.',
@@ -367,6 +367,12 @@ export const EVENT_GUIDANCE = Object.freeze({
 		automaticRecovery: 'The entry stays lazy, so the next call loads the module again. In development a saved fix loads on that next call. In production Node caches the failed import, so every later call fails the same way until the process restarts.',
 		nextAction: 'Fix the module named by the `path` attribute using the `error` attribute. In development, save the corrected file; in production, deploy the fix and restart the process.'
 	}),
+	'reactive.effect.overflow': Object.freeze({
+		cause: 'A `live.effect` receives a publish while `maxConcurrent` calls are running and `maxQueued` more are waiting, with `overflow` set to `reject` (the default). The `effect` attribute names the registration.',
+		consequence: 'The call for that publish is skipped, and so is every call for a publish that arrives before the queue has room again. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode; each skip counts in `svelte_realtime_background_total` with result `rejected`.',
+		automaticRecovery: 'The effect takes new publishes again as soon as its queue has room. A `reactive.effect.overflow.ended` info event then reports how many calls were skipped.',
+		nextAction: 'Find why the effect handler is slow or stalled (a hung query or remote call). Raise `maxConcurrent` or `maxQueued` only if the work can keep up, or use the `coalesce` overflow when only the latest event matters.'
+	}),
 	'reactive.effect.failed': Object.freeze({
 		cause: 'A `live.effect` handler throws or rejects while running for a publish on one of its watched source topics.',
 		consequence: 'The side effect for that publish did not complete. The publish itself and delivery to subscribers are not affected. The global `onError` handler, if set, receives the error with path \'effect\'.',
@@ -456,6 +462,12 @@ export const EVENT_GUIDANCE = Object.freeze({
 		consequence: 'The record was the only replay copy, so this webhook event is lost for good. The `svelte_realtime_webhook_dead_letter_failures_total` counter goes up.',
 		automaticRecovery: 'None. The record is not retried into the store.',
 		nextAction: 'Check the dead-letter store backend (connection, capacity, permissions). Alert on the failure counter. Rebuild lost events from your own source data if they matter.'
+	}),
+	'webhook.delivery.overflow': Object.freeze({
+		cause: 'An outbound webhook receives a publish while `maxConcurrent` deliveries are in flight and `maxQueued` more events are waiting. The `webhookId` attribute names the registration.',
+		consequence: 'That event and every event that arrives before the queue has room again are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.',
+		automaticRecovery: 'The webhook takes new events again as soon as its queue has room. A `webhook.delivery.overflow.ended` info event then reports how many were rejected.',
+		nextAction: 'Check the endpoint latency and health. Replay dead-lettered events with `replayDeadLetter()` once it recovers, and raise `maxConcurrent` or `maxQueued` only if the endpoint can take the load.'
 	}),
 	'webhook.delivery.failed': Object.freeze({
 		cause: 'An outbound webhook uses up its delivery policy (retries, budget, or open breaker), or is blocked by the SSRF gate, a payload limit, or a redirect.',

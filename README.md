@@ -2677,6 +2677,9 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 - `svelte_realtime_cron_errors_total` - cron errors by path
 - `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
 - `svelte_realtime_webhook_dead_letter_failures_total` - failed webhook deliveries the dead-letter store could not persist (see "Dead-letter queue")
+- `svelte_realtime_background_inflight` - background work running in this process by `kind` (`derived`, `effect`, `webhook`); needs a gauge with `set`
+- `svelte_realtime_background_queued` - background work waiting for a slot by `kind` (`effect`, `webhook`); needs a gauge with `set`
+- `svelte_realtime_background_total` - background work by `kind` and `result`: `rejected` or `coalesced` when an effect or webhook is past its limits
 
 ### Cohort-stratified metrics - never trust the aggregate
 
@@ -3291,6 +3294,13 @@ export const orderNotifications = live.effect(['orders'], async (event, data, pl
 ```
 
 Effects are server-only. They fire whenever a matching topic publishes and cannot be subscribed to from the client.
+
+Each effect runs at most `maxConcurrent` calls at once (default 32) and queues at most `maxQueued` more (default 10000) in publish order, so a stalled handler cannot pile up unbounded work. A publish that finds both full is the effect's overflow, set by `overflow`:
+
+- `'reject'` (default): that call is skipped. The first skip of an overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits a `reactive.effect.overflow` event; every skip counts in `svelte_realtime_background_total{kind="effect",result="rejected"}`.
+- `'coalesce'`: the new call replaces the newest waiting one, for effects where only the latest event matters (a cache refresh, a recount).
+
+Pass `Infinity` to lift a limit, for example `live.effect(['orders'], sendReceipt, { maxConcurrent: 4, maxQueued: 500 })`.
 
 ---
 
@@ -4538,7 +4548,9 @@ The freshness check is what closes capture-replay: without it any observed (body
 | `allow` | - | Allowlisted hostnames for `urlMode: 'allowlist'`. |
 | `validateUrl` | - | Additional restriction `(url) => boolean \| Promise<boolean>`, ANDed with the built-in guard on every hop. Narrows only. |
 | `resolve` | `node:dns` | Custom DNS resolver `(hostname) => address \| address[] \| Promise<...>` for the pin. |
-| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect). |
+| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect, or an event past the limits below). |
+| `maxConcurrent` | `8` | Deliveries in flight at once for this webhook, retries included. `Infinity` lifts the limit. |
+| `maxQueued` | `10000` | Events waiting for a delivery slot. An event past both limits is not sent: `onFailure(err, event, data, 0)` receives a `LiveError` with code `OVERLOADED`, the dead-letter queue keeps the event when enabled, and without `onFailure` the first rejection of an episode reaches `onError('webhook', err)`. |
 
 ### Dead-letter queue
 

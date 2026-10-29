@@ -4,6 +4,7 @@ import { wireAssertionMetrics } from '../shared/assert.js';
 import { state, registry } from './state.js';
 import { _validPathRe } from './validate.js';
 import { _IS_DEV } from './env.js';
+import { _publishLaneGauges } from './work-lane.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 /**
@@ -207,9 +208,13 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		lockEvents: registry.counter({ name: 'svelte_realtime_lock_events_total', help: 'Lock queue and execution events', labelNames: ['status'] }),
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
 		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] }),
-		deadLetterFailures: registry.counter({ name: 'svelte_realtime_webhook_dead_letter_failures_total', help: 'Failed webhook deliveries the dead-letter store could not persist' })
+		deadLetterFailures: registry.counter({ name: 'svelte_realtime_webhook_dead_letter_failures_total', help: 'Failed webhook deliveries the dead-letter store could not persist' }),
+		backgroundTotal: registry.counter({ name: 'svelte_realtime_background_total', help: 'Background work items by kind and result', labelNames: ['kind', 'result'] }),
+		backgroundInflight: registry.gauge({ name: 'svelte_realtime_background_inflight', help: 'Background work items running in this process', labelNames: ['kind'] }),
+		backgroundQueued: registry.gauge({ name: 'svelte_realtime_background_queued', help: 'Background work items waiting to start', labelNames: ['kind'] })
 	};
 	state.metricsInstruments.lockWaiters.set?.(state.lockWaiterCount);
+	_publishLaneGauges();
 	wireAssertionMetrics((category) => state.metricsInstruments.assertions.inc({ category }));
 
 	if (options.lifeline) {

@@ -50,6 +50,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** Nothing beyond this release.
   - **Compatibility:** An invalid `maxBufferedChunks` now fails at startup; other behavior is unchanged.
   - **Detail:** [Changed engineering detail](#changed).
+- **Changed: bounded effects and webhooks.** Each `live.effect` now runs at most 32 calls at once with 10000 more queued, and each outbound webhook at most 8 deliveries with 10000 queued, so a stalled handler or endpoint holds a bounded amount of work, and a publish past both limits is rejected with a reported `OVERLOADED` error and counted.
+  - **Affects:** Applications with `live.effect` or `live.webhooks.outbound` handlers that can fall behind their source topics.
+  - **Action:** None for most apps; raise `maxConcurrent` or `maxQueued`, or pass `Infinity`, where a handler legitimately needs more.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Calls past the new limits are skipped or dead-lettered instead of piling up; other behavior is unchanged.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: presence and multiplayer consistency.** Sticky presence, multiplayer selections and multiplayer locks now stay consistent between live members, late joiners and replicas, because payloads keep their exact bytes on the Redis roster, refused entries are never broadcast, oversized lock names are rejected, and updates for departed or erased members stop instead of reappearing later.
   - **Affects:** Applications using presence, multiplayer selections or locks, especially across replicas.
   - **Action:** None.
@@ -116,6 +122,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - `@sveltejs/kit` 3 joins the supported peer range (`^2.0.0 || ^3.0.0`). The Vite plugin, the compatibility matrix and the scaffolder cover SvelteKit 3 on Vite 8.
 
 ### Changed
+
+- `live.effect` runs at most `maxConcurrent` calls at once (default 32) and queues at most `maxQueued` more (default 10000) in publish order. With `overflow: 'reject'` (default) a publish past both limits skips its call; the first skip of each overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits `reactive.effect.overflow`, and `reactive.effect.overflow.ended` reports the count once the queue has room. `overflow: 'coalesce'` replaces the newest waiting call instead. `live.webhooks.outbound` takes `maxConcurrent` (default 8, retries included) and `maxQueued` (default 10000) per webhook; an event past both limits is not sent, goes to `onFailure` with `OVERLOADED` and attempts 0, and to the dead-letter store when enabled, with `webhook.delivery.overflow` once per episode. Queued calls keep the async context of their publish. `Infinity` lifts either limit. `live.metrics` adds `svelte_realtime_background_inflight{kind}`, `svelte_realtime_background_queued{kind}` and `svelte_realtime_background_total{kind,result}` (`result` `rejected` or `coalesced`), with `kind` one of `derived`, `effect` or `webhook`.
 
 - The [error reference](docs/errors.md) gives every runtime error code and every warn or error operational event its cause, consequence, automatic recovery and next action, and indexes whole messages with named placeholders, so a pasted line such as `RPC '<path>' timed out after <value>s` is searchable. Every server, Vite and shared console warning or error either prints through a stable ID or shows the recorded reason it needs no entry, and every computed emission site shows where its value comes from. Generation fails when a new code, failure event, console failure or computed site arrives without guidance or a reason, and sites are keyed by function instead of line, so unrelated source edits no longer stale the reference. The reference links the adapter and extensions references.
 

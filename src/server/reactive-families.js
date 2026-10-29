@@ -7,6 +7,7 @@ import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { UNSEQUENCED } from './publish-helpers.js';
+import { _validateLaneLimit, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED } from './work-lane.js';
 
 // Seam: the flag cell/watcher and the window-spec validator stay in server.js
 // (shared with the staying __register* shims); the reactive families reach them
@@ -233,16 +234,37 @@ export function _configureDynamicDerived(fn, baseTopic) {
  * Create a server-side reactive side effect.
  * Effects fire when source topics publish. They are fire-and-forget - no data, no topic.
  *
+ * Each effect runs at most `maxConcurrent` handler calls at once (default 32)
+ * and queues at most `maxQueued` more (default 10000) in publish order. A
+ * publish past both limits is the effect's overflow: `'reject'` (default)
+ * skips that call, reports an `OVERLOADED` LiveError to `onError` once per
+ * overflow episode and counts it; `'coalesce'` replaces the newest waiting
+ * call with the new one, so the effect still sees the latest event.
+ *
  * @param {string[]} sources - Topic names to watch
  * @param {Function} fn - Async function (event, data, platform) called on each matching publish
- * @param {{ debounce?: number }} [options]
+ * @param {{ debounce?: number, maxConcurrent?: number, maxQueued?: number, overflow?: 'reject' | 'coalesce' }} [options]
  * @returns {Function}
  */
 export const _effectRegister = function effect(sources, fn, options) {
 	const debounce = options?.debounce || 0;
+	_validateLaneLimit('live.effect()', 'maxConcurrent', options?.maxConcurrent, 1);
+	_validateLaneLimit('live.effect()', 'maxQueued', options?.maxQueued, 0);
+	const overflow = options?.overflow ?? 'reject';
+	if (overflow !== 'reject' && overflow !== 'coalesce') {
+		throw new Error("[svelte-realtime] live.effect(): overflow must be 'reject' or 'coalesce'");
+	}
+	if (overflow === 'coalesce' && options?.maxQueued === 0) {
+		throw new Error("[svelte-realtime] live.effect(): overflow 'coalesce' needs a queue to coalesce into; use maxQueued >= 1");
+	}
 	/** @type {any} */ (fn).__isEffect = true;
 	/** @type {any} */ (fn).__effectSources = sources;
 	/** @type {any} */ (fn).__effectDebounce = debounce;
+	/** @type {any} */ (fn).__effectLimits = {
+		maxConcurrent: options?.maxConcurrent ?? EFFECT_MAX_CONCURRENT,
+		maxQueued: options?.maxQueued ?? EFFECT_MAX_QUEUED,
+		overflow
+	};
 	return fn;
 };
 

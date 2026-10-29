@@ -2768,9 +2768,13 @@ export namespace live {
 	 * Create a server-side reactive side effect.
 	 * Effects fire when source topics publish. Fire-and-forget - no data, no topic.
 	 *
+	 * Each effect runs at most `maxConcurrent` calls at once and queues at most
+	 * `maxQueued` more in publish order; a publish past both limits follows
+	 * `overflow`.
+	 *
 	 * @param sources - Topic names to watch
 	 * @param fn - Async function called on each matching publish
-	 * @param options - Debounce settings
+	 * @param options - Debounce and concurrency settings
 	 *
 	 * @example
 	 * ```js
@@ -2784,7 +2788,7 @@ export namespace live {
 	function effect(
 		sources: string[],
 		fn: (event: string, data: any, platform: Platform) => void | Promise<void>,
-		options?: { debounce?: number }
+		options?: EffectOptions
 	): Function;
 
 	/**
@@ -3984,6 +3988,36 @@ export interface WebhookHandler {
 }
 
 /**
+ * Options for `live.effect()`.
+ */
+export interface EffectOptions {
+	/** Wait this many milliseconds after the last publish and run once with that publish. */
+	debounce?: number;
+	/**
+	 * Handler calls running at once. An integer >= 1, or `Infinity`.
+	 * @default 32
+	 */
+	maxConcurrent?: number;
+	/**
+	 * Calls waiting for a slot, started in publish order. An integer >= 0, or
+	 * `Infinity`.
+	 * @default 10000
+	 */
+	maxQueued?: number;
+	/**
+	 * What happens to a publish that finds the effect at both limits.
+	 * - `'reject'`: the call is skipped and counted in
+	 *   `svelte_realtime_background_total{kind="effect",result="rejected"}`. The
+	 *   first skip of an overflow episode reaches `onError('effect', err)` as a
+	 *   `LiveError` with code `OVERLOADED` and emits `reactive.effect.overflow`.
+	 * - `'coalesce'`: the call replaces the newest waiting call, so the effect
+	 *   still sees the latest event. Needs `maxQueued >= 1`.
+	 * @default 'reject'
+	 */
+	overflow?: 'reject' | 'coalesce';
+}
+
+/**
  * Configuration for `live.webhooks.outbound()`.
  */
 export interface OutboundWebhookConfig {
@@ -4092,6 +4126,21 @@ export interface OutboundWebhookConfig {
 	 * credentials. May return a promise (it is detached, not awaited).
 	 */
 	onFailure?: (err: Error, event: string, data: any, attempts: number) => void | Promise<void>;
+	/**
+	 * Deliveries of this webhook in flight at once, retries included. An
+	 * integer >= 1, or `Infinity`.
+	 * @default 8
+	 */
+	maxConcurrent?: number;
+	/**
+	 * Events waiting for a delivery slot. An event past both limits is not
+	 * sent: `onFailure` receives a `LiveError` with code `OVERLOADED` and
+	 * `attempts` 0, and the dead-letter store keeps the event when one is
+	 * configured. Without `onFailure`, the first rejection of an overflow
+	 * episode reaches `onError('webhook', err)`. An integer >= 0, or `Infinity`.
+	 * @default 10000
+	 */
+	maxQueued?: number;
 }
 
 /**

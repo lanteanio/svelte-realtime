@@ -7,6 +7,7 @@ import { createDeadLetterStore } from './dead-letter.js';
 import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 import { LiveError } from './live-error.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
+import { _validateLaneLimit } from './work-lane.js';
 
 async function _handleInboundWebhook(req, config, topic) {
 	let event;
@@ -105,6 +106,8 @@ export const _webhooksOutboundRegister = function outbound(sources, config) {
 			throw new Error('[svelte-realtime] live.webhooks.outbound: previousSecret requires secret (the current key) to be set');
 		}
 	}
+	_validateLaneLimit('live.webhooks.outbound', 'maxConcurrent', config.maxConcurrent, 1);
+	_validateLaneLimit('live.webhooks.outbound', 'maxQueued', config.maxQueued, 0);
 	// Fail fast on a static url: the always-on scheme gate plus, in
 	// strict/allowlist mode, the literal range floor are checked at definition
 	// time so a misconfigured endpoint is caught at boot, not on the first
