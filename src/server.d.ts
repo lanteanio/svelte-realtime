@@ -2328,6 +2328,11 @@ export namespace live {
 	 * erasure can be retried. In-memory or named-document failures reject with
 	 * FORGET_INCOMPLETE after attempting every independent surface and the
 	 * durable store. An enabled dead-letter store must provide purgeUser.
+	 * With `configureForget({ jobs })` every erasure is also a job: its intent
+	 * is recorded before any surface is touched (a failure to record it rejects
+	 * with FORGET_JOB_FAILED and erases nothing), its outcome afterwards, and
+	 * `resumeForgetJobs()` runs unfinished jobs again. Rejections then carry the
+	 * job reference as `details.job` and the result carries it as `job`.
 	 * The forget.incomplete operator event names failed surfaces without user
 	 * IDs or exception payloads; onForget runs only on complete success.
 	 * A store reporting cluster-wide owner evictions
@@ -4607,7 +4612,152 @@ export interface ForgetResult {
 	 * the durable store reported cluster-wide owner evictions).
 	 */
 	surfaces: Record<string, number>;
+	/** The erasure job reference; present only when a job store is configured. */
+	job?: string;
 }
+
+/** Lifecycle state of an erasure job. */
+export type ForgetJobStatus = 'pending' | 'failed' | 'completed';
+
+/**
+ * A recorded erasure job as `listForgetJobs` returns it. It never carries the
+ * user id: `id` and `userIdHash` are pseudonymous (keyed with the configured
+ * `hashKey` when one is set, enumerable without it).
+ */
+export interface ForgetJob {
+	/**
+	 * Job reference: 32 hex characters of SHA-256, or HMAC-SHA-256 with the
+	 * audit key, over the JSON array `[tenantId, userId]`. The same user and
+	 * tenant always map to the same job, so a repeated erasure reuses it.
+	 */
+	id: string;
+	/** The audit identifier `onForget` receives for this user. */
+	userIdHash: string;
+	tenantId: string | null;
+	/**
+	 * `pending`: a run started and recorded no outcome yet (still running, or
+	 * its process died). `failed`: the last run failed. `completed`: every
+	 * surface confirmed; the stored user id is gone.
+	 */
+	status: ForgetJobStatus;
+	/** Runs started, including the current one. */
+	attempts: number;
+	/** Wall-clock ms the job was first recorded. */
+	createdAt: number;
+	/** Wall-clock ms of the last change. */
+	updatedAt: number;
+	completedAt: number | null;
+	/** Rows removed by the completing run. */
+	rowsAffected: number | null;
+	/** The last failure, cleared on completion. Surface names only, never store errors. */
+	error: { code: string; failedSurfaces: string[] } | null;
+}
+
+/** What `ForgetJobStore.begin` receives. */
+export interface ForgetJobIntent {
+	id: string;
+	/** Identifies this run; `complete` and `fail` for any other run are ignored. */
+	runId: string;
+	userIdHash: string;
+	tenantId: string | null;
+	/** Raw user id, kept only until the job completes. */
+	userId: string;
+	/** JSON-serializable cascade option to run again on resume. */
+	cascade: boolean | { crdt?: string[] };
+	/** Wall-clock ms. */
+	at: number;
+}
+
+/** The resume input of an unfinished job. */
+export interface ForgetJobResumeInput {
+	userId: string;
+	userIdHash: string;
+	tenantId: string | null;
+	cascade: boolean | { crdt?: string[] };
+}
+
+/**
+ * Storage for erasure jobs. `createForgetJobStore()` is the in-memory
+ * implementation; a store that must survive a process restart persists the
+ * same records. Every method may return a promise.
+ */
+export interface ForgetJobStore {
+	/**
+	 * Record a run as started, durably, before resolving. Creates the job as
+	 * `pending` with `attempts: 1`, or reopens an existing job of any status
+	 * as `pending` under the new `runId`, increments `attempts`, replaces
+	 * `userId` and `cascade`, keeps `createdAt` and `error`, and clears
+	 * `completedAt` and `rowsAffected`. Atomic per `id`.
+	 */
+	begin(intent: ForgetJobIntent): void | Promise<void>;
+	/**
+	 * Mark the job `completed` (sets `completedAt`, `updatedAt` and
+	 * `rowsAffected`, clears `error`) and delete its `userId` and `cascade`.
+	 * A no-op unless `runId` is the job's current run and it is not completed.
+	 */
+	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): void | Promise<void>;
+	/**
+	 * Mark the job `failed` with `error: { code, failedSurfaces }` and
+	 * `updatedAt`, keeping `userId` and `cascade`. A no-op unless `runId` is
+	 * the job's current run and it is not completed.
+	 */
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[] }): void | Promise<void>;
+	/** Jobs oldest `createdAt` first, optionally one status, at most `limit` (default 100). */
+	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[] | Promise<ForgetJob[]>;
+	/** The resume input of an unfinished job, or null when it is unknown or completed. */
+	intent(id: string): ForgetJobResumeInput | null | Promise<ForgetJobResumeInput | null>;
+}
+
+/** The in-memory job store; every method is synchronous. */
+export interface MemoryForgetJobStore extends ForgetJobStore {
+	begin(intent: ForgetJobIntent): void;
+	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): void;
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[] }): void;
+	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[];
+	intent(id: string): ForgetJobResumeInput | null;
+	clear(): void;
+}
+
+/**
+ * Create the in-memory erasure job store. Unfinished jobs are always kept;
+ * completed ones are kept for audit up to `max` (default 1000), the oldest
+ * completion dropped first. It does not survive a restart, so deployments
+ * that must resume after a crash wire a durable store instead.
+ */
+export function createForgetJobStore(options?: { max?: number }): MemoryForgetJobStore;
+
+/**
+ * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100).
+ * Resolves `[]` without a job store. Rejects with INVALID_REQUEST on a bad
+ * filter and FORGET_JOB_FAILED when the store cannot be read.
+ */
+export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
+
+/**
+ * Run unfinished erasure jobs again: `failed` jobs and `pending` jobs whose
+ * run ended without an outcome, oldest first, at most `limit` (1 to 1000,
+ * default 100), or only the job `id`. Each run is the full idempotent
+ * cascade with the job's stored tenant and cascade; `onForget` fires for each
+ * completed job. A job still running in this process, or one with nothing left
+ * to do, reports `skipped`. Resolves zero counts without a job store.
+ */
+export function resumeForgetJobs(opts?: {
+	id?: string;
+	limit?: number;
+	onForget?: (record: {
+		userIdHash: string;
+		tenantId: string | null;
+		cascade: boolean | { crdt?: string[] };
+		rowsAffected: number;
+		surfaces: Record<string, number>;
+		at: number;
+	}) => void;
+}): Promise<{
+	total: number;
+	completed: number;
+	failed: number;
+	results: Array<{ id: string; status: 'completed' | 'failed' | 'skipped'; code?: string }>;
+}>;
 
 /**
  * A cluster-wide room-owner change the durable forget store produced while
@@ -4645,6 +4795,9 @@ export interface ForgetStore {
  * Keys need at least 32 bytes of random secret material. Keep them outside audit
  * logs; rotation changes future identifiers, so record your key version separately.
  * Keys are copied at configuration; active erasures retain their starting key.
+ * `jobs` records every erasure as a resumable job: `true` for the in-memory
+ * store, a `ForgetJobStore` that survives restarts, or `null`/`false` for none
+ * (the default). With a job store, `live.forget` requires `tenantId`.
  */
 export function configureForget(
 	config:
@@ -4653,6 +4806,7 @@ export function configureForget(
 			platform?: any;
 			/** UTF-8 string or bytes, at least 32 bytes; null restores unkeyed audit identifiers. */
 			hashKey?: string | Uint8Array | null;
+			jobs?: boolean | ForgetJobStore | null;
 		}
 		| null
 ): void;

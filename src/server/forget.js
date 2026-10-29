@@ -18,7 +18,7 @@
 // store, it only duck-types `store.purgeUser`.
 
 import { _IS_DEV } from './env.js';
-import { wallEpoch } from '../shared/runtime.js';
+import { wallEpoch, randomUuid } from '../shared/runtime.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _validTenantId, _tenantKey, _isTenancyEnabled } from './tenant.js';
@@ -34,6 +34,7 @@ import { _purgeAggregateCohorts } from './reactive.js';
 import { _purgeCrdtDocs } from './crdt.js';
 import { _ownerEmit } from './room-owner.js';
 import { state } from './state.js';
+import { createForgetJobStore } from './forget-jobs.js';
 
 /**
  * Optional durable forget store (default null = in-memory state only). A wired
@@ -65,6 +66,26 @@ let _forgetPlatform = null;
 /** @type {import('node:crypto').KeyObject | null} */
 let _forgetHashKey = null;
 
+/**
+ * Optional erasure job store (default null = no job records). Duck-typed:
+ * `begin`, `complete`, `fail`, `list` and `intent`, each sync or async.
+ * `createForgetJobStore()` is the in-memory reference; durable stores implement
+ * the same methods. Set via `configureForget({ jobs })`.
+ * @type {any}
+ */
+let _forgetJobs = null;
+
+/**
+ * Job ids with a run in progress in this process, with their run counts, so a
+ * resume does not start a second run of a job this process is still running.
+ * @type {Map<string, number>}
+ */
+const _activeJobs = new Map();
+
+const _JOB_METHODS = ['begin', 'complete', 'fail', 'list', 'intent'];
+const _JOB_STATUSES = ['pending', 'failed', 'completed'];
+const _MAX_JOB_LIMIT = 1000;
+
 /** @param {unknown} key @returns {import('node:crypto').KeyObject | null} */
 function _readHashKey(key) {
 	if (key === null) return null;
@@ -79,18 +100,23 @@ function _readHashKey(key) {
 /**
  * Configure the forget subsystem. `store` plugs in durable erasure; `platform`
  * supplies the cluster Redis handle. `hashKey` opts audit records into HMAC.
- * Omitted settings are retained; `null` clears all three.
+ * `jobs` records each erasure as a resumable job (`true` = in-memory store).
+ * Omitted settings are retained; `null` clears all of them.
  *
- * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null } | null} config
+ * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null } | null} config
  */
 export function configureForget(config) {
 	if (config === null) { _resetForget(); return; }
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
 	}
-	const { store, platform, hashKey } = config;
-	if (store === undefined && platform === undefined && hashKey === undefined) {
-		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform or hashKey');
+	const { store, platform, hashKey, jobs } = config;
+	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined) {
+		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey or jobs');
+	}
+	if (jobs !== undefined && jobs !== null && typeof jobs !== 'boolean' &&
+		(typeof jobs !== 'object' || _JOB_METHODS.some((m) => typeof (/** @type {any} */ (jobs))[m] !== 'function'))) {
+		throw new Error('[svelte-realtime] configureForget: jobs must be true, null or a store implementing ' + _JOB_METHODS.join(', '));
 	}
 	if (store !== undefined && store !== null && (typeof store !== 'object' || typeof store.purgeUser !== 'function')) {
 		throw new Error('[svelte-realtime] configureForget: store must implement purgeUser(tenantId, userId, cascade)');
@@ -100,6 +126,7 @@ export function configureForget(config) {
 	if (store !== undefined) _forgetStore = store;
 	if (platform !== undefined) _forgetPlatform = platform;
 	_forgetHashKey = nextHashKey;
+	if (jobs !== undefined) _forgetJobs = jobs === true ? createForgetJobStore() : (jobs || null);
 }
 
 /**
@@ -172,6 +199,7 @@ export function _forgetSurfaceNames() {
  *   result to a constant shape so 0-vs-N does not reveal user existence.
  * @property {Record<string, number>} surfaces - Per-surface removal counts
  *   (in-memory descriptors + `durable`).
+ * @property {string} [job] - The erasure job reference, with a job store only.
  */
 
 /**
@@ -224,16 +252,40 @@ function _reportUnannounced(count) {
 	} catch { /* Diagnostic failures must not interrupt the erasure. */ }
 }
 
-/** @param {string[]} failedSurfaces @param {number} rowsAffected */
-function _reportIncomplete(failedSurfaces, rowsAffected) {
+/** @param {string[]} failedSurfaces @param {number} rowsAffected @param {string | null} job */
+function _reportIncomplete(failedSurfaces, rowsAffected, job) {
 	try {
 		emitOperationalEvent({
 			source: 'svelte-realtime', component: 'server.forget', event: 'forget.incomplete',
 			severity: 'error', dataClass: 'operational',
 			message: 'Erasure could not be confirmed for every configured surface; resolve the failed cleanup and retry.',
-			attributes: { failedSurfaces: [...failedSurfaces], rowsAffected }
+			attributes: job === null
+				? { failedSurfaces: [...failedSurfaces], rowsAffected }
+				: { failedSurfaces: [...failedSurfaces], rowsAffected, job }
 		});
 	} catch { /* Diagnostic failures must not interrupt the remaining cleanup. */ }
+}
+
+/** @param {string} job @param {'completed' | 'failed'} outcome */
+function _reportJobUnrecorded(job, outcome) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.forget', event: 'forget.job-unrecorded',
+			severity: 'warn', dataClass: 'operational',
+			message: 'The erasure job store could not record an erasure outcome; the job stays unfinished until resumeForgetJobs runs it again.',
+			attributes: { job, outcome }
+		});
+	} catch { /* Diagnostic failures must not change the erasure outcome. */ }
+}
+
+/**
+ * The job reference of one erasure: tenant and user hashed together, so the
+ * same user in two tenants is two jobs and the reference reveals neither.
+ * @param {string | null} tenantId @param {string} userId
+ * @param {import('node:crypto').KeyObject | null} key
+ */
+function _jobId(tenantId, userId, key) {
+	return _hashUserId(JSON.stringify([tenantId, userId]), key);
 }
 
 const _liveForget = async function forget(userId, opts) {
@@ -257,7 +309,7 @@ const _liveForget = async function forget(userId, opts) {
 	// still selects the untenanted scope. Both configured erasure stores take
 	// tenantId as their first purgeUser argument, even without a local resolver.
 	// With neither a store nor a resolver the legacy option stays optional.
-	if (o.tenantId === undefined && (_isTenancyEnabled() || _forgetStore !== null || state.webhookDeadLetter !== null)) {
+	if (o.tenantId === undefined && (_isTenancyEnabled() || _forgetStore !== null || _forgetJobs !== null || state.webhookDeadLetter !== null)) {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)');
 	}
 	const tenantId = o.tenantId == null ? null : _validTenantId(o.tenantId);
@@ -268,14 +320,11 @@ const _liveForget = async function forget(userId, opts) {
 	// which documents the user contributed to). The value is also threaded to
 	// every descriptor and the durable store unchanged.
 	const cascade = o.cascade === undefined ? true : o.cascade;
-	/** @type {string[] | null} */
-	let crdtDocs = null;
 	if (cascade !== undefined && typeof cascade === 'object' && cascade !== null) {
 		if (cascade.crdt !== undefined) {
 			if (!Array.isArray(cascade.crdt) || cascade.crdt.some((n) => typeof n !== 'string' || n.length === 0)) {
 				throw new LiveError('INVALID_REQUEST', 'live.forget: cascade.crdt must be an array of non-empty document topic names');
 			}
-			crdtDocs = cascade.crdt;
 		}
 	} else if (typeof cascade !== 'boolean') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade must be a boolean or an object ({ crdt?: string[] })');
@@ -291,143 +340,217 @@ const _liveForget = async function forget(userId, opts) {
 	}
 	// Capture before any purge or await; a concurrent key rotation cannot change
 	// the audit identifier of an erasure that has already started.
-	const userIdHash = onForget ? _hashUserId(userId, hashKey) : null;
+	const jobs = _forgetJobs;
+	const userIdHash = onForget || jobs !== null ? _hashUserId(userId, hashKey) : null;
+	const jobId = jobs === null ? null : _jobId(tenantId, userId, hashKey);
+	return _runErasure(jobs, jobId, { userId, userIdHash, tenantId, cascade }, onForget);
+};
 
+/**
+ * One erasure run with its job bookkeeping. With a job store, the intent is
+ * recorded before any surface is touched (a failure to record it erases
+ * nothing) and the outcome after. An outcome that cannot be recorded leaves the
+ * job unfinished, which only means a resume runs the idempotent cascade again.
+ * @param {any} jobs
+ * @param {string | null} jobId
+ * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
+ * @param {Function | undefined} onForget
+ * @returns {Promise<ForgetResult>}
+ */
+async function _runErasure(jobs, jobId, run, onForget) {
+	const { userId, userIdHash, tenantId, cascade } = run;
+	const runId = jobs === null ? '' : randomUuid();
 	// Participate in graceful drain so a shutdown waits for an in-progress
 	// erasure rather than tearing it down half-applied (same contract as a cron
 	// tick / an alarm fire). The `finally` drains exactly once on every exit.
 	_enterInFlight();
 	try {
-		/** @type {Record<string, number>} */
-		const surfaces = {};
-		const failedSurfaces = [];
-		let rowsAffected = 0;
-
-		// In-memory descriptors run sequentially: the surface is small, the work
-		// is local, and a deterministic order keeps the cascade auditable.
-		for (const d of _descriptors) {
-			let count = 0;
+		if (jobs !== null && jobId !== null) {
 			try {
-				count = await d.run(tenantId, userId, cascade);
-				if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
+				await jobs.begin({ id: jobId, runId, userIdHash, tenantId, userId, cascade, at: wallEpoch() });
 			} catch {
-				// Attempt every independent surface before reporting incomplete work.
-				failedSurfaces.push(d.name);
-				count = 0;
+				throw new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased', { details: { job: jobId } });
 			}
-			const n = typeof count === 'number' && count > 0 ? count : 0;
-			surfaces[d.name] = n;
-			rowsAffected += n;
+			_activeJobs.set(jobId, (_activeJobs.get(jobId) || 0) + 1);
 		}
-
-		// Whole-document CRDT drops (cascade.crdt): erase the named documents'
-		// loaded replicas. Deleting the durably persisted copies is the app's
-		// half, in its own persist store.
-		if (crdtDocs !== null) {
-			let dropped = 0;
+		try {
+			/** @type {{ failedSurfaces: string[] }} */
+			const failure = { failedSurfaces: [] };
+			/** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */
+			let erased;
 			try {
-				dropped = _purgeCrdtDocs(crdtDocs);
-			} catch {
-				failedSurfaces.push('crdtDocs');
-			}
-			surfaces.crdtDocs = dropped;
-			rowsAffected += dropped;
-		}
-
-		// Durable store: erase the user's cluster rows and WAIT for confirmation -
-		// resolving before the durable delete confirms would be a compliance lie
-		// (GDPR must wait for durable confirmation). The return shapes are handled
-		// below (count, breakdown, or the owner-succession envelope).
-		if (_forgetStore) {
-			let successions = null;
-			try {
-				const durable = await _forgetStore.purgeUser(tenantId, userId, cascade);
-				// The store may return a total (number), a per-store count
-				// breakdown (object), or the owner-succession envelope
-				// `{ rowsAffected?, ownerSuccessions? }` - detected by an
-				// `ownerSuccessions` array (a plain count breakdown never carries
-				// one). Split the counts from the successions; the counts fold as
-				// before, the successions publish `:owner` for the rooms the store
-				// evicted the user from as owner cluster-wide.
-				let counts = durable;
-				if (durable && typeof durable === 'object' && Array.isArray(/** @type {any} */ (durable).ownerSuccessions)) {
-					successions = /** @type {any} */ (durable).ownerSuccessions;
-					counts = /** @type {any} */ (durable).rowsAffected;
-				}
-				if (typeof counts === 'number') {
-					surfaces.durable = counts > 0 ? counts : 0;
-					rowsAffected += surfaces.durable;
-				} else if (counts && typeof counts === 'object') {
-					let sum = 0;
-					for (const v of Object.values(counts)) {
-						const n = typeof v === 'number' && v > 0 ? v : 0;
-						sum += n;
-					}
-					surfaces.durable = sum;
-					rowsAffected += sum;
-				} else {
-					surfaces.durable = 0;
-				}
+				erased = await _erase(userId, tenantId, cascade, jobId, failure);
 			} catch (err) {
-				// Keep failure metadata bounded and omit store exceptions, which can
-				// include erased or successor identities and payloads.
-				_reportIncomplete([...failedSurfaces, 'durable'], rowsAffected);
-				// The store may have COMMITTED some owner successions before a
-				// sibling room's transient failure aborted the leg: those evictions
-				// are durable and authoritative, so announce them now even though the
-				// overall erasure is incomplete and will be retried. The retry
-				// re-drives only the failed rooms (a committed room reads o != userId
-				// and reports nothing), so each committed succession reaches the
-				// `:owner` wire exactly once. Best-effort and fully guarded: a throw
-				// here must never mask FORGET_STORE_FAILED (which would tell the caller
-				// the partially-failed erasure need not be retried).
-				const committed = err && Array.isArray(/** @type {any} */ (err).ownerSuccessions)
-					? /** @type {any} */ (err).ownerSuccessions
-					: null;
-				if (committed && committed.length) {
+				if (jobs !== null && jobId !== null) {
 					try {
-						_publishOwnerSuccessions(tenantId, committed);
-					} catch (pubErr) {
-						if (_IS_DEV) console.error('[svelte-realtime] live.forget announce-on-failure threw:', pubErr);
+						await jobs.fail({ id: jobId, runId, at: wallEpoch(), code: /** @type {any} */ (err)?.code || 'INTERNAL_ERROR', failedSurfaces: failure.failedSurfaces });
+					} catch {
+						_reportJobUnrecorded(jobId, 'failed');
 					}
 				}
-				throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried');
+				throw err;
 			}
-			// Publish the store's owner successions AFTER the durable try/catch:
-			// the authoritative eviction already committed in the store, so the
-			// wire announcement is best-effort by construction and an exotic throw
-			// out of it must never misreport as FORGET_STORE_FAILED (which would
-			// tell the caller to retry an erasure that succeeded).
-			if (successions !== null) {
-				surfaces.ownerSuccessions = _publishOwnerSuccessions(tenantId, successions);
+			const { surfaces, rowsAffected } = erased;
+			const at = wallEpoch();
+			if (jobs !== null && jobId !== null) {
+				try {
+					await jobs.complete({ id: jobId, runId, at, rowsAffected, surfaces: { ...surfaces } });
+				} catch {
+					_reportJobUnrecorded(jobId, 'completed');
+				}
+			}
+
+			// Optional erasure hook: receives a stable pseudonymous hash of the
+			// userId, the tenant, the cascade flag, and the counts.
+			// Caught-and-recorded: a throwing hook never aborts a completed erasure.
+			if (onForget) {
+				try {
+					// Shallow-copy surfaces so a hook that mutates the record cannot
+					// alter the value returned to the caller (the same object).
+					onForget({ userIdHash, tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
+				} catch (err) {
+					if (_IS_DEV) console.error('[svelte-realtime] live.forget onForget hook threw (erasure already completed):', err);
+				}
+			}
+
+			return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
+		} finally {
+			if (jobId !== null && jobs !== null) {
+				const n = (_activeJobs.get(jobId) || 1) - 1;
+				if (n > 0) _activeJobs.set(jobId, n);
+				else _activeJobs.delete(jobId);
 			}
 		}
-
-		if (failedSurfaces.length) {
-			_reportIncomplete(failedSurfaces, rowsAffected);
-			throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry');
-		}
-
-		const at = wallEpoch();
-
-		// Optional erasure hook: receives a stable pseudonymous hash of the
-		// userId, the tenant, the cascade flag, and the counts.
-		// Caught-and-recorded: a throwing hook never aborts a completed erasure.
-		if (onForget) {
-			try {
-				// Shallow-copy surfaces so a hook that mutates the record cannot
-				// alter the value returned to the caller (the same object).
-				onForget({ userIdHash, tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
-			} catch (err) {
-				if (_IS_DEV) console.error('[svelte-realtime] live.forget onForget hook threw (erasure already completed):', err);
-			}
-		}
-
-		return { ok: true, at, rowsAffected, surfaces };
 	} finally {
 		_exitInFlight();
 	}
-};
+}
+
+/**
+ * The cascade itself: every in-memory surface, named documents, then the
+ * durable store. Resolves the counts or throws the erasure's LiveError after
+ * writing the failed surface names to `failure`.
+ * @param {string} userId @param {string | null} tenantId @param {any} cascade
+ * @param {string | null} jobId
+ * @param {{ failedSurfaces: string[] }} failure
+ * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
+ */
+async function _erase(userId, tenantId, cascade, jobId, failure) {
+	const metadata = jobId === null ? undefined : { details: { job: jobId } };
+	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
+	/** @type {Record<string, number>} */
+	const surfaces = {};
+	const failedSurfaces = failure.failedSurfaces;
+	let rowsAffected = 0;
+
+	// In-memory descriptors run sequentially: the surface is small, the work
+	// is local, and a deterministic order keeps the cascade auditable.
+	for (const d of _descriptors) {
+		let count = 0;
+		try {
+			count = await d.run(tenantId, userId, cascade);
+			if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
+		} catch {
+			// Attempt every independent surface before reporting incomplete work.
+			failedSurfaces.push(d.name);
+			count = 0;
+		}
+		const n = typeof count === 'number' && count > 0 ? count : 0;
+		surfaces[d.name] = n;
+		rowsAffected += n;
+	}
+
+	// Whole-document CRDT drops (cascade.crdt): erase the named documents'
+	// loaded replicas. Deleting the durably persisted copies is the app's
+	// half, in its own persist store.
+	if (crdtDocs !== null) {
+		let dropped = 0;
+		try {
+			dropped = _purgeCrdtDocs(crdtDocs);
+		} catch {
+			failedSurfaces.push('crdtDocs');
+		}
+		surfaces.crdtDocs = dropped;
+		rowsAffected += dropped;
+	}
+
+	// Durable store: erase the user's cluster rows and WAIT for confirmation -
+	// resolving before the durable delete confirms would be a compliance lie
+	// (GDPR must wait for durable confirmation). The return shapes are handled
+	// below (count, breakdown, or the owner-succession envelope).
+	if (_forgetStore) {
+		let successions = null;
+		try {
+			const durable = await _forgetStore.purgeUser(tenantId, userId, cascade);
+			// The store may return a total (number), a per-store count
+			// breakdown (object), or the owner-succession envelope
+			// `{ rowsAffected?, ownerSuccessions? }` - detected by an
+			// `ownerSuccessions` array (a plain count breakdown never carries
+			// one). Split the counts from the successions; the counts fold as
+			// before, the successions publish `:owner` for the rooms the store
+			// evicted the user from as owner cluster-wide.
+			let counts = durable;
+			if (durable && typeof durable === 'object' && Array.isArray(/** @type {any} */ (durable).ownerSuccessions)) {
+				successions = /** @type {any} */ (durable).ownerSuccessions;
+				counts = /** @type {any} */ (durable).rowsAffected;
+			}
+			if (typeof counts === 'number') {
+				surfaces.durable = counts > 0 ? counts : 0;
+				rowsAffected += surfaces.durable;
+			} else if (counts && typeof counts === 'object') {
+				let sum = 0;
+				for (const v of Object.values(counts)) {
+					const n = typeof v === 'number' && v > 0 ? v : 0;
+					sum += n;
+				}
+				surfaces.durable = sum;
+				rowsAffected += sum;
+			} else {
+				surfaces.durable = 0;
+			}
+		} catch (err) {
+			// Keep failure metadata bounded and omit store exceptions, which can
+			// include erased or successor identities and payloads.
+			failedSurfaces.push('durable');
+			_reportIncomplete(failedSurfaces, rowsAffected, jobId);
+			// The store may have COMMITTED some owner successions before a
+			// sibling room's transient failure aborted the leg: those evictions
+			// are durable and authoritative, so announce them now even though the
+			// overall erasure is incomplete and will be retried. The retry
+			// re-drives only the failed rooms (a committed room reads o != userId
+			// and reports nothing), so each committed succession reaches the
+			// `:owner` wire exactly once. Best-effort and fully guarded: a throw
+			// here must never mask FORGET_STORE_FAILED (which would tell the caller
+			// the partially-failed erasure need not be retried).
+			const committed = err && Array.isArray(/** @type {any} */ (err).ownerSuccessions)
+				? /** @type {any} */ (err).ownerSuccessions
+				: null;
+			if (committed && committed.length) {
+				try {
+					_publishOwnerSuccessions(tenantId, committed);
+				} catch (pubErr) {
+					if (_IS_DEV) console.error('[svelte-realtime] live.forget announce-on-failure threw:', pubErr);
+				}
+			}
+			throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried', metadata);
+		}
+		// Publish the store's owner successions AFTER the durable try/catch:
+		// the authoritative eviction already committed in the store, so the
+		// wire announcement is best-effort by construction and an exotic throw
+		// out of it must never misreport as FORGET_STORE_FAILED (which would
+		// tell the caller to retry an erasure that succeeded).
+		if (successions !== null) {
+			surfaces.ownerSuccessions = _publishOwnerSuccessions(tenantId, successions);
+		}
+	}
+
+	if (failedSurfaces.length) {
+		_reportIncomplete(failedSurfaces, rowsAffected, jobId);
+		throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry', metadata);
+	}
+
+	return { surfaces, rowsAffected };
+}
 
 /**
  * Attach `live.forget` onto the live object. Mirrors `installPush(live)`.
@@ -445,4 +568,138 @@ export function _resetForget() {
 	_forgetStore = null;
 	_forgetPlatform = null;
 	_forgetHashKey = null;
+	_forgetJobs = null;
+}
+
+/** @param {string} message */
+function _invalidJobRequest(message) {
+	return new LiveError('INVALID_REQUEST', message);
+}
+
+/** @param {unknown} limit @param {string} name */
+function _jobLimit(limit, name) {
+	if (limit === undefined) return 100;
+	if (!Number.isInteger(limit) || /** @type {number} */ (limit) < 1 || /** @type {number} */ (limit) > _MAX_JOB_LIMIT) {
+		throw _invalidJobRequest(name + ': limit must be an integer from 1 to ' + _MAX_JOB_LIMIT);
+	}
+	return /** @type {number} */ (limit);
+}
+
+/**
+ * The public view of a stored job: a fixed set of fields, so a store that
+ * keeps more (the raw user id of an unfinished job) never leaks it here.
+ * @param {any} j
+ */
+function _publicJob(j) {
+	const error = j && j.error && typeof j.error === 'object'
+		? { code: String(j.error.code), failedSurfaces: Array.isArray(j.error.failedSurfaces) ? j.error.failedSurfaces.map(String) : [] }
+		: null;
+	return {
+		id: String(j.id),
+		userIdHash: String(j.userIdHash),
+		tenantId: typeof j.tenantId === 'string' ? j.tenantId : null,
+		status: j.status,
+		attempts: Number(j.attempts) || 0,
+		createdAt: Number(j.createdAt),
+		updatedAt: Number(j.updatedAt),
+		completedAt: typeof j.completedAt === 'number' ? j.completedAt : null,
+		rowsAffected: typeof j.rowsAffected === 'number' ? j.rowsAffected : null,
+		error
+	};
+}
+
+/**
+ * List recorded erasure jobs, oldest first. Each carries the pseudonymous job
+ * reference and audit hash, never the user id. Empty without a job store.
+ * @param {{ status?: 'pending' | 'failed' | 'completed', limit?: number }} [filter]
+ */
+export async function listForgetJobs(filter = {}) {
+	if (filter === null || typeof filter !== 'object') throw _invalidJobRequest('listForgetJobs: filter must be an object');
+	const { status } = filter;
+	if (status !== undefined && !_JOB_STATUSES.includes(status)) {
+		throw _invalidJobRequest('listForgetJobs: status must be one of ' + _JOB_STATUSES.join(', '));
+	}
+	const limit = _jobLimit(filter.limit, 'listForgetJobs');
+	const jobs = _forgetJobs;
+	if (jobs === null) return [];
+	let rows;
+	try {
+		rows = await jobs.list(status === undefined ? { limit } : { status, limit });
+	} catch {
+		throw new LiveError('FORGET_JOB_FAILED', 'listForgetJobs: the erasure job store could not be read');
+	}
+	return (Array.isArray(rows) ? rows : []).slice(0, limit).map(_publicJob);
+}
+
+/**
+ * Run unfinished erasure jobs again: failed ones, and pending ones whose run
+ * ended without recording an outcome (a crash, a store outage). Oldest first,
+ * at most `limit` (default 100) per call, or just the job named by `id`. A job
+ * this process is still running is skipped. Each run is the full idempotent
+ * cascade under the job's stored tenant and cascade options.
+ * @param {{ id?: string, limit?: number, onForget?: Function }} [opts]
+ */
+export async function resumeForgetJobs(opts = {}) {
+	if (opts === null || typeof opts !== 'object') throw _invalidJobRequest('resumeForgetJobs: options must be an object');
+	const { id, onForget } = opts;
+	if (id !== undefined && (typeof id !== 'string' || id.length === 0 || id.length > 256)) {
+		throw _invalidJobRequest('resumeForgetJobs: id must be a non-empty string of at most 256 characters');
+	}
+	const limit = _jobLimit(opts.limit, 'resumeForgetJobs');
+	if (onForget !== undefined && typeof onForget !== 'function') {
+		throw _invalidJobRequest('resumeForgetJobs: onForget must be a function');
+	}
+	/** @type {{ total: number, completed: number, failed: number, results: Array<{ id: string, status: 'completed' | 'failed' | 'skipped', code?: string }> }} */
+	const out = { total: 0, completed: 0, failed: 0, results: [] };
+	const jobs = _forgetJobs;
+	if (jobs === null) return out;
+	/** @type {string[]} */
+	let ids;
+	if (id !== undefined) {
+		ids = [id];
+	} else {
+		try {
+			const [failed, pending] = await Promise.all([jobs.list({ status: 'failed', limit }), jobs.list({ status: 'pending', limit })]);
+			ids = [...(Array.isArray(failed) ? failed : []), ...(Array.isArray(pending) ? pending : [])]
+				.sort((a, b) => Number(a.createdAt) - Number(b.createdAt))
+				.slice(0, limit)
+				.map((j) => String(j.id));
+		} catch {
+			throw new LiveError('FORGET_JOB_FAILED', 'resumeForgetJobs: the erasure job store could not be read');
+		}
+	}
+	for (const jobId of ids) {
+		out.total++;
+		if (_activeJobs.has(jobId)) {
+			out.results.push({ id: jobId, status: 'skipped' });
+			continue;
+		}
+		let intent;
+		try {
+			intent = await jobs.intent(jobId);
+		} catch {
+			out.failed++;
+			out.results.push({ id: jobId, status: 'failed', code: 'FORGET_JOB_FAILED' });
+			continue;
+		}
+		if (!intent) {
+			out.results.push({ id: jobId, status: 'skipped' });
+			continue;
+		}
+		try {
+			const { userId, tenantId, cascade } = intent;
+			if (typeof userId !== 'string' || userId.length === 0 || _validIdReason(userId, 'userId') !== null) {
+				throw _invalidJobRequest('resumeForgetJobs: the stored job has no valid user id');
+			}
+			const scope = tenantId == null ? null : _validTenantId(tenantId);
+			const userIdHash = typeof intent.userIdHash === 'string' ? intent.userIdHash : _hashUserId(userId, _forgetHashKey);
+			await _runErasure(jobs, jobId, { userId, userIdHash, tenantId: scope, cascade: cascade ?? true }, onForget);
+			out.completed++;
+			out.results.push({ id: jobId, status: 'completed' });
+		} catch (err) {
+			out.failed++;
+			out.results.push({ id: jobId, status: 'failed', code: String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR') });
+		}
+	}
+	return out;
 }
