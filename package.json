@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "publishConfig": {
     "tag": "latest"
   },
