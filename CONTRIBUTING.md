@@ -342,8 +342,13 @@ asset changes so a remote update cannot silently change a released README.
 [docs/documentation.v1.json](docs/documentation.v1.json) owns the eight ordered
 reader paths: package identity, first success and compatibility stay in README;
 tutorial, how-to, reference, explanation and operations route to the owned site.
-`npm run generate:documentation` renders the routing table and compatibility
-commands from the manifest and the CLI-owned tuple in `src/cli-utils.js`.
+`npm run generate:documentation` renders the routing table from the manifest.
+The Quick start command, version table and install commands are generated from
+the installed adapter's `docs/compatibility.v1.csv`; refresh them with
+`node scripts/check-compatibility.js --write`. That check also requires the
+scaffolder tuple in `src/cli-utils.js`, `docs/first-run.md`, the package floors,
+`engines.node` and the stated floors in `docs/0.6-upgrade.md` to match the
+manifest's current row.
 The generator automatically tightens the README size allowance when content shrinks.
 After changing generated commands, run `npm run generate:examples` to refresh their
 code-fence inventory.

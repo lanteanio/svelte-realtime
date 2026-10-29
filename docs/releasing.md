@@ -106,9 +106,10 @@ dependencies, Chromium, and checks Docker before `npm run verify:release` runs
 the unit, simulation, DevTools, scaffold, browser, chaos, lifecycle, smooth-stack
 and smoke checks. The source identity check also refuses a release whose
 scaffolder still installs another svelte-realtime version than the one being
-published. `prepublishOnly` runs the full check chain, and source identity
-is checked again afterward so test or lifecycle mutations cannot enter the pack.
-The job packs one
+published. `prepublishOnly` refuses a version other than the svelte-realtime
+release the installed adapter's compatibility manifest declares, then runs the
+full check chain, and source identity is checked again afterward so test or
+lifecycle mutations cannot enter the pack. The job packs one
 retained tarball and exports its SHA-256 digest separately from the artifact.
 
 The protected `publish` job alone has `id-token: write`. It installs no project

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { expect, it } from 'vitest';
@@ -33,6 +33,8 @@ it('rejects unrecorded working and committed growth through the real documentati
 	const run = options => main({ directory, log() {}, ...options });
 	try {
 		for (const file of ['package.json', 'docs/package-exports.md']) writeFileSync(join(directory, file), readFileSync(new URL('../' + file, import.meta.url)));
+		mkdirSync(join(directory, 'node_modules/svelte-adapter-uws/docs'), { recursive: true });
+		copyFileSync(new URL('../node_modules/svelte-adapter-uws/docs/compatibility.v1.csv', import.meta.url), join(directory, 'node_modules/svelte-adapter-uws/docs/compatibility.v1.csv'));
 		writeFileSync(join(directory, 'README.md'), readme);
 		save(manifest);
 		git('init', '-q'); git('add', 'docs/documentation.v1.json'); git('commit', '-qm', 'Record documentation limit');

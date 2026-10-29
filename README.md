@@ -52,6 +52,7 @@ Before launch or a scaling-policy change, use the ecosystem's versioned [capacit
 
 ## Quick start
 
+<!-- compatibility-cli:start -->
 ```bash
 npx svelte-realtime@0.6.0-next.91 my-app --template example
 cd my-app
@@ -59,6 +60,7 @@ npm run dev
 ```
 
 For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
+<!-- compatibility-cli:end -->
 
 The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`. The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning.
 
@@ -71,11 +73,11 @@ The three ecosystem packages move together. Bump them as a group:
 <!-- compatibility:start -->
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
 | --- | --- | --- | --- |
-| `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
-| `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
-| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated candidate; publish the tuple together before these registry commands are used. |
+| `0.4.x` | `0.4.x` | `0.4.x` | Legacy. |
+| `^0.5.11` | `0.5.x` | `0.5.x` | Stable. Node >=22.0.0 required. |
+| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Prerelease 0.6 candidate. Node >=22.0.0 required. Publish the tuple together before these registry commands are used. |
 
-Install the CLI-owned candidate tuple and run its native preflight:
+Install the current prerelease tuple, the one the scaffolder installs, and run its native preflight:
 
 ```bash
 npm install svelte-adapter-uws@0.6.0-next.96 svelte-realtime@0.6.0-next.91

@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- The README Quick start command, version-compatibility table and install commands are generated from the installed adapter's `docs/compatibility.v1.csv`; the 0.5 row states this package's own `^0.5.11` adapter floor. `node scripts/check-compatibility.js` runs in the check chain and fails when those README blocks, the scaffolder tuple in `src/cli-utils.js`, `docs/first-run.md`, the adapter peer floor, the extensions development floor, `engines.node`, the README's native Node floor or the floors stated in `docs/0.6-upgrade.md` disagree with the manifest's current row, or when the README pins an ecosystem package version outside the generated blocks. `--write` regenerates the README blocks and the stated floors. `prepublishOnly` runs it with `--release`, which also requires the package version to be the svelte-realtime release the manifest declares.
+
 - `sourceGap(platform, topic, { source, reason, jitterMs })` reports lost delivery from an external change source over the subscribed data topic with `seq: false`. Mounted streams discard their resume cursors and reload authoritative state through the coalesced, de-herded gap-recovery path without merging the reserved signal into application data.
 
 - Degradation mitigation and recovery notices accept bounded `messageKey` and typed `messageParams` fields for application-owned localization catalogs, while preserving `bannerCopy` as the source-English fallback. Invalid notice fields are omitted independently. The browser fixture covers localized transition announcements, action gating, focus-preserving recovery, and stable retry deadlines.
