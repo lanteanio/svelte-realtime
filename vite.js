@@ -14,6 +14,10 @@ const DEVTOOLS_ID = '\0live-devtools';
 const CLIENT_ID = 'svelte-realtime/client';
 // The entry points the DEVTOOLS_ID module imports.
 const DEVTOOLS_DEPS = [CLIENT_ID, 'svelte-realtime/devtools'];
+// The svelte-adapter-uws entry points the realtime client modules import. An
+// optimized realtime client bundles them; a realtime served from source
+// imports them on the first page load.
+const ADAPTER_CLIENT_DEPS = ['svelte-adapter-uws/client'];
 const SERVER_PUBLIC_ID = '/@svelte-realtime-server';
 const SERVER_ID = '\0live-server';
 const LIVE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\s*\(/g;
@@ -1076,15 +1080,24 @@ function _serverModuleGraph(server) {
 }
 
 /**
- * Add the realtime entry points that only generated client modules import to
- * the client's dependency optimization, so Vite optimizes them before the
- * first page load. Vite's dependency scan skips virtual modules, so it would
- * meet them only when the warmup or the browser requests those modules,
- * optimize again and possibly reload every open page. Vite never discovers a
- * package it resolves outside node_modules or one that is excluded, and with
- * discovery off it optimizes only what it is told to, so those setups are left
- * as configured. Called with the resolved client options, after every config
- * and configEnvironment hook has adjusted them.
+ * Add the client entry points Vite would otherwise meet only on the first
+ * page load to the client's dependency optimization, so Vite optimizes them
+ * before that load instead of optimizing again and reloading every open page.
+ *
+ * An installed svelte-realtime gets the realtime entry points that only
+ * generated modules import: Vite's dependency scan skips virtual modules.
+ * A svelte-realtime that Vite serves from source (linked outside
+ * node_modules, or the root's own package) stays served from source: an
+ * optimized client next to source modules that import `./client.js` directly
+ * would run two client instances. Its client modules still import
+ * svelte-adapter-uws from node_modules, which Vite discovers when the browser
+ * requests them, so those entries are added when both the realtime source and
+ * the app resolve them into node_modules. Vite bundles the app's resolution
+ * and hands it to every importer of the same id. Nothing is added that Vite
+ * would not discover on its own: not with discovery off, not an excluded id,
+ * and not the imports of an excluded svelte-realtime under node_modules.
+ * Called with the resolved client options, after every config and
+ * configEnvironment hook has adjusted them.
  * @param {string} root
  * @param {{ include?: string[], exclude?: string[], noDiscovery?: boolean, disabled?: boolean | 'build' | 'dev' }} optimizeDeps
  * @param {boolean} preserveSymlinks
@@ -1093,25 +1106,63 @@ function _serverModuleGraph(server) {
 function _includeGeneratedDeps(root, optimizeDeps, preserveSymlinks, ids) {
 	if (optimizeDeps.noDiscovery || optimizeDeps.disabled === true || optimizeDeps.disabled === 'dev') return;
 	const exclude = optimizeDeps.exclude ?? [];
-	if (exclude.includes('svelte-realtime')) return;
+	const rootManifest = resolve(root, 'package.json');
+	const fromRoot = createRequire(rootManifest);
 	let entry;
 	try {
-		entry = realpathSync(createRequire(resolve(root, 'package.json')).resolve(CLIENT_ID));
+		entry = realpathSync(fromRoot.resolve(CLIENT_ID));
 	} catch {
 		return;
 	}
-	// Vite follows a link to its target unless preserveSymlinks keeps the
-	// path it found, which is then inside node_modules unless the root's own
-	// package is svelte-realtime and resolves to itself through its exports.
-	const own = preserveSymlinks ? _nearestPackage(root) : undefined;
-	const installed = preserveSymlinks
-		? !(own?.name === 'svelte-realtime' && own.exports) && _hasNodeModulesCopy(root)
-		: /[\\/]node_modules[\\/]/.test(entry);
-	if (!installed) return;
+	const fromRealtime = createRequire(entry);
+	const add = _resolvesInstalled(fromRoot, rootManifest, CLIENT_ID, preserveSymlinks)
+		? ids
+		: ADAPTER_CLIENT_DEPS.filter((id) => _resolvesInstalled(fromRealtime, entry, id, preserveSymlinks)
+			&& _resolvesInstalled(fromRoot, rootManifest, id, preserveSymlinks));
 	const include = (optimizeDeps.include ??= []);
-	for (const id of ids) {
-		if (!exclude.includes(id) && !include.includes(id)) include.push(id);
+	for (const id of add) {
+		if (!_excluded(exclude, id) && !include.includes(id)) include.push(id);
 	}
+}
+
+/**
+ * Whether `id` resolves into a node_modules directory from `base`, the file
+ * `from` was created for. Vite follows a link to its target unless
+ * preserveSymlinks keeps the link's own path, and it discovers only what
+ * resolves into node_modules. A package that imports its own name resolves
+ * through its own exports, ahead of any node_modules copy.
+ * @param {NodeJS.Require} from
+ * @param {string} base
+ * @param {string} id
+ * @param {boolean} preserveSymlinks
+ */
+function _resolvesInstalled(from, base, id, preserveSymlinks) {
+	let file;
+	try {
+		file = realpathSync(from.resolve(id));
+	} catch {
+		return false;
+	}
+	if (!preserveSymlinks) return /[\\/]node_modules[\\/]/.test(file);
+	const name = _packageName(id);
+	const own = _nearestPackage(dirname(base));
+	if (own?.name === name && own.exports) return false;
+	return !!from.resolve.paths(name)?.some((dir) => existsSync(resolve(dir, name, 'package.json')));
+}
+
+/** @param {string} id */
+function _packageName(id) {
+	const parts = id.split('/');
+	return id.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+/**
+ * Vite skips an excluded id and every id of an excluded package.
+ * @param {string[]} exclude
+ * @param {string} id
+ */
+function _excluded(exclude, id) {
+	return exclude.includes(id) || exclude.includes(_packageName(id));
 }
 
 /** The package.json nearest to dir, looking upward. */
@@ -1127,16 +1178,6 @@ function _nearestPackage(dir) {
 		}
 		const parent = dirname(dir);
 		if (parent === dir) return undefined;
-		dir = parent;
-	}
-}
-
-/** Whether a node_modules/svelte-realtime exists in dir or above, where Vite looks. */
-function _hasNodeModulesCopy(dir) {
-	for (;;) {
-		if (existsSync(resolve(dir, 'node_modules', 'svelte-realtime', 'package.json'))) return true;
-		const parent = dirname(dir);
-		if (parent === dir) return false;
 		dir = parent;
 	}
 }

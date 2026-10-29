@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, utimesSync, symlinkSync } from 'fs';
-import { resolve } from 'path';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, utimesSync, symlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { dirname, resolve } from 'path';
 import svelteRealtime from '../vite.js';
 
 const testRoot = resolve(import.meta.dirname, '__fixtures__');
@@ -995,16 +996,26 @@ describe('dependency optimization for generated modules', () => {
 
 	const CLIENT = 'svelte-realtime/client';
 	const DEPS = [CLIENT, 'svelte-realtime/devtools'];
+	const ADAPTER = ['svelte-adapter-uws/client'];
 	const { exports } = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf8'));
 	const literals = code => [...code.matchAll(/(['"`])((?:(?!\1)[^\\]|\\.)*)\1/g)].map(m => m[2]);
 	const specifiers = code => [...code.matchAll(/\b(?:from|import)\s*\(?\s*(['"])([^'"]+)\1/g)].map(m => m[2]);
 
-	// Each test gets an app root of its own: Node caches resolutions and
-	// package.json reads per path for the life of the process.
+	// App roots live outside the repository, so nothing resolves from the
+	// repository's own node_modules. Each test gets an app root of its own:
+	// Node caches resolutions and package.json reads per path for the life of
+	// the process.
+	let appBase;
 	let appRoot;
 	let appCount = 0;
+	beforeAll(() => {
+		appBase = mkdtempSync(resolve(tmpdir(), 'realtime-optimize-deps-'));
+	});
+	afterAll(() => {
+		if (appBase) rmSync(appBase, { recursive: true, force: true });
+	});
 	beforeEach(() => {
-		appRoot = resolve(testRoot, 'app-' + process.pid + '-' + ++appCount);
+		appRoot = resolve(appBase, 'app-' + ++appCount);
 		mkdirSync(appRoot, { recursive: true });
 		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'app', private: true }));
 	});
@@ -1016,6 +1027,24 @@ describe('dependency optimization for generated modules', () => {
 		writeFileSync(resolve(dir, 'devtools.js'), '');
 	}
 	const installed = () => installRealtime(resolve(appRoot, 'node_modules/svelte-realtime'));
+	function installAdapter(dir) {
+		const adapterExports = {};
+		for (const id of ADAPTER) {
+			const file = './' + id.slice('svelte-adapter-uws/'.length) + '.js';
+			adapterExports['.' + id.slice('svelte-adapter-uws'.length)] = { default: file };
+			mkdirSync(dirname(resolve(dir, file)), { recursive: true });
+			writeFileSync(resolve(dir, file), '');
+		}
+		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-adapter-uws', exports: adapterExports }));
+	}
+	// svelte-realtime linked from a checkout of its own, which has its own
+	// node_modules, as `npm link` and `file:` installs set it up.
+	function linkedRealtime() {
+		const target = resolve(appRoot, 'checkout/svelte-realtime');
+		installRealtime(target);
+		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
+		return target;
+	}
 	function link(target, path) {
 		mkdirSync(resolve(path, '..'), { recursive: true });
 		symlinkSync(target, path, 'junction');
@@ -1092,6 +1121,107 @@ describe('dependency optimization for generated modules', () => {
 		installRealtime(target);
 		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
 		expect(resolveWith()).toEqual([]);
+	});
+
+	it('optimizes the adapter entries a linked svelte-realtime imports from node_modules', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual(ADAPTER);
+		expect(resolveWith({ devtools: false })).toEqual(ADAPTER);
+	});
+
+	it('optimizes the adapter entries of an excluded svelte-realtime served from outside node_modules', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith({}, { exclude: ['svelte-realtime'] })).toEqual(ADAPTER);
+	});
+
+	it('leaves the adapter to be served from source where Vite would not optimize it', () => {
+		const target = linkedRealtime();
+		// The realtime checkout links the adapter from source.
+		const adapterCheckout = resolve(appRoot, 'checkout/svelte-adapter-uws');
+		installAdapter(adapterCheckout);
+		link(adapterCheckout, resolve(target, 'node_modules/svelte-adapter-uws'));
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('leaves an adapter the app links from source to be served from source', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		const adapterCheckout = resolve(appRoot, 'checkout/svelte-adapter-uws');
+		installAdapter(adapterCheckout);
+		link(adapterCheckout, resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('adds no adapter entry the app does not resolve', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual([]);
+	});
+
+	it('keeps adapter entries the user excluded out of the list', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith({}, { exclude: ['svelte-adapter-uws'] })).toEqual([]);
+		expect(resolveWith({}, { exclude: [ADAPTER[0]] })).toEqual([]);
+	});
+
+	it('adds no adapter entry for a linked svelte-realtime with discovery off', () => {
+		const target = linkedRealtime();
+		installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith({}, { noDiscovery: true })).toEqual([]);
+		expect(resolveWith({}, { disabled: 'dev' })).toEqual([]);
+	});
+
+	it('optimizes the adapter entries the root\'s own svelte-realtime imports from node_modules', () => {
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports }));
+		writeFileSync(resolve(appRoot, 'client.js'), '');
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual(ADAPTER);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual(ADAPTER);
+	});
+
+	it('treats a linked adapter as installed only when Vite preserves symlinks', () => {
+		writeFileSync(resolve(appRoot, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports }));
+		writeFileSync(resolve(appRoot, 'client.js'), '');
+		const adapterCheckout = resolve(appRoot, 'checkout/svelte-adapter-uws');
+		installAdapter(adapterCheckout);
+		link(adapterCheckout, resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith()).toEqual([]);
+		expect(resolveWith({}, {}, { resolve: { preserveSymlinks: true } })).toEqual(ADAPTER);
+	});
+
+	it('adds no adapter entry for an excluded svelte-realtime under node_modules', () => {
+		installed();
+		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+		expect(resolveWith({}, { exclude: ['svelte-realtime'] })).toEqual([]);
+	});
+
+	it('lists every adapter entry the realtime browser modules import', () => {
+		// Walk the relative imports of each browser entry point and collect
+		// the svelte-adapter-uws specifiers they reach.
+		const seen = new Set();
+		const found = new Set();
+		const visit = (file) => {
+			if (seen.has(file)) return;
+			seen.add(file);
+			const code = readFileSync(file, 'utf8');
+			for (const spec of specifiers(code)) {
+				if (spec.startsWith('.')) visit(resolve(dirname(file), spec));
+				else if (spec === 'svelte-adapter-uws' || spec.startsWith('svelte-adapter-uws/')) found.add(spec);
+			}
+		};
+		for (const entry of ['./client', './devtools']) {
+			visit(resolve(import.meta.dirname, '..', exports[entry].default));
+		}
+		expect(seen.size).toBeGreaterThan(2);
+		expect([...found].sort()).toEqual([...ADAPTER].sort());
 	});
 
 	it('optimizes a linked svelte-realtime when Vite preserves symlinks', () => {
