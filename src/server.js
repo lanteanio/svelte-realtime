@@ -1853,11 +1853,12 @@ live.binary = function binary(fn, options) {
  *   - `ctx.signal`  - AbortSignal that fires on cancel / disconnect / cap exceeded
  *   - `ctx.upload`  - { id: string, total?: number, source: 'file'|'blob'|'buffer'|'stream' }
  *
- * Caps default to: 100MB per upload, 4 concurrent per session, unbounded
- * globally, 64 buffered chunks before flow-control kicks in.
+ * Caps default to: 100MB per upload, 4 concurrent per session, 100 per
+ * tenant and 1000 per process, 64 buffered chunks before flow-control kicks
+ * in, and 256 MiB of unread chunks per tenant and 1 GiB per process.
  *
  * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
- * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number, diagnostics?: boolean }} [options]
+ * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentPerTenant?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, maxBufferedBytesPerTenant?: number, maxBufferedBytesTotal?: number, reauthEvery?: number, diagnostics?: boolean }} [options]
  * @returns {Function}
  */
 live.upload = function upload(fn, options) {
@@ -1879,6 +1880,13 @@ live.upload = function upload(fn, options) {
 	if (maxBufferedChunks !== undefined && (!Number.isSafeInteger(maxBufferedChunks) || maxBufferedChunks < 1)) {
 		throw new Error('live.upload: maxBufferedChunks must be a positive integer');
 	}
+	// Quotas shared across sessions: a positive integer, or Infinity to lift one.
+	for (const name of ['maxConcurrentPerTenant', 'maxConcurrentTotal', 'maxBufferedBytesPerTenant', 'maxBufferedBytesTotal']) {
+		const value = options?.[name];
+		if (value !== undefined && value !== Infinity && (!Number.isSafeInteger(value) || value < 1)) {
+			throw new Error('live.upload: ' + name + ' must be a positive integer or Infinity');
+		}
+	}
 	const diagnostics = options?.diagnostics;
 	if (diagnostics !== undefined && typeof diagnostics !== 'boolean') {
 		throw new Error('live.upload: diagnostics must be a boolean');
@@ -1887,8 +1895,11 @@ live.upload = function upload(fn, options) {
 	/** @type {any} */ (fn).__uploadOptions = {
 		maxSize: options?.maxSize ?? 104857600,
 		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
-		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
+		maxConcurrentPerTenant: options?.maxConcurrentPerTenant ?? 100,
+		maxConcurrentTotal: options?.maxConcurrentTotal ?? 1000,
 		maxBufferedChunks: maxBufferedChunks ?? 64,
+		maxBufferedBytesPerTenant: options?.maxBufferedBytesPerTenant ?? 268435456,
+		maxBufferedBytesTotal: options?.maxBufferedBytesTotal ?? 1073741824,
 		reauthEvery: reauthEvery ?? 0,
 		diagnostics: diagnostics === true
 	};

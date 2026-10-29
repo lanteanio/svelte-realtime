@@ -2666,7 +2666,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 - `svelte_realtime_rpc_total` - RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
+- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`; `svelte_realtime_upload_limits_total{limit}` names the upload limit that refused a start or chunk: `session`, `process`, `tenant`, `process_bytes` or `tenant_bytes` (no tenant ids)
 - `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status
@@ -3549,7 +3549,7 @@ export const avatar = live.upload(async (ctx, name, mime) => {
 }, {
   maxSize: 50 * 1024 * 1024,         // hard cap per upload (default 100MB)
   maxConcurrentPerSession: 2,         // protect a node from one chatty client (default 4)
-  maxConcurrentTotal: 1000,           // global cap (default unbounded; opt in)
+  maxConcurrentPerTenant: 20,         // per ctx.tenantId across sessions (default 100)
   maxBufferedChunks: 64,              // receiver window - the client pauses while this many chunks wait (default 64)
   reauthEvery: 5 * 1024 * 1024,       // re-run module guards every 5 MB received (default unset)
   diagnostics: true                   // debug upload.stream.started / .ended events (default false)
@@ -3563,7 +3563,7 @@ The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the 
 - `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. Send point-to-point events from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
-Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes. For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.abortSignal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
+Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes. For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.abortSignal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced. Limits beyond the session span sessions and upload endpoints: the process admits at most `maxConcurrentTotal` uploads (default 1,000) and holds at most `maxBufferedBytesTotal` unread bytes (default 1 GiB), and each tenant (`ctx.tenantId`) at most `maxConcurrentPerTenant` uploads (default 100) and `maxBufferedBytesPerTenant` unread bytes (default 256 MiB). Without a tenant resolver only the process limits apply; with one, uploads it leaves unscoped share one tenant's quota. An upload holds its slot until it has ended and its handler has returned, so a handler that ignores `ctx.abortSignal` keeps occupying it. A start over a concurrency limit gets `TOO_MANY_UPLOADS`; a chunk that would pass a byte limit fails its upload with `OVERLOADED`, as does a start while its tenant or the process is at one. Chunks a handler is already waiting for are never buffered. Each endpoint's own options decide whether it admits a new upload; pass `Infinity` to lift a limit.
 
 ### Client
 

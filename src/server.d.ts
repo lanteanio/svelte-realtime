@@ -1555,17 +1555,51 @@ export interface UploadOptions extends LiveOptions {
 
 	/**
 	 * Maximum concurrent uploads per WebSocket connection. Excess upload
-	 * starts reject with `LiveError('OVERLOADED')`.
+	 * starts reject with `LiveError('TOO_MANY_UPLOADS')`.
 	 * @default 4
 	 */
 	maxConcurrentPerSession?: number;
 
 	/**
-	 * Global cap on concurrent uploads across the worker. Default unset
-	 * (unbounded); set a value to enable capacity protection at the
-	 * worker scope.
+	 * Maximum uploads one tenant (`ctx.tenantId`) may have admitted at once,
+	 * across every session and upload endpoint in the process. Excess starts
+	 * reject with `LiveError('TOO_MANY_UPLOADS')`. Applies only with a tenant
+	 * resolver; uploads it leaves unscoped share one quota. An upload occupies
+	 * its slot until it has ended and its handler has returned. A positive
+	 * integer, or `Infinity` to lift the limit.
+	 * @default 100
+	 */
+	maxConcurrentPerTenant?: number;
+
+	/**
+	 * Maximum uploads admitted at once across the process, every session and
+	 * upload endpoint counted. Excess starts reject with
+	 * `LiveError('TOO_MANY_UPLOADS')`. An upload occupies its slot until it has
+	 * ended and its handler has returned, so a handler that ignores
+	 * `ctx.abortSignal` keeps it. A positive integer, or `Infinity` to lift
+	 * the limit.
+	 * @default 1000
 	 */
 	maxConcurrentTotal?: number;
+
+	/**
+	 * Maximum bytes queued in `ctx.stream` and not yet read, summed over one
+	 * tenant's uploads across sessions and endpoints. A chunk that would pass
+	 * it fails its upload with `LiveError('OVERLOADED')`, and new starts for
+	 * the tenant reject with it while the tenant is at the limit. Chunks a
+	 * handler is already waiting for are never queued. Applies only with a
+	 * tenant resolver. A positive integer, or `Infinity` to lift the limit.
+	 * @default 268435456 (256 MiB)
+	 */
+	maxBufferedBytesPerTenant?: number;
+
+	/**
+	 * Maximum bytes queued in `ctx.stream` and not yet read across the
+	 * process. Enforced like `maxBufferedBytesPerTenant`. A positive integer,
+	 * or `Infinity` to lift the limit.
+	 * @default 1073741824 (1 GiB)
+	 */
+	maxBufferedBytesTotal?: number;
 
 	/**
 	 * Receiver window, a positive integer. At most this many chunks queue

@@ -172,8 +172,8 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Settle or clear the queue before switching identity or storage. Treat these rejections as expected during an account or storage switch.'
 	}),
 	OVERLOADED: Object.freeze({
-		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, or the pending-upload aggregate byte cap is exceeded while uploads wait for authorization.',
-		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected.',
+		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, or unread upload bytes would pass the endpoint\'s `maxBufferedBytesPerTenant` (default 256 MiB) or `maxBufferedBytesTotal` (default 1 GiB) limit.',
+		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending or running one fails, before its handler completes. Existing subscribers are unaffected.',
 		automaticRecovery: 'None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers.',
 		nextAction: 'Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules.'
 	}),
@@ -232,7 +232,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key.'
 	}),
 	TOO_MANY_UPLOADS: Object.freeze({
-		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession` or `maxConcurrentTotal` limit.',
+		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession`, `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads hold their slot until their handler returns.',
 		consequence: 'The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.',
 		automaticRecovery: 'None. The refused upload is not queued or retried.',
 		nextAction: 'Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.'

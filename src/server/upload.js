@@ -9,6 +9,7 @@ import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _recordRpcMetrics, _recordRejectedRpc, _registeredPathLabel } from './metrics.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
+import { _isTenancyEnabled } from './tenant.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 const textDecoder = new TextDecoder();
@@ -101,8 +102,44 @@ const _pendingUploadStarts = new WeakMap();
  */
 const _wsUploads = new WeakMap();
 
-/** Global counter for `maxConcurrentTotal` enforcement. */
+/**
+ * Uploads admitted past authorization in this process, for
+ * `maxConcurrentTotal`. Uploads still awaiting authorization are bounded per
+ * session instead, so a burst of starts cannot refuse every one of them. A slot
+ * is released once the upload has settled AND its chain (middleware, handler)
+ * has returned, so a handler that ignores its abort signal keeps occupying the
+ * slot it was admitted with.
+ */
 let _totalActiveUploads = 0;
+
+/** Bytes queued in `ctx.stream` across every running upload, unread by handlers. */
+let _bufferedUploadBytes = 0;
+
+/**
+ * Per-tenant occupancy across sessions and endpoints: admitted uploads and
+ * their unread buffered bytes. Keyed by `ctx.tenantId`; with a tenant
+ * resolver, uploads it leaves unscoped share the `null` entry. Entries are
+ * dropped when both counts reach zero.
+ * @type {Map<string | null, { uploads: number, bytes: number }>}
+ */
+const _tenantUploads = new Map();
+
+function _recordUploadLimit(limit) {
+	state.metricsInstruments?.uploadLimits?.inc({ limit });
+}
+
+function _releaseUploadSlot(upload) {
+	if (!upload._slot) return;
+	upload._slot = false;
+	upload.streamWrap?.release();
+	_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
+	const bucket = upload._bucket;
+	if (bucket) {
+		upload._bucket = null;
+		bucket.entry.uploads--;
+		if (bucket.entry.uploads === 0 && bucket.entry.bytes === 0 && _tenantUploads.get(bucket.key) === bucket.entry) _tenantUploads.delete(bucket.key);
+	}
+}
 
 /**
  * Cached `platform.maxPayloadLength` from whichever adapter is in use.
@@ -335,10 +372,17 @@ function _parseUploadControlFrame(data) {
  * causes a pending `next()` to reject and clears the queue.
  *
  * @param {AbortController} ctrl
+ * @param {() => void} onConsume
+ * @param {(delta: number) => void} onBuffered - queued byte count changes
  */
-function _createUploadStream(ctrl, onConsume) {
+function _createUploadStream(ctrl, onConsume, onBuffered) {
 	/** @type {Uint8Array[]} */
 	const queue = [];
+	let queuedBytes = 0;
+	function clear() {
+		queue.length = 0;
+		if (queuedBytes !== 0) { const freed = queuedBytes; queuedBytes = 0; onBuffered(-freed); }
+	}
 	/** @type {{ resolve: Function, reject: Function } | null} */
 	let pending = null;
 	let done = false;
@@ -360,6 +404,8 @@ function _createUploadStream(ctrl, onConsume) {
 		if (done) return;
 		if (pending) { _resolveNext(chunk, false); onConsume(); return; }
 		queue.push(chunk);
+		queuedBytes += chunk.byteLength;
+		onBuffered(chunk.byteLength);
 	}
 
 	function end() {
@@ -372,7 +418,7 @@ function _createUploadStream(ctrl, onConsume) {
 		if (done) return;
 		done = true;
 		error = err;
-		queue.length = 0;
+		clear();
 		_rejectNext(err);
 	}
 
@@ -389,7 +435,9 @@ function _createUploadStream(ctrl, onConsume) {
 	const stream = {
 		next() {
 			if (queue.length > 0) {
-				const value = queue.shift();
+				const value = /** @type {Uint8Array} */ (queue.shift());
+				queuedBytes -= value.byteLength;
+				onBuffered(-value.byteLength);
 				onConsume();
 				return Promise.resolve({ value, done: false });
 			}
@@ -399,7 +447,7 @@ function _createUploadStream(ctrl, onConsume) {
 		},
 		return() {
 			done = true;
-			queue.length = 0;
+			clear();
 			_resolveNext(undefined, true);
 			return Promise.resolve({ value: undefined, done: true });
 		},
@@ -415,6 +463,9 @@ function _createUploadStream(ctrl, onConsume) {
 		push,
 		end,
 		abort,
+		// Drop whatever the handler left unread once the upload is over.
+		release() { done = true; clear(); },
+		get waiting() { return pending !== null; },
 		get queueLength() { return queue.length; }
 	};
 }
@@ -450,7 +501,6 @@ function _cleanupUpload(ws, perWs, streamId, upload) {
 	_releasePendingUploadBytes(upload);
 	perWs.delete(streamId);
 	if (perWs.size === 0) _wsUploads.delete(ws);
-	_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
 }
 
 /**
@@ -475,6 +525,9 @@ function _createUploadEntry(ws, perWs, streamId, platform, path) {
 		creditEnd: 1,
 		lastReceived: false,
 		_pendingStart: true,
+		// Admission: a maxConcurrentTotal slot and the tenant's occupancy.
+		_slot: false,
+		_bucket: null,
 		pendingChunks: [],
 		expectedSeq: 0,
 		bytesReceived: 0,
@@ -592,7 +645,6 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		upload._pendingAggBytes = initialBytes;
 		state.pendingUploadBytes += initialBytes;
 		perWs.set(streamId, upload);
-		_totalActiveUploads++;
 		_pendingUploadStarts.set(ws, pendingStarts + 1);
 
 		_startUpload(ws, perWs, streamId, upload, argsHeader, platform, options);
@@ -657,6 +709,16 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		if (upload.streamWrap.queueLength >= upload.options.maxBufferedChunks) {
 			upload.fail('FLOW_BACKPRESSURE', 'upload buffer overflow - handler not draining fast enough');
 			return;
+		}
+		// A chunk handed straight to a waiting handler is never buffered.
+		if (!upload.streamWrap.waiting) {
+			const limit = _bufferedUploadBytes + payloadLen > upload.options.maxBufferedBytesTotal ? 'process_bytes'
+				: upload._bucket && upload._bucket.entry.bytes + payloadLen > upload.options.maxBufferedBytesPerTenant ? 'tenant_bytes' : null;
+			if (limit !== null) {
+				_recordUploadLimit(limit);
+				upload.fail('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly');
+				return;
+			}
 		}
 		upload.streamWrap.push(new Uint8Array(payload));
 	}
@@ -803,7 +865,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { flow: 1, creditEnd: end });
 			}
 		};
-		upload.streamWrap = _createUploadStream(upload.ctrl, grantCredit);
+		upload.streamWrap = _createUploadStream(upload.ctrl, grantCredit, delta => {
+			_bufferedUploadBytes += delta;
+			if (upload._bucket) upload._bucket.entry.bytes += delta;
+		});
 
 		const _h = _getCtxHelpers(platform);
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, _streamIdHex(streamId));
@@ -824,13 +889,27 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const uploadOptions = /** @type {any} */ (fn).__uploadOptions;
 			let othersInSession = 0;
 			for (const entry of perWs.values()) if (entry !== upload) othersInSession++;
-			if (othersInSession >= uploadOptions.maxConcurrentPerSession) throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session');
-			if (_totalActiveUploads - 1 >= uploadOptions.maxConcurrentTotal) throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads');
+			if (othersInSession >= uploadOptions.maxConcurrentPerSession) { _recordUploadLimit('session'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session'); }
+			if (_totalActiveUploads >= uploadOptions.maxConcurrentTotal) { _recordUploadLimit('process'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads'); }
+			// Without a tenant resolver there is no tenant to divide uploads by;
+			// with one, uploads it leaves unscoped share one tenant's quota.
+			const tenantKey = ctx.tenantId ?? null;
+			const tenant = tenantKey !== null || _isTenancyEnabled() ? (_tenantUploads.get(tenantKey) || { uploads: 0, bytes: 0 }) : null;
+			if (tenant && tenant.uploads >= uploadOptions.maxConcurrentPerTenant) { _recordUploadLimit('tenant'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads for this tenant'); }
+			if (_bufferedUploadBytes >= uploadOptions.maxBufferedBytesTotal) { _recordUploadLimit('process_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
+			if (tenant && tenant.bytes >= uploadOptions.maxBufferedBytesPerTenant) { _recordUploadLimit('tenant_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
 			if (upload.bytesReceived > uploadOptions.maxSize) throw new LiveError(
 				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
 				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
 			);
 
+			upload._slot = true;
+			_totalActiveUploads++;
+			if (tenant) {
+				tenant.uploads++;
+				_tenantUploads.set(tenantKey, tenant);
+				upload._bucket = { key: tenantKey, entry: tenant };
+			}
 			upload.options = uploadOptions;
 			upload.phase = 'running';
 			_releasePendingUploadStart(ws, upload);
@@ -966,6 +1045,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		_releasePendingUploadStart(ws, upload);
 		_exitInFlight();
 		_cleanupUpload(ws, perWs, streamId, upload);
+		_releaseUploadSlot(upload);
 	}
 }
 

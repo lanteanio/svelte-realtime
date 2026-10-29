@@ -171,7 +171,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 | [`OFFLINE_CLEARED`](#live-error-offline-cleared) | <code>Offline mutation was cleared</code>; <code>Offline queue scope changed before this mutation settled</code> |
 | [`OFFLINE_CLEAR_FAILED`](#live-error-offline-clear-failed) | <code>Offline stored data could not be erased</code> |
 | [`OFFLINE_SCOPE_CHANGED`](#live-error-offline-scope-changed) | <code>Offline mutation was cleared</code>; <code>Offline queue scope changed before this mutation settled</code> |
-| [`OVERLOADED`](#live-error-overloaded) | <code>Stream class '&lt;classOfService&gt;' shed under pressure</code>; <code>pending-upload aggregate buffer cap exceeded</code>; <code>pending-upload aggregate buffer cap exceeded; retry shortly</code> |
+| [`OVERLOADED`](#live-error-overloaded) | <code>Stream class '&lt;classOfService&gt;' shed under pressure</code>; <code>pending-upload aggregate buffer cap exceeded</code>; <code>pending-upload aggregate buffer cap exceeded; retry shortly</code>; <code>unread upload bytes exceed the buffer quota; retry shortly</code> |
 | [`PAYLOAD_TOO_LARGE`](#live-error-payload-too-large) | <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>Upload arguments do not fit the server frame size</code>; <code>Upload arguments exceed 65535 bytes</code>; <code>upload exceeds limit during start</code>; <code>upload exceeds maxSize</code> |
 | [`PROTOCOL_MISMATCH`](#live-error-protocol-mismatch) | computed |
 | [`QUEUE_FULL`](#live-error-queue-full) | <code>Offline queue overflow - oldest mutation dropped</code> |
@@ -181,7 +181,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 | [`STALE`](#live-error-stale) | <code>Offline mutation dropped by beforeReplay filter</code>; <code>Offline mutation dropped by the replay function</code>; <code>Offline mutation dropped: beforeReplay returned a promise</code>; <code>Offline mutation dropped: beforeReplay threw</code>; <code>Offline mutation dropped: its stored args cannot be sent</code>; <code>Offline mutation dropped: the replay function gave it args that cannot be sent</code>; <code>Offline mutation expired</code> |
 | [`STREAM_ERROR`](#live-error-stream-error) | <code>Stream '&lt;path&gt;' failed to attach</code>; <code>Stream failed</code> |
 | [`TIMEOUT`](#live-error-timeout) | <code>Batch timed out after &lt;value&gt;s</code>; <code>Binary RPC '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>RPC '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>RPC '&lt;rpc&gt;' timed out after &lt;value&gt;s</code>; <code>Stream '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>Upload '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>loadMore '&lt;path&gt;' timed out after &lt;value&gt;s</code> |
-| [`TOO_MANY_UPLOADS`](#live-error-too-many-uploads) | <code>too many concurrent uploads</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code> |
+| [`TOO_MANY_UPLOADS`](#live-error-too-many-uploads) | <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code> |
 | [`UNAUTHENTICATED`](#live-error-unauthenticated) | <code>Access denied</code>; <code>Authentication required</code>; <code>document topic subscribe denied: &lt;denial&gt;</code>; <code>reauth failed</code>; <code>smooth topic subscribe denied: &lt;denial&gt;</code> |
 | [`UNAVAILABLE`](#live-error-unavailable) | <code>Server is shutting down</code> |
 | [`UNKNOWN`](#live-error-unknown) | <code>Unknown error</code>; <code>Upload failed</code> |
@@ -461,11 +461,11 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-overloaded"></a>
 ### `OVERLOADED`
 
-- Cause: A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, or the pending-upload aggregate byte cap is exceeded while uploads wait for authorization.
-- Consequence: The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected.
+- Cause: A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, or unread upload bytes would pass the endpoint's `maxBufferedBytesPerTenant` (default 256 MiB) or `maxBufferedBytesTotal` (default 1 GiB) limit.
+- Consequence: The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending or running one fails, before its handler completes. Existing subscribers are unaffected.
 - Automatic recovery: None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers.
 - Next action: Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules.
-- Message patterns: <code>Stream class '&lt;classOfService&gt;' shed under pressure</code>; <code>pending-upload aggregate buffer cap exceeded</code>; <code>pending-upload aggregate buffer cap exceeded; retry shortly</code>
+- Message patterns: <code>Stream class '&lt;classOfService&gt;' shed under pressure</code>; <code>pending-upload aggregate buffer cap exceeded</code>; <code>pending-upload aggregate buffer cap exceeded; retry shortly</code>; <code>unread upload bytes exceed the buffer quota; retry shortly</code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-payload-too-large"></a>
@@ -562,11 +562,11 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-too-many-uploads"></a>
 ### `TOO_MANY_UPLOADS`
 
-- Cause: A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint's `maxConcurrentPerSession` or `maxConcurrentTotal` limit.
+- Cause: A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint's `maxConcurrentPerSession`, `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads hold their slot until their handler returns.
 - Consequence: The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.
 - Automatic recovery: None. The refused upload is not queued or retried.
 - Next action: Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.
-- Message patterns: <code>too many concurrent uploads</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code>
+- Message patterns: <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code>
 - Owning sources: [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-unauthenticated"></a>
