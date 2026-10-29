@@ -175,3 +175,39 @@ test('late join: B subscribes after A publishes; initial fetch reflects derived'
 		await a.ctx.close();
 	}
 });
+
+// 7 - hydrated: a recompute published between B's SSR render and B's
+// subscribe never reaches B's socket, so the subscribe snapshot carries it
+
+test('hydrated: a change between SSR and subscribe reaches the client', async ({ browser }) => {
+	const aCtx = await browser.newContext();
+	const bCtx = await browser.newContext();
+	try {
+		const a = await aCtx.newPage();
+		await a.goto('/derived/hydrated');
+		await a.waitForFunction(() => window.__test);
+		await a.evaluate(() => window.__test.subscribed());
+		const before = (await a.evaluate(() => window.__test.read())).value;
+
+		const b = await bCtx.newPage();
+		// Render B's document first, then move the value on and wait until A
+		// has seen the recompute. Only then does B get its HTML, so B hydrates
+		// the old value and its socket subscribes after the publish went out.
+		await b.route('**/derived/hydrated', async (route) => {
+			const response = await route.fetch();
+			await a.evaluate(() => window.__test.bump());
+			await a.evaluate((n) => window.__test.wait('v && v.value === ' + n), before + 1);
+			await route.fulfill({ response });
+		});
+		await b.goto('/derived/hydrated');
+		await b.waitForFunction(() => window.__test);
+
+		expect(await b.evaluate(() => window.__test.ssrValue())).toBe(before);
+		await b.evaluate(() => window.__test.subscribed());
+		await b.evaluate((n) => window.__test.wait('v && v.value === ' + n, 2000), before + 1);
+		expect((await b.evaluate(() => window.__test.read())).value).toBe(before + 1);
+	} finally {
+		await aCtx.close();
+		await bCtx.close();
+	}
+});

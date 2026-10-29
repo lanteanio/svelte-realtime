@@ -3128,10 +3128,15 @@ describe('__stream() hydrate reconnect', () => {
 
 // - __stream() hydrate derived -----------------------------------------------
 
+// A derived subscribe response is a compute the server runs after it has
+// subscribed the socket to the output topic. A recompute published before
+// that subscribe reaches the client only through this response, so the
+// client applies it even when the store already holds a value.
+
 describe('__stream() hydrate derived', () => {
-	it('keeps hydrated data when server returns stale derived result', async () => {
+	it('takes a subscribe snapshot that differs from the hydrated value', async () => {
 		const store = __stream('hydrate/derived-stats', { merge: 'set' });
-		store.hydrate({ members: 42, audits: 566, emails: 57 });
+		store.hydrate({ state: 1 });
 
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -3141,18 +3146,64 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: { members: 0, audits: 0, emails: 0 },
+			data: { state: 2 },
 			topic: 'derived-stats',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ members: 42, audits: 566, emails: 57 });
+		expect(values[values.length - 1]).toEqual({ state: 2 });
 
 		unsub();
 	});
 
-	it('accepts live updates after initial hydration protection', async () => {
+	it('takes a zeroed snapshot instead of guessing it is stale', async () => {
+		const store = __stream('hydrate/derived-zero', { merge: 'set' });
+		store.hydrate({ members: 42, audits: 566 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { members: 0, audits: 0 },
+			topic: 'derived-zero',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ members: 0, audits: 0 });
+
+		unsub();
+	});
+
+	it('takes a null snapshot, since null is a value a derived compute can return', async () => {
+		const store = __stream('hydrate/derived-null', { merge: 'set' });
+		store.hydrate({ incident: 'db-latency' });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: null,
+			topic: 'derived-null',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toBeNull();
+
+		unsub();
+	});
+
+	it('applies live updates on top of the subscribe snapshot', async () => {
 		const store = __stream('hydrate/derived-live', { merge: 'set' });
 		store.hydrate({ count: 100 });
 
@@ -3164,13 +3215,13 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: { count: 0 },
+			data: { count: 101 },
 			topic: 'derived-live',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ count: 100 });
+		expect(values[values.length - 1]).toEqual({ count: 101 });
 
 		simulateTopicMessage('derived-live', { event: 'set', data: { count: 120 } });
 
@@ -3179,7 +3230,7 @@ describe('__stream() hydrate derived', () => {
 		unsub();
 	});
 
-	it('keeps hydrated data on reconnect too since server marks derived responses', async () => {
+	it('takes the resync snapshot after a reconnect', async () => {
 		const store = __stream('hydrate/derived-reconn', { merge: 'set' });
 		store.hydrate({ total: 50 });
 
@@ -3191,41 +3242,69 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent1.id, {
 			ok: true,
-			data: { total: 0 },
+			data: { total: 50 },
 			topic: 'derived-reconn',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ total: 50 });
-
-		// Live update brings real data
 		simulateTopicMessage('derived-reconn', { event: 'set', data: { total: 75 } });
-
 		expect(values[values.length - 1]).toEqual({ total: 75 });
 
-		// Reconnect
 		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
 		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.id).not.toBe(sent1.id);
 
-		// Reconnect response also has derived: true, keeps current value (75)
+		// The sources changed while the socket was down; the recompute was
+		// published to nobody, and derived streams have no replay.
 		simulateRpcResponse(sent2.id, {
 			ok: true,
-			data: { total: 0 },
+			data: { total: 90 },
 			topic: 'derived-reconn',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ total: 75 });
+		expect(values[values.length - 1]).toEqual({ total: 90 });
 
 		unsub();
 	});
 
-	it('crud-merge derived keeps hydrated array', async () => {
+	it('takes the snapshot when a subscriber resumes inside the grace window', async () => {
+		const store = __stream('resume/derived', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: { total: 1 }, topic: 'resume-derived', merge: 'set', derived: true
+		});
+		expect(values[values.length - 1]).toEqual({ total: 1 });
+
+		unsub();
+		await flush();
+
+		sendQueuedFn.mockClear();
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		// Resumed, not cold-started: the retained value is emitted first.
+		expect(values2[0]).toEqual({ total: 1 });
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(second.id, {
+			ok: true, data: { total: 2 }, topic: 'resume-derived', merge: 'set', derived: true
+		});
+
+		expect(values2[values2.length - 1]).toEqual({ total: 2 });
+
+		unsub2();
+	});
+
+	it('crud-merge derived replaces the hydrated array with the snapshot', async () => {
 		const store = __stream('hydrate/derived-crud', { merge: 'crud', key: 'id' });
 		store.hydrate([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
 
@@ -3237,14 +3316,19 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: [],
+			data: [{ id: 2, name: 'Bob' }],
 			topic: 'derived-crud',
 			merge: 'crud',
 			key: 'id',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
+		expect(values[values.length - 1]).toEqual([{ id: 2, name: 'Bob' }]);
+
+		// The key index follows the snapshot: Bob moved from position 1 to 0,
+		// so an update edits him in place instead of writing past the end.
+		simulateTopicMessage('derived-crud', { event: 'updated', data: { id: 2, name: 'Robert' } });
+		expect(values[values.length - 1]).toEqual([{ id: 2, name: 'Robert' }]);
 
 		unsub();
 	});
@@ -3266,7 +3350,7 @@ describe('__stream() hydrate derived', () => {
 			derived: true
 		});
 
-		// No hydration, so currentValue is undefined - derived protection does not apply
+		// No hydration: the first response sets the value
 		expect(values[values.length - 1]).toEqual({ count: 42 });
 
 		unsub();
