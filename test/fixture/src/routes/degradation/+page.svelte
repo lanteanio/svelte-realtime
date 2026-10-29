@@ -48,7 +48,11 @@
 				const transition = !unavailable;
 				notice = mitigation;
 				unavailable = true;
-				retryDeadline = Number.isFinite(mitigation.retryAfterMs) ? Date.now() + mitigation.retryAfterMs : null;
+				// The deadline comes from the event that started the outage; a repeated
+				// notice while already degraded must not restart the countdown.
+				if ((transition || retryDeadline === null) && Number.isFinite(mitigation.retryAfterMs)) {
+					retryDeadline = Date.now() + mitigation.retryAfterMs;
+				}
 				if (transition) announcementText = translate(notice, locale);
 			},
 			recovered(recovery = { messageKey: 'realtime.restored', bannerCopy: 'Updates restored.' }) {

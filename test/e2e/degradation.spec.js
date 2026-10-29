@@ -35,6 +35,9 @@ test('gates actions, keeps a stable retry deadline, and recovers without moving 
 	const deadline = await page.locator('#retry-deadline time').getAttribute('datetime');
 	await page.waitForTimeout(100);
 	await expect(page.locator('#retry-deadline time')).toHaveAttribute('datetime', deadline);
+	// A repeated notice during the same outage keeps the original deadline.
+	await page.evaluate(() => window.degradationHarness.degraded({ bannerCopy: 'Service unavailable.', retryAfterMs: 60000 }));
+	await expect(page.locator('#retry-deadline time')).toHaveAttribute('datetime', deadline);
 	await expect(page.getByRole('status')).not.toContainText('Retry at');
 	await page.evaluate(() => window.degradationHarness.recovered());
 	await expect(action).toBeEnabled();
