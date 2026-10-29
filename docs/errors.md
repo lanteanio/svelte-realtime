@@ -270,8 +270,8 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-idempotency-capacity"></a>
 ### `IDEMPOTENCY_CAPACITY`
 
-- Cause: A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall. With a tenant resolver configured, each tenant and the unscoped bucket are also capped at 1,000 and the last 1,000 slots are kept for small tenants; without one, unscoped callers may use the whole store.
-- Consequence: The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned.
+- Cause: A `live.idempotent` call brings a new key while its caller is over a share of the default in-process store (10,000 entries; 1,000 per tenant; a tenth of that share per identity or anonymous connection) and holds no cached result it could replace: its share is all running handlers, or the slots are all held by other callers.
+- Consequence: The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned. A caller over its share that does hold cached results replaces its own oldest one instead.
 - Automatic recovery: Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.
 - Next action: Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.
 - Message patterns: <code>The idempotency store is full; the handler has not run. Retry after capacity becomes available.</code>
@@ -1713,7 +1713,7 @@ These emitters compute their code, event or message, so the parser cannot resolv
 | [src/server/dispatch.js](../src/server/dispatch.js) | `_directCallChain()` | new LiveError | 1 | a server-side direct call rethrows the code and message of a middleware failure envelope, falling back to INTERNAL_ERROR |
 | [src/server/dispatch.js](../src/server/dispatch.js) | `_executeBinaryRpcInner()` | error reply | 1 | answers a binary RPC with the code and message of the LiveError the handler threw |
 | [src/server/dispatch.js](../src/server/dispatch.js) | `_executeSingleRpcInner()` | error reply | 1 | answers an RPC with the code and message of the LiveError the handler threw |
-| [src/server/dispatch.js](../src/server/dispatch.js) | `_executeStreamRpc()` | error reply | 3 | answers a stream subscribe with an access denial (FORBIDDEN or UNAUTHENTICATED), a validation or loader message, or the code of the LiveError the stream threw |
+| [src/server/dispatch.js](../src/server/dispatch.js) | `_executeStreamRpcInner()` | error reply | 3 | answers a stream subscribe with an access denial (FORBIDDEN or UNAUTHENTICATED), a validation or loader message, or the code of the LiveError the stream threw |
 | [src/server/dispatch.js](../src/server/dispatch.js) | `_protocolRejection()` | error reply | 1 | PROTOCOL_MISMATCH carries a message built from the mismatch reason by the protocol version policy |
 | [src/server/dispatch.js](../src/server/dispatch.js) | `_runDirectCall()` | new LiveError | 1 | a server-side direct call rethrows a middleware failure envelope or a validation message under the code it carried |
 | [src/server/idempotency.js](../src/server/idempotency.js) | `lockedWrapper()` | new LiveError | 1 | LOCK_TIMEOUT keeps the message of the timeout a custom lock implementation threw |

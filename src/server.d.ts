@@ -2059,13 +2059,16 @@ export namespace live {
 	 * the first call's result (a genuine idempotent retry must carry the same
 	 * body); the framework fingerprints the request args to detect the mismatch.
 	 *
-	 * The default in-process store reserves up to 10,000 running keys and cached
+	 * The default in-process store holds up to 10,000 running keys and cached
 	 * results, with at most 1,000 per tenant. Without a tenant resolver, calls may
 	 * use all of them; with one, calls it leaves unscoped share one 1,000-slot
-	 * bucket. The final 1,000 global slots admit only tenants holding fewer than
-	 * 100 entries. These are
-	 * process-local bounds, not per-user quotas. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
-	 * before the handler runs; cached retries remain available until their TTL.
+	 * bucket. Inside that share each identity (each connection, for anonymous
+	 * callers) may hold a tenth of it: 100 per identity in a tenant, 1,000 without
+	 * tenants. The last tenth of each level admits only holders below a hundredth
+	 * of it. A caller over any limit replaces its own oldest cached result, so a
+	 * retry of that key runs again; no caller's traffic evicts another caller's
+	 * result. A caller with no cached result to give up (only running keys, or
+	 * none) gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler runs.
 	 * Pending durable slots are polled for up to five seconds, then return
 	 * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
 	 * Waiting never cancels the original owner.

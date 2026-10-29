@@ -58,8 +58,8 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again. A repeat call only reprocesses the rooms that failed.'
 	}),
 	IDEMPOTENCY_CAPACITY: Object.freeze({
-		cause: 'A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall. With a tenant resolver configured, each tenant and the unscoped bucket are also capped at 1,000 and the last 1,000 slots are kept for small tenants; without one, unscoped callers may use the whole store.',
-		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned.',
+		cause: 'A `live.idempotent` call brings a new key while its caller is over a share of the default in-process store (10,000 entries; 1,000 per tenant; a tenth of that share per identity or anonymous connection) and holds no cached result it could replace: its share is all running handlers, or the slots are all held by other callers.',
+		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned. A caller over its share that does hold cached results replaces its own oldest one instead.',
 		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.',
 		nextAction: 'Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.'
 	}),
