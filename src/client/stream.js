@@ -2072,8 +2072,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
-				// Attach topic listener BEFORE flipping initialLoaded, so events
-				// arriving between ws.subscribe(topic) (server-side) and now are buffered.
+				// Usually a no-op: the attach frame installed the listener before
+				// the loader ran, and `buffer` holds what arrived since. Only a
+				// response without an attach frame installs it here, and the
+				// adapter client dropped any frame for this topic that came
+				// before it. Either way it goes in before initialLoaded flips.
 				_subscribeLive();
 
 				initialLoaded = true;
