@@ -1456,6 +1456,103 @@ describe('__stream() mutate queue-replay correctness', () => {
 		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
 		ctx.unsub();
 	});
+
+	// - subscribe answers that land while a mutate is in flight ----------
+	//
+	// In queue mode the server state lives apart from the display, and the
+	// drain promotes it. A snapshot that arrives meanwhile has to become that
+	// server state, or the drain puts the pre-snapshot baseline back.
+
+	it('mutate before the first load keeps the loaded rows after it settles', async () => {
+		const store = __stream('qr/early-click', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+		expect(values[values.length - 1]).toEqual([{ id: 'n', name: 'N' }]);
+
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }], topic: 't-early', merge: 'crud', key: 'id'
+		});
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		simulateTopicMessage('t-early', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		// The key index follows the loaded rows, so an update edits in place.
+		simulateTopicMessage('t-early', { event: 'updated', data: { id: 2, name: 'Bea' } });
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'Bea' }, { id: 'n', name: 'N' }]);
+		unsub();
+	});
+
+	it('mutate before the first load keeps the loaded rows when no confirming event arrives', async () => {
+		const store = __stream('qr/early-click-quiet', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, { event: 'created', data: { id: 'n' } });
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 't-early-quiet', merge: 'crud', key: 'id' });
+
+		d.resolve();
+		await m;
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 'n' }]);
+		unsub();
+	});
+
+	it('a reconnect snapshot that lands during a pending mutate survives the drain', async () => {
+		const ctx = await setupCrudStream('qr/reconnect-pending', 't-rp', [{ id: 1, name: 'A' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const resub = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(resub.rpc).toBe('qr/reconnect-pending');
+
+		// B was created and A renamed while the socket was down.
+		simulateRpcResponse(resub.id, {
+			ok: true, data: [{ id: 1, name: 'A2' }, { id: 2, name: 'B' }], topic: 't-rp', merge: 'crud', key: 'id'
+		});
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		simulateTopicMessage('t-rp', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+		ctx.unsub();
+	});
+
+	it('a set-merge snapshot that lands during a pending mutate survives the drain', async () => {
+		const store = __stream('qr/set-pending', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const first = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(first.id, { ok: true, data: { n: 1 }, topic: 't-sp', merge: 'set' });
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, (v) => ({ ...v, draft: true }));
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const resub = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(resub.id, { ok: true, data: { n: 5 }, topic: 't-sp', merge: 'set' });
+		expect(values[values.length - 1]).toEqual({ n: 5, draft: true });
+
+		d.reject(new Error('refused'));
+		await expect(m).rejects.toThrow('refused');
+		expect(values[values.length - 1]).toEqual({ n: 5 });
+		unsub();
+	});
 });
 
 // - __stream() mutate queue-replay property tests (fast-check) ---------------
