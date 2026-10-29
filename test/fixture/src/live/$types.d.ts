@@ -55,6 +55,7 @@ declare module '$live/derived' {
   import type { StreamStore } from 'svelte-realtime/client';
   import type { Readable } from 'svelte/store';
 
+  export const bumpHydrated: (...args: any[]) => Promise<any>;
   export const incOrders: (...args: any[]) => Promise<any>;
   export const incUsers: (...args: any[]) => Promise<any>;
   export const incOrdersBurst: (...args: any[]) => Promise<any>;
@@ -64,6 +65,7 @@ declare module '$live/derived' {
   export const dashboardStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
   export const debouncedStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
   export const orgStats: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const hydratedStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 

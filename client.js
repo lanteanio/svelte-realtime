@@ -2553,10 +2553,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					for (const evt of response.data) {
 						_applyMerge(evt);
 					}
-				} else if ((response.channel || response.derived) && currentValue !== undefined) {
-					// Keep the existing value so the store never flashes to empty.
-					// Channels return an empty placeholder; derived streams may
-					// return stale data before their sources populate.
+				} else if (response.channel && currentValue !== undefined) {
+					// Channels have no loader and answer with an empty placeholder,
+					// so keep the existing value instead of flashing to empty.
+					// Derived streams are deliberately not covered: their response
+					// is a fresh compute that runs after the topic subscribe, and a
+					// recompute published before that subscribe (between SSR and
+					// hydration, or during a disconnect) reaches this client only
+					// through this response.
 				} else {
 					currentValue = response.data;
 				}

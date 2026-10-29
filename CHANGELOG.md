@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `live.derived()` stream takes the value the server sends when it subscribes, even when the store already holds one. Since 0.4.18 the client kept a hydrated or previously received value and discarded that response. The server computes the response after subscribing the socket, so a change that was published before that subscribe, between the SSR load and the client's subscribe or while the connection was down, reaches the page only through it. The store kept the old value until the sources changed again. This applied to hydrated pages, after every WebSocket reconnect, when a background tab becomes visible again, and to a component that subscribes again within the resume grace window. If `.load()` computes a different value than the WebSocket subscribe, for example because it runs with a different user, the page now shows the WebSocket value right after hydration. Channel streams still keep their existing value, since their subscribe response is an empty placeholder.
+
 ## [0.5.15] - 2026-10-23
 
 ### Fixed

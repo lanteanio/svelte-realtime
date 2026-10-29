@@ -50,6 +50,24 @@ export const orgStats = live.derived(
 	}
 );
 
+// Backs the hydrated page: it SSR-loads this stream and hydrates it, and the
+// test moves the value on between the SSR render and the client's subscribe.
+// Its own source topic keeps it out of the dashboard counters.
+const HYDRATED_TOPIC = 'hydrated-topic';
+let _hydratedValue = 0;
+
+export const hydratedStats = live.derived(
+	[HYDRATED_TOPIC],
+	async () => ({ id: 'hydrated', value: _hydratedValue })
+);
+
+export const bumpHydrated = live(async (ctx) => {
+	_ensureActivated(ctx);
+	_hydratedValue++;
+	ctx.publish(HYDRATED_TOPIC, 'inc', _hydratedValue);
+	return { value: _hydratedValue };
+});
+
 export const incOrders = live(async (ctx) => {
 	_ensureActivated(ctx);
 	counts.orders++;
