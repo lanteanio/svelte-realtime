@@ -1,7 +1,8 @@
 // @ts-check
 import { deliverWebhook, redactUrl } from 'svelte-adapter-uws/plugins/webhooks';
-import { now, monotonicNow } from '../shared/runtime.js';
+import { now, monotonicNow, setTimer } from '../shared/runtime.js';
 import { state } from './state.js';
+import { _deadLetterFingerprint } from './dead-letter.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 // The generic SSRF-gated, retrying delivery engine now lives in the adapter
@@ -51,6 +52,10 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 	});
 }
 
+// Waits before each repeated dead-letter write. A keyed write is idempotent, so
+// repeating one whose outcome is unknown cannot duplicate the record.
+const _DEAD_LETTER_RETRY_MS = [100, 500];
+
 function _reportDeadLetterFailure(entry, err) {
 	// The delivery already failed, so this record was the only replay copy: count
 	// it so an empty dead-letter store is never read as nothing to recover.
@@ -76,22 +81,35 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	const store = state.webhookDeadLetter;
-	if (store) {
+	if (!store) return;
+	/** @type {Record<string, unknown>} */
+	const rec = {
+		webhookId: entry.id,
+		topic,
+		event,
+		data,
+		attempts: r.attempts | 0,
+		error: String((r.err && r.err.message) || r.err || 'unknown'),
+		failedAt: now(),
+		startedAt,
+		traceContext
+	};
+	// The key names this delivery, so a write whose reply was lost can be sent
+	// again without creating a second record. Content JSON cannot encode gets no
+	// key and a single attempt, which is all an unkeyed write can safely have.
+	let keyed = true;
+	try { rec.key = _deadLetterFingerprint(/** @type {any} */ (rec)); } catch { keyed = false; }
+	for (let attempt = 0; ; attempt++) {
 		try {
-			const added = store.add({
-				webhookId: entry.id,
-				topic,
-				event,
-				data,
-				attempts: r.attempts | 0,
-				error: String((r.err && r.err.message) || r.err || 'unknown'),
-				failedAt: now(),
-				startedAt,
-				traceContext
-			});
-			if (added && typeof added.then === 'function') added.catch((err) => _reportDeadLetterFailure(entry, err));
+			await store.add(rec);
+			return;
 		} catch (err) {
-			_reportDeadLetterFailure(entry, err);
+			const conflict = /** @type {any} */ (err)?.code === 'DEAD_LETTER_KEY_CONFLICT';
+			if (!keyed || conflict || attempt >= _DEAD_LETTER_RETRY_MS.length) {
+				_reportDeadLetterFailure(entry, err);
+				return;
+			}
+			await new Promise((resolve) => setTimer(resolve, _DEAD_LETTER_RETRY_MS[attempt]));
 		}
 	}
 }

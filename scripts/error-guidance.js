@@ -27,6 +27,12 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. Nothing reconnects after the connection closes for good, and `configure({ url, auth })` is ignored from then on.',
 		nextAction: 'Show the user that the connection is offline. Find out why it closed (auth, close code, retry budget), fix that, then call the adapter `connect()` explicitly to open a new connection.'
 	}),
+	DEAD_LETTER_KEY_CONFLICT: Object.freeze({
+		cause: 'A dead-letter store `add` brings a `key` that a retained record already holds, but the held record has a different webhook id, topic, event or data than the new capture.',
+		consequence: '`add` throws and nothing is written; the retained record is unchanged. The webhook capture does not repeat the write and reports `webhook.dead-letter.persist-failed`.',
+		automaticRecovery: 'None. A conflicting key is never retried.',
+		nextAction: 'Derive keys from the content they stand for. The built-in capture uses the content fingerprint, so a conflict there means a custom store or caller reused a key for different content.'
+	}),
 	DISCONNECTED: Object.freeze({
 		cause: 'The socket dropped or was replaced while a request was in flight, or a request outlived its timeout by a margin that points to device sleep. On the server, the client socket closed during an upload.',
 		consequence: 'Sent RPCs and uploads reject with RpcError DISCONNECTED. A stream shows the error. On the server, the upload handler\'s iterator and signal abort with a DISCONNECTED LiveError, and no reply is sent.',
@@ -452,9 +458,9 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the middleware at the logged path so it calls `next()` once, before deciding the answer, and does not defer it.'
 	}),
 	'webhook.dead-letter.persist-failed': Object.freeze({
-		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects when the failed record is added.',
+		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record, or reports a key conflict.',
 		consequence: 'The record was the only replay copy, so this webhook event is lost for good. The `svelte_realtime_webhook_dead_letter_failures_total` counter goes up.',
-		automaticRecovery: 'None. The record is not retried into the store.',
+		automaticRecovery: 'A keyed write is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. Content JSON cannot encode is written once, and a key conflict is not repeated.',
 		nextAction: 'Check the dead-letter store backend (connection, capacity, permissions). Alert on the failure counter. Rebuild lost events from your own source data if they matter.'
 	}),
 	'webhook.delivery.failed': Object.freeze({

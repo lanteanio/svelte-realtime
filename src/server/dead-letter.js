@@ -8,8 +8,10 @@
 // `configureWebhooks({ deadLetter })`. A cluster deployment passes a durable
 // store instance (Redis / Postgres) with the same interface.
 
+import { createHash } from 'node:crypto';
 import { now, monotonicNow } from '../shared/runtime.js';
 import { _TENANT_TOPIC_NS, _topicInTenant } from './tenant.js';
+import { LiveError } from './live-error.js';
 
 // A forget tombstone lives long enough to catch a webhook delivery that was
 // already in flight when `live.forget` ran and only fails (and would be
@@ -36,6 +38,43 @@ function _topicScope(topic) {
 	return slash > _TENANT_TOPIC_NS.length ? topic.slice(_TENANT_TOPIC_NS.length, slash) : undefined;
 }
 
+const _MAX_KEY_LENGTH = 256;
+
+/** @param {string} _k @param {unknown} v */
+function _sortedKeys(_k, v) {
+	if (v === null || typeof v !== 'object' || Array.isArray(v)) return v;
+	/** @type {Record<string, unknown>} */
+	const out = {};
+	for (const k of Object.keys(v).sort()) out[k] = /** @type {any} */ (v)[k];
+	return out;
+}
+
+/**
+ * Content fingerprint of a dead-letter capture: lowercase hex SHA-256 over the
+ * JSON array `[webhookId, topic, event, data]` with every plain object's keys
+ * sorted (JavaScript default sort). The capture path uses it as the record key,
+ * so one failed delivery is one record however often its capture is retried or
+ * repeated, and a store compares it to tell an identical retry from a
+ * conflicting reuse of a key. Durable stores compute the same value from the
+ * value they were handed, never from a database round trip. Throws for content
+ * JSON cannot encode (a BigInt, a cycle).
+ * @param {{ webhookId: string, topic: string, event: string, data: unknown }} rec
+ * @returns {string}
+ */
+export function _deadLetterFingerprint(rec) {
+	return createHash('sha256')
+		.update(JSON.stringify([rec.webhookId, rec.topic, rec.event, rec.data], _sortedKeys))
+		.digest('hex');
+}
+
+/** @param {unknown} key */
+function _validKey(key) {
+	if (typeof key !== 'string' || key.length === 0 || key.length > _MAX_KEY_LENGTH) {
+		throw new TypeError('dead-letter: key must be a non-empty string of at most ' + _MAX_KEY_LENGTH + ' characters');
+	}
+	return key;
+}
+
 /**
  * @typedef {object} DeadLetterRecord
  * @property {string} id - Monotonic per-store record id.
@@ -52,6 +91,8 @@ function _topicScope(topic) {
  *   by the store's `forgetUserId` option (null when unset or not extractable).
  *   Right-to-erasure attribution: the event payload is app-defined, so the store
  *   cannot tell whose event a record holds without the extractor.
+ * @property {string | null} key - The capture key the record was added under
+ *   (null for an unkeyed add). Held only while the record is retained.
  */
 
 /**
@@ -78,6 +119,8 @@ export function createDeadLetterStore(options = {}) {
 	const forgetUserId = options.forgetUserId;
 	/** @type {Map<string, DeadLetterRecord>} insertion-ordered */
 	const records = new Map();
+	/** @type {Map<string, { id: string, fingerprint: string }>} capture key -> its record */
+	const keys = new Map();
 	let seq = 0;
 	// Forget tombstones: the most recent purge time per (tenant scope, authoring
 	// userId). A record whose delivery was already in flight when `live.forget`
@@ -99,8 +142,15 @@ export function createDeadLetterStore(options = {}) {
 		if (!ttlMs) return;
 		const cutoff = now() - ttlMs;
 		for (const [id, rec] of records) {
-			if (rec.failedAt < cutoff) records.delete(id);
+			if (rec.failedAt < cutoff) _drop(id, rec);
 		}
+	}
+
+	// Every removal path goes through here so a key never outlives its record.
+	/** @param {string} id @param {DeadLetterRecord} rec */
+	function _drop(id, rec) {
+		records.delete(id);
+		if (rec.key !== null) keys.delete(rec.key);
 	}
 
 	// Drop tombstones older than the window: any delivery in flight across such an
@@ -119,16 +169,21 @@ export function createDeadLetterStore(options = {}) {
 
 	return {
 		/**
-		 * Retain an undeliverable event. Returns the new record id, or `null` when a
-		 * forget tombstone drops the record (its delivery was in flight when
-		 * `live.forget` ran). Evicts the oldest record when over `max`.
-		 * @param {Omit<DeadLetterRecord, 'id'> & { startedAt?: number }} rec
+		 * Retain an undeliverable event. Returns the record id (the receipt), or
+		 * `null` when a forget tombstone drops the record (its delivery was in
+		 * flight when `live.forget` ran). Evicts the oldest record when over `max`.
+		 * With a `key`, the add is idempotent while the keyed record is retained: a
+		 * repeat with the same content returns the original id and changes nothing,
+		 * and a repeat with different content throws `DEAD_LETTER_KEY_CONFLICT`.
+		 * @param {Omit<DeadLetterRecord, 'id' | 'userId' | 'key'> & { key?: string | null, startedAt?: number }} rec
 		 *   `startedAt` is the delivery start time as a MONOTONIC stamp (threaded by
 		 *   `_fireWebhookOut` via `monotonicNow`); used only for the forget-race
 		 *   tombstone, never stored.
 		 * @returns {string | null}
 		 */
 		add(rec) {
+			const key = rec.key == null ? null : _validKey(rec.key);
+			const fingerprint = key === null ? null : _deadLetterFingerprint(rec);
 			_expire();
 			_sweepTombstones();
 			// Extract the authoring userId FIRST so a forget tombstone can drop a
@@ -158,6 +213,13 @@ export function createDeadLetterStore(options = {}) {
 				const startedAt = typeof rec.startedAt === 'number' ? rec.startedAt : monotonicNow();
 				if (tomb !== undefined && tomb >= startedAt) return null;
 			}
+			if (key !== null) {
+				const held = keys.get(key);
+				if (held !== undefined) {
+					if (held.fingerprint === fingerprint) return held.id;
+					throw new LiveError('DEAD_LETTER_KEY_CONFLICT', 'dead-letter: the key is already held by a record with different content');
+				}
+			}
 			const id = String(++seq);
 			/** @type {DeadLetterRecord} */
 			const record = {
@@ -170,13 +232,15 @@ export function createDeadLetterStore(options = {}) {
 				error: rec.error,
 				failedAt: typeof rec.failedAt === 'number' ? rec.failedAt : now(),
 				traceContext: rec.traceContext ?? null,
-				userId
+				userId,
+				key
 			};
 			records.set(id, record);
+			if (key !== null && fingerprint !== null) keys.set(key, { id, fingerprint });
 			while (records.size > max) {
-				const oldest = records.keys().next().value;
+				const oldest = records.entries().next().value;
 				if (oldest === undefined) break;
-				records.delete(oldest);
+				_drop(oldest[0], oldest[1]);
 			}
 			return id;
 		},
@@ -189,7 +253,10 @@ export function createDeadLetterStore(options = {}) {
 
 		/** @param {string} id @returns {boolean} */
 		remove(id) {
-			return records.delete(id);
+			const rec = records.get(id);
+			if (rec === undefined) return false;
+			_drop(id, rec);
+			return true;
 		},
 
 		/**
@@ -231,7 +298,7 @@ export function createDeadLetterStore(options = {}) {
 			let n = 0;
 			for (const [id, rec] of records) {
 				if (rec.userId === userId && _topicInTenant(tenantId, rec.topic)) {
-					records.delete(id);
+					_drop(id, rec);
 					n++;
 				}
 			}
@@ -289,6 +356,7 @@ export function createDeadLetterStore(options = {}) {
 
 		clear() {
 			records.clear();
+			keys.clear();
 			purgedAt.clear();
 		}
 	};

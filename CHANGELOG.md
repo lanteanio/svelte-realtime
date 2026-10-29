@@ -38,6 +38,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** svelte-adapter-uws 0.6.0-next.97 or newer; with an older adapter a configured policy fails startup.
   - **Compatibility:** Additive and off by default; publishes walk every local connection while a policy is installed.
   - **Detail:** [Added engineering detail](#added).
+- **Added: dead-letter capture receipts.** Every webhook dead-letter capture now carries a content key, so a store write whose reply was lost is repeated without creating a second record, the same failed delivery captured twice is kept once, and every repeat gets back the original record ID as its receipt.
+  - **Affects:** Applications that enable the webhook dead-letter queue, and authors of custom dead-letter stores.
+  - **Action:** None for the built-in store; a custom store honors `add({ key })` as described in the dead-letter section of the README.
+  - **Requires:** Nothing beyond this release for the built-in store; durable stores deduplicate once they implement the key.
+  - **Compatibility:** Identical captures for one webhook now collapse into one record, and a key reused for different content throws `DEAD_LETTER_KEY_CONFLICT`.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: tenant-scoped erasure.** When a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store is configured, `live.forget(userId, opts)` now requires `opts.tenantId` and rejects with `INVALID_REQUEST` before purging anything, instead of silently erasing the untenanted scope and reporting success for a call that named no tenant.
   - **Affects:** Multi-tenant applications and applications with a durable erasure or dead-letter store.
   - **Action:** Pass `tenantId`, or an explicit `null` for the untenanted scope, on every `live.forget` call.
@@ -74,6 +80,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 ### Added
 
 - The README Quick start command, version-compatibility table and install commands are generated from the installed adapter's `docs/compatibility.v1.csv`; the 0.5 row states this package's own `^0.5.11` adapter floor, and the table names adapter releases that documented features need beyond the current tuple. `node scripts/check-compatibility.js` runs in the check chain, applies the adapter's own manifest rules, and fails when those README blocks, the scaffolder tuple in `src/cli-utils.js`, `docs/first-run.md`, the adapter peer floor, the extensions development floor, `engines.node`, the README's native Node floor or the floors stated in `docs/0.6-upgrade.md` disagree with the manifest's current row, or when the README states an ecosystem install command, pin, dist-tag or uWebSockets.js source outside the generated blocks. `--write` regenerates the README blocks and the stated floors. `prepublishOnly` runs it with `--release`, which also requires the package version to be the svelte-realtime release the manifest declares and no documented feature to need a newer adapter.
+
+- Dead-letter captures carry a `key`: the lowercase hex SHA-256 of the JSON array `[webhookId, topic, event, data]` with object keys sorted. While a keyed record is retained, `add` with the same key and content returns the existing record ID without writing, and the same key with different content throws a `DEAD_LETTER_KEY_CONFLICT` error. Records expose `key`, a key is released with its record (replay, `remove`, eviction, TTL, `purgeUser`, `clear`), and erasure tombstones still drop a repeated write for an erased user. The webhook capture now waits for `add` and repeats a keyed write after 100 ms and 500 ms before reporting `webhook.dead-letter.persist-failed`; content JSON cannot encode is written once without a key.
 
 - `sourceGap(platform, topic, { source, reason, jitterMs })` reports lost delivery from an external change source over the subscribed data topic with `seq: false`. Mounted streams discard their resume cursors and reload authoritative state through the coalesced, de-herded gap-recovery path without merging the reserved signal into application data.
 
