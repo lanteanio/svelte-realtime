@@ -227,6 +227,28 @@ export function _getCtxHelpers(platform) {
 			pendingBatch = null;
 			if (batch && batch.length > 0) /** @type {any} */ (platform).publishBatched(batch);
 		};
+		const _plainPublish = (topic, event, data, finalOptions) => {
+			// A jittered publish carries a de-herd window `j` only on the single
+			// `platform.publish` envelope - not the replay buffer or the batch
+			// frame - so it takes the direct path. That is the right shape: jitter
+			// is a rare control event (degraded notice, flag flip, reroute), never
+			// a hot, replayed, or coalesced stream.
+			const _jittered = !!(finalOptions && finalOptions.jitterMs > 0);
+			// Replay-eligible topics route through `platform.replay.publish`
+			// so the bounded buffer captures the event for gap-fill on
+			// resume. The replay extension calls `platform.publish`
+			// internally, so the local broadcast still happens. Cannot
+			// batch through publishBatched in this case -- the extension's
+			// per-call write is what stamps the seq envelope.
+			if (!_jittered && _maybeReplayPublish(platform, topic, event, data)) return true;
+			if (_jittered || !_hasBatched) return platform.publish(topic, event, data, finalOptions);
+			if (!pendingBatch) {
+				pendingBatch = [];
+				microtask(_flushBatch);
+			}
+			pendingBatch.push({ topic, event, data, options: finalOptions });
+			return true;
+		};
 		const publish = function publish(topic, event, data, options) {
 			// Reserve the `__` prefix for framework-internal channels
 			// (`__signal:userId`, `__rpc`, `__upload`, plugin `__presence:*` /
@@ -300,26 +322,7 @@ export function _getCtxHelpers(platform) {
 			let c;
 			const noCoalesce = (_topicCoalesce.size === 0 && _declaredCoalesce.size === 0 && _declaredCoalescePattern.size === 0) || !(c = _topicCoalesce.get(topic) || (platform.relayCoalesced ? _resolveCoalesce(topic) : null));
 			if (noCoalesce && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0 && _declaredRedactPattern.size === 0) {
-				// A jittered publish carries a de-herd window `j` only on the single
-				// `platform.publish` envelope - not the replay buffer or the batch
-				// frame - so it takes the direct path. That is the right shape: jitter
-				// is a rare control event (degraded notice, flag flip, reroute), never
-				// a hot, replayed, or coalesced stream.
-				const _jittered = !!(finalOptions && finalOptions.jitterMs > 0);
-				// Replay-eligible topics route through `platform.replay.publish`
-				// so the bounded buffer captures the event for gap-fill on
-				// resume. The replay extension calls `platform.publish`
-				// internally, so the local broadcast still happens. Cannot
-				// batch through publishBatched in this case -- the extension's
-				// per-call write is what stamps the seq envelope.
-				if (!_jittered && _maybeReplayPublish(platform, topic, event, data)) return true;
-				if (_jittered || !_hasBatched) return platform.publish(topic, event, data, finalOptions);
-				if (!pendingBatch) {
-					pendingBatch = [];
-					microtask(_flushBatch);
-				}
-				pendingBatch.push({ topic, event, data, options: finalOptions });
-				return true;
+				return _plainPublish(topic, event, data, finalOptions);
 			}
 			const t = _topicTransform.get(topic) || (c?.transform ? c : null);
 			// coalesceBy reads the ORIGINAL data (before transform) so the key
@@ -406,17 +409,22 @@ export function _getCtxHelpers(platform) {
 			// adapter primitive (latest-value-wins per-ws-per-key); not folded
 			// into publishBatched because the two have incompatible wire
 			// shapes (separate per-subscriber Map vs shared batched frame).
+			// Cross-instance: sendCoalesced only reaches THIS instance's sockets, so a
+			// platform that relays coalesced envelopes re-coalesces the latest value
+			// onto every other instance's subscribers. A platform that reaches no
+			// other instance answers an explicit false (a relay that predates the
+			// boolean answer returns nothing, and has relayed).
+			if ((c.ws.size ?? c.ws.length) === 0) {
+				// No local subscriber: the relay is the only delivery. Without one,
+				// publish as if no stream declared the topic, with the original data.
+				if (platform.relayCoalesced && platform.relayCoalesced(topic, event, wireData, coalesceKey) !== false) return true;
+				return _plainPublish(topic, event, data, finalOptions);
+			}
 			const fullKey = topic + '\0' + (coalesceKey == null ? '' : coalesceKey);
 			let last = true;
 			for (const ws of c.ws) {
 				last = platform.sendCoalesced(ws, { key: fullKey, topic, event, data: wireData });
 			}
-			// Cross-instance: the loop above only reaches THIS instance's sockets.
-			// When the pubsub extension is wrapped in, relay a coalesced envelope so
-			// every other instance re-coalesces this latest value onto its own
-			// subscribers; without it a clustered coalesceBy topic silently delivers
-			// to the publishing instance only. In-memory / single-instance has no
-			// relayCoalesced, so it stays byte-identical.
 			if (platform.relayCoalesced) platform.relayCoalesced(topic, event, wireData, coalesceKey);
 			return last;
 		};
