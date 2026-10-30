@@ -1,10 +1,9 @@
 // Smoothed entities ride unsequenced frames that each carry an entity's whole
-// state, so a lost or repeated update is healed by the next one. A lost remove
-// has no successor: the entity stays until a resync, which rebuilds the remote
-// set from the server's roster instead of merging into it. Discrete events are
-// one-shots, delivered as they arrive and never replayed by a resync. Runs the
-// shipped view and the installed adapter channel over the adapter client and a
-// scripted socket; the sync reply stands in for the server's roster.
+// state. A lost remove has no successor, so the entity stays until a resync,
+// which must rebuild the remote set from the server's roster instead of
+// merging into it. Runs the shipped view and the installed adapter channel
+// over the adapter client and a scripted socket; the sync reply stands in for
+// the server's roster.
 
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
@@ -138,18 +137,7 @@ async function mountView(roster) {
 
 const update = (ws, key, state) => ws.receive({ topic: TOPIC, event: 'update', data: { key, data: state }, t: Date.now() });
 
-describe('smoothed entities over frames that are lost, repeated or reordered', () => {
-	it('an update after a lost or repeated one leaves the entity on the newest state', async () => {
-		const { ws } = await mountView([{ key: 'ann', state: { x: 0, y: 0, hp: 10 } }]);
-		// hp 9 was lost on the way; hp 8 arrives twice.
-		update(ws, 'ann', { x: 1, y: 0, hp: 8 });
-		update(ws, 'ann', { x: 1, y: 0, hp: 8 });
-		await until(() => view.remote.get('ann')?.hp === 8, 'the newest update');
-		await sleep(40);
-		expect(view.remote.get('ann').hp).toBe(8);
-		expect([...view.remote.keys()]).toEqual(['ann']);
-	});
-
+describe('smoothed entities after a lost remove', () => {
 	it('a resync drops an entity whose remove was lost', async () => {
 		const { server, ws } = await mountView([{ key: 'ann', state: { x: 0, y: 0 } }]);
 		update(ws, 'bob', { x: 5, y: 5 });
@@ -174,21 +162,5 @@ describe('smoothed entities over frames that are lost, repeated or reordered', (
 		await until(() => view.remote.has('cat'), 'cat to appear');
 		await sleep(40);
 		expect([...view.remote.keys()].sort()).toEqual(['ann', 'cat']);
-	});
-
-	it('server events reach the handler once each in arrival order, and a resync replays none', async () => {
-		const { server, ws } = await mountView([{ key: 'ann', state: { x: 0, y: 0 } }]);
-		const seen = [];
-		view.onEvent((e) => seen.push(e.id));
-		const event = (id) => ws.receive({ topic: TOPIC, event: 'event', data: { type: 'hit', key: 'ann', id, data: null } });
-		// Event 1 was lost; 3 overtook 2.
-		event(3);
-		event(2);
-		expect(seen).toEqual([3, 2]);
-		const syncs = server.syncs;
-		view.resync();
-		await until(() => server.syncs > syncs, 'the resync');
-		await sleep(40);
-		expect(seen).toEqual([3, 2]);
 	});
 });

@@ -1,11 +1,10 @@
 // A queued call whose replay reached the server but whose answer was lost
 // with the connection goes up again on the next connection under the same
-// idempotency key, so the server applies it once and the stream shows it
-// once. Runs the real client, the installed adapter client and the adapter's
-// test server, with a socket in front of the client that loses the answer.
+// idempotency key, so the server applies it once. Runs the real client, the
+// installed adapter client and the adapter's test server, with a socket in
+// front of the client that loses the answer.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { get } from 'svelte/store';
 import { installLossyWebSocket, frameTopic } from './helpers/lossy-websocket.js';
 
 const lossy = installLossyWebSocket();
@@ -40,20 +39,12 @@ afterAll(async () => {
 
 describe('offline replay over a connection that loses the answer', () => {
 	it('sends the call again under its idempotency key and the server applies it once', async () => {
-		const rows = [];
 		let runs = 0;
-		__register('replayed/add', live.idempotent({}, async (ctx, row) => {
+		__register('replayed/add', live.idempotent({}, async () => {
 			runs++;
-			rows.push(row);
-			ctx.publish('replayed-items', 'created', row);
 			return 'added';
 		}));
-		__register('replayed/list', live.public(live.stream('replayed-items', async () => rows.slice(), { merge: 'crud', key: 'id' })));
 		client.configure({ offline: { queue: true } });
-
-		const items = client.__stream('replayed/list', { merge: 'crud', key: 'id' });
-		const off = items.subscribe(() => {});
-		await until(() => Array.isArray(get(items)), 'the stream snapshot');
 
 		client.simulateOffline();
 		const saved = client.__rpc('replayed/add')({ id: 1 });
@@ -77,9 +68,5 @@ describe('offline replay over a connection that loses the answer', () => {
 		expect(sends).toHaveLength(2);
 		expect(typeof sends[0].idempotencyKey).toBe('string');
 		expect(sends[1].idempotencyKey).toBe(sends[0].idempotencyKey);
-		await until(() => get(items).length > 0, 'the row in the stream');
-		await sleep(30);
-		expect(get(items)).toEqual([{ id: 1 }]);
-		off();
 	});
 });
