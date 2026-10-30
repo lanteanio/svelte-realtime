@@ -187,6 +187,9 @@ export function _purgeCrdtDocs(names) {
 			continue;
 		}
 		for (const name of names) {
+			// A document joined again after erasure starts from what the
+			// durable store holds then, with no merge left over from before.
+			rec.mergePending.delete(name);
 			try { if (rec.authority.drop(name)) count++; }
 			catch { failed = true; }
 		}
@@ -434,7 +437,16 @@ export function _crdtRegister(kind, config) {
 								// Merge the stored snapshot before replacing it,
 								// and pass what it adds to local subscribers and
 								// peers so every replica converges on it.
-								const stored = await p.load(topic, { signal });
+								// A failed read blocks the write rather than skipping
+								// the merge: writing unmerged would replace the very
+								// edit the merge exists to keep. The authority retries
+								// the store; the error names the read that failed.
+								let stored;
+								try {
+									stored = await p.load(topic, { signal });
+								} catch (err) {
+									throw new Error('Could not load the stored snapshot of "' + topic + '" to merge it before the first write of a new persist lease', { cause: err });
+								}
 								if (signal.aborted) return false;
 								if (stored && stored.length > 0 && rec.authority.has(topic)) {
 									const added = _mergeAndFanOut(rec, topic, stored);

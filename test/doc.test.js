@@ -140,7 +140,7 @@ function fakeCrdtCluster(overrides = {}) {
 		...(overrides.acquirePersistDetailed
 			? {
 					acquirePersistDetailed(topic) {
-						calls.acquirePersist.push(topic);
+						(calls.acquirePersistDetailed ??= []).push(topic);
 						return overrides.acquirePersistDetailed(topic);
 					}
 				}
@@ -823,12 +823,19 @@ describe('live.doc cluster persistence and sync replies (real replica)', () => {
 	 * lease holder would, and a detailed lease that reports the scripted
 	 * results in order (the last one repeats).
 	 */
-	async function handover(leases, storeImpl) {
-		const state = { stored: null, loads: 0, stores: [] };
+	async function handover(leases, { storeImpl, onError } = {}) {
+		const state = { stored: null, loads: 0, stores: [], signals: [], loadGate: null, loadError: null };
 		const { name, topic, declKey } = declare({
 			snapshotEvery: 1,
+			...(onError ? { onError } : {}),
 			persist: {
-				load: async () => { state.loads++; return state.stored; },
+				load: async (t, info) => {
+					state.loads++;
+					state.signals.push(info && info.signal);
+					if (state.loadGate) await state.loadGate;
+					if (state.loadError) throw state.loadError;
+					return state.stored;
+				},
 				store: (t, b) => {
 					if (storeImpl) storeImpl(state);
 					state.stored = new Uint8Array(b);
@@ -860,7 +867,11 @@ describe('live.doc cluster persistence and sync replies (real replica)', () => {
 		const merged = platform.wirePublished.slice(published).map((p) => decode(p.data.bytes));
 		expect(merged).toContainEqual({ x: 1 });
 		expect(crdt.calls.relayed.map((r) => decode(r.bytes))).toContainEqual({ x: 1 });
-		expect(crdt.calls.relayed.at(-1).topic).toBe(topic);
+		expect(crdt.calls.acquirePersistDetailed).toContain(topic);
+		expect(crdt.calls.acquirePersist).toEqual([]);
+		// The merge load gets the write's abort signal.
+		expect(state.signals[1]).toBeInstanceOf(AbortSignal);
+		expect(state.signals[1].aborted).toBe(false);
 		// A renewal of the same lease does not reload the snapshot.
 		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('z', 3, state.stored))]);
 		await vi.advanceTimersByTimeAsync(1);
@@ -884,12 +895,14 @@ describe('live.doc cluster persistence and sync replies (real replica)', () => {
 			let fail = true;
 			const { state, platform, ws, name } = await handover(
 				[{ acquired: true, fresh: true }, { acquired: true, fresh: false }],
-				(s) => {
-					if (!fail) return;
-					fail = false;
-					// The previous writer stores once more before this write fails.
-					s.stored = edit('w', 4, lost);
-					throw new Error('disk full');
+				{
+					storeImpl: (s) => {
+						if (!fail) return;
+						fail = false;
+						// The previous writer stores once more before this write fails.
+						s.stored = edit('w', 4, lost);
+						throw new Error('disk full');
+					}
 				}
 			);
 			state.stored = lost;
@@ -900,6 +913,62 @@ describe('live.doc cluster persistence and sync replies (real replica)', () => {
 		} finally {
 			errSpy.mockRestore();
 		}
+	});
+
+	it('a failed merge load blocks the write, names the read, and merges once the read recovers', async () => {
+		const errors = [];
+		const { state, platform, ws, name } = await handover(
+			[{ acquired: true, fresh: true }, { acquired: true, fresh: false }],
+			{ onError: (err, info) => errors.push({ err, info }) }
+		);
+		state.stored = edit('x', 1);
+		const cause = new Error('replica read timeout');
+		state.loadError = cause;
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('y', 2))]);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(state.stores).toEqual([]);
+		expect(errors.length).toBeGreaterThanOrEqual(1);
+		expect(errors[0].err.message).toContain('Could not load the stored snapshot');
+		expect(errors[0].err.cause).toBe(cause);
+		state.loadError = null;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(decode(state.stored)).toEqual({ x: 1, y: 2 });
+	});
+
+	it('an erasure during the merge load aborts the load and writes nothing', async () => {
+		const { state, platform, ws, name, topic } = await handover([{ acquired: true, fresh: true }]);
+		state.stored = edit('x', 1);
+		let release;
+		state.loadGate = new Promise((resolve) => { release = resolve; });
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('secret', 2))]);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(state.loads).toBe(2);
+		expect(_purgeCrdtDocs([topic])).toBe(1);
+		expect(state.signals[1].aborted).toBe(true);
+		release();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(state.stores).toEqual([]);
+		expect(platform.wirePublished.map((p) => p.data && p.data.bytes).filter(Boolean).map((b) => decode(b))).not.toContainEqual({ x: 1 });
+	});
+
+	it('an erasure drops a pending merge, so the document joined again does not reload for it', async () => {
+		const { state, platform, name, topic } = await handover([{ acquired: true, fresh: true }, { acquired: true, fresh: false }]);
+		const ws = mockWs({ id: 'u1' });
+		state.loadError = new Error('read down');
+		await call(ws, platform, name + '/board/__doc/sync', []);
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('y', 2))]);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(_purgeCrdtDocs([topic])).toBe(1);
+		state.loadError = null;
+		state.stored = null;
+		const loadsBefore = state.loads;
+		const again = mockWs({ id: 'u2' });
+		await call(again, platform, name + '/board/__doc/sync', []);
+		expect(state.loads).toBe(loadsBefore + 1);
+		await fire(again, platform, name + '/board/__doc/update', [Array.from(edit('z', 3))]);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(state.loads).toBe(loadsBefore + 1);
+		expect(decode(state.stored)).toEqual({ z: 3 });
 	});
 
 	it('does not merge or write when the detailed lease is denied', async () => {
