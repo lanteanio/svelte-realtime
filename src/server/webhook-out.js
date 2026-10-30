@@ -64,19 +64,22 @@ const _deliverySlot = new AsyncLocalStorage();
 
 /**
  * One wrapped config per registered config, so the adapter's per-config caches
- * (DNS pins) keep working. The wrappers record the transformed payload and the
- * idempotency key of the delivery running in `_deliverySlot`.
- * @type {WeakMap<object, any>}
+ * (DNS pins) keep working. The wrapped config is a snapshot: the adapter signs
+ * with it and the key is derived from it, so the two cannot disagree. Its
+ * wrappers record the transformed payload and the idempotency key of the
+ * delivery running in `_deliverySlot`.
+ * @type {WeakMap<object, { wrapped: any, snapshot: any }>}
  */
 const _keyedConfigs = new WeakMap();
 
-/** @param {any} config */
+/** @param {any} config @returns {{ wrapped: any, snapshot: any }} */
 function _keyedConfig(config) {
 	let keyed = _keyedConfigs.get(config);
 	if (keyed !== undefined) return keyed;
-	const transform = config.transform;
-	keyed = {
-		...config,
+	const snapshot = { ...config };
+	const transform = snapshot.transform;
+	const wrapped = {
+		...snapshot,
 		transform: async (/** @type {string} */ event, /** @type {unknown} */ data) => {
 			const payload = transform ? await transform(event, data) : { event, data };
 			const slot = _deliverySlot.getStore();
@@ -85,15 +88,15 @@ function _keyedConfig(config) {
 		},
 		idempotencyKey: (/** @type {string} */ event, /** @type {unknown} */ data) => {
 			const slot = _deliverySlot.getStore();
-			if (slot === undefined) return _idempotencyKey(config, '', event, data, { event, data });
-			slot.key = _idempotencyKey(config, slot.topic, event, data, slot.payload);
+			if (slot === undefined) return null;
+			slot.key = _idempotencyKey(snapshot, slot.topic, event, data, slot.payload);
 			return slot.key;
 		}
 	};
+	keyed = { wrapped, snapshot };
 	_keyedConfigs.set(config, keyed);
 	return keyed;
 }
-
 /**
  * The delivery's idempotency key: the configured callback's value, otherwise
  * the adapter's own derivation (SHA-256 of topic, event and body, HMAC with the
@@ -111,33 +114,52 @@ function _idempotencyKey(config, topic, event, data, payload) {
 /**
  * The capture key of a failed delivery: its idempotency key when it had a
  * valid one. A delivery that failed before the adapter asked for the key (an
- * open breaker, a url callback failure) derives it from the recorded payload,
- * bounded like the adapter bounds callbacks. Null means capture unkeyed.
- * @param {any} config @param {{ topic: string, payload: unknown, key: unknown }} slot
+ * open breaker, a url callback failure) derives it from the recorded payload.
+ * Either wait is bounded like the adapter bounds callbacks. Resolves the key,
+ * null for a delivery without one (capture unkeyed), or `unavailable` when the
+ * key could not be had (a callback that threw or never settled).
+ * @param {any} config the snapshot the delivery used
+ * @param {{ topic: string, payload: unknown, key: unknown }} slot
  * @param {string} event @param {unknown} data
- * @returns {Promise<string | null>}
+ * @returns {Promise<string | null | typeof _KEY_UNAVAILABLE>}
  */
 async function _captureKey(config, slot, event, data) {
-	let key = slot.key;
-	if (key === undefined) {
+	let pending = slot.key;
+	if (pending === undefined) {
 		if (slot.payload === undefined) return null;
-		let timer;
-		try {
-			key = await Promise.race([
-				Promise.resolve().then(() => _idempotencyKey(config, slot.topic, event, data, slot.payload)),
-				new Promise((resolve) => { timer = setTimer(() => resolve(null), config.callbackTimeoutMs ?? 10000); })
-			]);
-		} catch {
-			return null;
-		} finally {
-			clearTimer(timer);
-		}
-	} else {
-		try { key = await key; } catch { return null; }
+		pending = Promise.resolve().then(() => _idempotencyKey(config, slot.topic, event, data, slot.payload));
 	}
+	let timer;
+	let key;
+	try {
+		key = await Promise.race([
+			pending,
+			new Promise((resolve) => { timer = setTimer(() => resolve(_KEY_UNAVAILABLE), config.callbackTimeoutMs ?? 10000); })
+		]);
+	} catch {
+		return _KEY_UNAVAILABLE;
+	} finally {
+		clearTimer(timer);
+	}
+	if (key === _KEY_UNAVAILABLE) return key;
 	if (key == null) return null;
 	const s = String(key);
 	return s.length > 0 && s.length <= 256 && !/[\r\n\0]/.test(s) ? s : null;
+}
+
+const _KEY_UNAVAILABLE = Symbol('key unavailable');
+
+/** @param {{ id: string }} entry */
+function _reportKeyUnavailable(entry) {
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.webhook',
+		event: 'webhook.dead-letter.key-unavailable',
+		severity: 'warn',
+		dataClass: 'operational',
+		message: 'A failed webhook delivery had no idempotency key in time; it was captured once without a key.',
+		attributes: { webhookId: entry.id }
+	});
 }
 
 function _reportDeadLetterFailure(entry, err) {
@@ -168,7 +190,7 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	const slot = keyStore && keyStore.keyedAdd === true ? { topic, payload: undefined, key: undefined } : null;
 	const r = slot === null
 		? await deliverWebhook(entry.config, topic, event, data, hooks)
-		: await _deliverySlot.run(slot, () => deliverWebhook(_keyedConfig(entry.config), topic, event, data, hooks));
+		: await _deliverySlot.run(slot, () => deliverWebhook(_keyedConfig(entry.config).wrapped, topic, event, data, hooks));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	const store = state.webhookDeadLetter;
@@ -190,7 +212,11 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	// can be sent again without creating a second record. Only a store that
 	// declares `keyedAdd` gets a key; any other store, and a delivery without a
 	// usable key, get one unkeyed write, which is all that can safely be repeated.
-	const key = slot !== null && store.keyedAdd === true ? await _captureKey(entry.config, slot, event, data) : null;
+	let key = slot !== null && store.keyedAdd === true ? await _captureKey(_keyedConfig(entry.config).snapshot, slot, event, data) : null;
+	if (key === _KEY_UNAVAILABLE) {
+		_reportKeyUnavailable(entry);
+		key = null;
+	}
 	if (key !== null) rec.key = key;
 	for (let attempt = 0; ; attempt++) {
 		try {

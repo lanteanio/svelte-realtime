@@ -30,19 +30,14 @@ describe('keyed dead-letter add', () => {
 		expect(s.get(first)).toMatchObject({ key: 'k1', attempts: 3, error: 'x', failedAt: 1 });
 	});
 
-	it('gives concurrent identical adds one record and the same receipt', async () => {
+	it('scopes a key to its webhook and tenant', () => {
 		const s = createDeadLetterStore();
-		const ids = await Promise.all([1, 2, 3].map(() => Promise.resolve().then(() => s.add(rec({ key: 'same' })))));
-		expect(new Set(ids).size).toBe(1);
-		expect(s.count()).toBe(1);
-	});
-
-	it('scopes a key to its webhook', () => {
-		const s = createDeadLetterStore();
-		const a = s.add(rec({ key: 'k' }));
-		const b = s.add(rec({ key: 'k', webhookId: 'w2' }));
-		expect(b).not.toBe(a);
-		expect(s.count()).toBe(2);
+		const a = s.add(rec({ key: 'k', topic: '@t/acme/orders' }));
+		const b = s.add(rec({ key: 'k', topic: '@t/acme/orders', webhookId: 'w2' }));
+		const c = s.add(rec({ key: 'k', topic: '@t/globex/orders' }));
+		expect(s.add(rec({ key: 'k', topic: '@t/acme/invoices' }))).toBe(a);
+		expect(new Set([a, b, c]).size).toBe(3);
+		expect(s.count()).toBe(3);
 	});
 
 	it('does not hash or encode the content of a keyed add', () => {
@@ -132,7 +127,10 @@ describe('dead-letter capture key', () => {
 		await _fireWebhookOut(failingEntry, 'orders', 'created', {}, null);
 		await _fireWebhookOut(failingEntry, 'orders', 'created', { n: new Number(1) }, null);
 		await _fireWebhookOut(failingEntry, 'orders', 'created', { n: new Number(2) }, null);
-		expect(getDeadLetter().count()).toBe(4);
+		const keys = getDeadLetter().list().map((r) => r.key);
+		expect(keys).toHaveLength(4);
+		expect(keys.every((k) => typeof k === 'string')).toBe(true);
+		expect(new Set(keys).size).toBe(4);
 	});
 
 	it('equals the idempotency-key header the receiver got', async () => {
@@ -198,6 +196,42 @@ describe('dead-letter capture key', () => {
 		expect(calls[1].key).toBe(calls[0].key);
 		expect(inner.count()).toBe(1);
 		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(0);
+	});
+
+	it('keeps one record for the same delivery captured concurrently', async () => {
+		configureWebhooks({ deadLetter: true });
+		await Promise.all([1, 2, 3].map(() => _fireWebhookOut(failingEntry, 'orders', 'created', { id: 9 }, null)));
+		expect(getDeadLetter().count()).toBe(1);
+	});
+
+	it('keeps tenants apart when a custom idempotencyKey callback repeats a value', async () => {
+		configureWebhooks({ deadLetter: true });
+		const entry = { id: 'test/order-key', config: { ...failingEntry.config, idempotencyKey: (_e, d) => 'order-' + d.id } };
+		await _fireWebhookOut(entry, '@t/acme/orders', 'created', { id: 1 }, null);
+		await _fireWebhookOut(entry, '@t/globex/orders', 'created', { id: 1 }, null);
+		expect(getDeadLetter().count()).toBe(2);
+	});
+
+	it('writes once unkeyed and reports it when the idempotencyKey callback never settles', async () => {
+		const events = [];
+		setOperationalEventSink((e) => events.push(e));
+		configureWebhooks({ deadLetter: true });
+		const entry = { id: 'test/hung', config: { ...failingEntry.config, callbackTimeoutMs: 30, idempotencyKey: () => new Promise(() => {}) } };
+		const done = _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
+		const settled = await Promise.race([done.then(() => 'done'), new Promise((r) => setTimeout(() => r('hung'), 2000))]);
+		expect(settled).toBe('done');
+		expect(getDeadLetter().list().map((r) => r.key)).toEqual([null]);
+		expect(events.filter((e) => e.event === 'webhook.dead-letter.key-unavailable')).toHaveLength(1);
+	});
+
+	it('keys with the config the delivery signed with', async () => {
+		configureWebhooks({ deadLetter: true });
+		const config = { ...failingEntry.config, secret: 'a'.repeat(32) };
+		const entry = { id: 'test/rotating', config };
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
+		config.secret = 'b'.repeat(32); // a later change to the registered object
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
+		expect(getDeadLetter().count()).toBe(1);
 	});
 
 	it('keeps one record for the same failed delivery captured twice', async () => {

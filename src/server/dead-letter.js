@@ -39,11 +39,13 @@ function _topicScope(topic) {
 const _MAX_KEY_LENGTH = 256;
 
 /**
- * The store-wide identity of a capture key: keys are scoped to their webhook.
- * @param {string} webhookId @param {string} key
+ * The store-wide identity of a capture key: keys are scoped to their webhook
+ * and to the tenant scope of the record's topic, so a callback key that repeats
+ * across tenants never merges their records.
+ * @param {string} webhookId @param {string} topic @param {string} key
  */
-function _scopedKey(webhookId, key) {
-	return JSON.stringify([webhookId, key]);
+function _scopedKey(webhookId, topic, key) {
+	return JSON.stringify([webhookId, _topicScope(topic) ?? null, key]);
 }
 
 /** @param {unknown} key */
@@ -129,7 +131,7 @@ export function createDeadLetterStore(options = {}) {
 	/** @param {string} id @param {DeadLetterRecord} rec */
 	function _drop(id, rec) {
 		records.delete(id);
-		if (rec.key !== null) keys.delete(_scopedKey(rec.webhookId, rec.key));
+		if (rec.key !== null) keys.delete(_scopedKey(rec.webhookId, rec.topic, rec.key));
 	}
 
 	// Drop tombstones older than the window: any delivery in flight across such an
@@ -195,7 +197,7 @@ export function createDeadLetterStore(options = {}) {
 				if (tomb !== undefined && tomb >= startedAt) return null;
 			}
 			if (key !== null) {
-				const held = keys.get(_scopedKey(rec.webhookId, key));
+				const held = keys.get(_scopedKey(rec.webhookId, rec.topic, key));
 				if (held !== undefined) return held;
 			}
 			const id = String(++seq);
@@ -214,7 +216,7 @@ export function createDeadLetterStore(options = {}) {
 				key
 			};
 			records.set(id, record);
-			if (key !== null) keys.set(_scopedKey(record.webhookId, key), id);
+			if (key !== null) keys.set(_scopedKey(record.webhookId, record.topic, key), id);
 			while (records.size > max) {
 				const oldest = records.entries().next().value;
 				if (oldest === undefined) break;

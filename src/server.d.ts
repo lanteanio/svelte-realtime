@@ -5312,9 +5312,10 @@ export interface DeadLetterRecord {
 /** What a dead-letter capture hands to `DeadLetterStore.add`. */
 export type DeadLetterCapture = Omit<DeadLetterRecord, 'id' | 'key'> & {
 	/**
-	 * Capture key, 1 to 256 characters, scoped to `webhookId`. While a record
-	 * with this webhook and key is retained, an add returns that record's id
-	 * without writing anything; the content of the repeat is not compared.
+	 * Capture key, 1 to 256 characters, scoped to `webhookId` and the tenant
+	 * scope of `topic`. While a record with this webhook, tenant scope and key
+	 * is retained, an add returns that record's id without writing anything;
+	 * the content of the repeat is not compared.
 	 * Passed only to a store that declares `keyedAdd`. Omit or pass null for an
 	 * unkeyed add.
 	 */

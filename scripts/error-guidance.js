@@ -463,10 +463,16 @@ export const EVENT_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None needed. The late `next()` is refused so the handler cannot run after the answer.',
 		nextAction: 'Fix the middleware at the logged path so it calls `next()` once, before deciding the answer, and does not defer it.'
 	}),
+	'webhook.dead-letter.key-unavailable': Object.freeze({
+		cause: 'An outbound webhook delivery failed and its idempotency key could not be determined for the dead-letter capture: the `idempotencyKey` callback threw or did not settle within `callbackTimeoutMs` (default 10 seconds). The `webhookId` attribute names the webhook.',
+		consequence: 'The failed event is captured once without a key. If that single write fails, the event is lost and `webhook.dead-letter.persist-failed` follows; a repeated capture of the same delivery is not merged with it.',
+		automaticRecovery: 'None for this capture. Later deliveries compute their key again.',
+		nextAction: 'Make the `idempotencyKey` callback return promptly and without throwing, for example by deriving it from the event data alone.'
+	}),
 	'webhook.dead-letter.persist-failed': Object.freeze({
-		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record, or reports a key conflict.',
+		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record.',
 		consequence: 'The record was the only replay copy, so this webhook event is lost for good. The `svelte_realtime_webhook_dead_letter_failures_total` counter goes up.',
-		automaticRecovery: 'A keyed write is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. Content JSON cannot encode is written once, and a key conflict is not repeated.',
+		automaticRecovery: 'A keyed write to a store that declares `keyedAdd` is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. An unkeyed write is made once.',
 		nextAction: 'Check the dead-letter store backend (connection, capacity, permissions). Alert on the failure counter. Rebuild lost events from your own source data if they matter.'
 	}),
 	'webhook.delivery.failed': Object.freeze({
