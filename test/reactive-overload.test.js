@@ -183,15 +183,20 @@ describe('live.effect concurrency and queue limits', () => {
 	});
 
 	it('a debounced effect is bounded by the same limits', async () => {
-		const fx = setupEffect({ debounce: 1, maxConcurrent: 1, maxQueued: 1 });
-		captureErrors();
-		for (let round = 0; round < 4; round++) {
-			fx.publish(round);
-			await new Promise((r) => setTimeout(r, 5));
+		vi.useFakeTimers();
+		try {
+			const fx = setupEffect({ debounce: 1, maxConcurrent: 1, maxQueued: 1 });
+			captureErrors();
+			for (let round = 0; round < 4; round++) {
+				fx.publish(round);
+				await vi.advanceTimersByTimeAsync(5);
+			}
+			expect(fx.started).toEqual([0]);
+			await fx.drain();
+			expect(fx.started).toEqual([0, 1]);
+		} finally {
+			vi.useRealTimers();
 		}
-		expect(fx.started).toEqual([0]);
-		await fx.drain();
-		expect(fx.started).toEqual([0, 1]);
 	});
 
 	it('a handler that throws synchronously frees its slot', async () => {
@@ -209,15 +214,27 @@ describe('live.effect concurrency and queue limits', () => {
 	});
 
 	it('a call that never settles gives its slot back at its deadline, once', async () => {
+		vi.useFakeTimers();
+		try {
+			await neverSettlesOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	async function neverSettlesOnce() {
 		const { errors, events } = captureErrors();
 		const registry = { counter: () => ({ inc(l) { if (l.kind === 'effect') counts[l.result] = (counts[l.result] || 0) + 1; } }), histogram: () => ({ observe() {} }), gauge: () => ({ set() {} }) };
 		const counts = {};
 		live.metrics(registry);
-		const fx = setupEffect({ maxConcurrent: 1, timeoutMs: 40 });
+		const fx = setupEffect({ maxConcurrent: 1, timeoutMs: 400 });
 		for (let i = 1; i <= 3; i++) fx.publish(i);
 		await flush();
 		expect(fx.started).toEqual([1]);
-		await new Promise((r) => setTimeout(r, 120));
+		// Deadline ticks every 100 ms; call 1 started in tick 0 and goes at tick 5.
+		await vi.advanceTimersByTimeAsync(499);
+		expect(fx.started).toEqual([1]);
+		await vi.advanceTimersByTimeAsync(1);
 		// Call 1 hung past its deadline: call 2 has its slot, call 3 waits.
 		expect(fx.started).toEqual([1, 2]);
 		expect(counts.timeout).toBe(1);
@@ -236,24 +253,29 @@ describe('live.effect concurrency and queue limits', () => {
 		const timeouts = errors.filter((e) => e.err?.code === 'TIMEOUT');
 		expect(timeouts).toHaveLength(1);
 		expect(timeouts[0]).toMatchObject({ path: 'effect' });
-		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 40, released: 1 }]);
-	});
+		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 400, released: 1 }]);
+	}
 
 	it('hung calls cannot block the effect for good', async () => {
-		const { errors } = captureErrors();
-		const fx = setupEffect({ maxConcurrent: 2, maxQueued: 2, timeoutMs: 20 });
-		for (let i = 1; i <= 6; i++) fx.publish(i);
-		await flush();
-		expect(fx.started).toEqual([1, 2]);
-		// Every call hangs; deadlines keep the effect moving through its queue.
-		await new Promise((r) => setTimeout(r, 150));
-		expect(fx.started).toEqual([1, 2, 3, 4]);
-		for (let i = 7; i <= 8; i++) fx.publish(i);
-		await new Promise((r) => setTimeout(r, 150));
-		expect(fx.started).toEqual([1, 2, 3, 4, 7, 8]);
-		expect(errors.filter((e) => e.err?.code === 'OVERLOADED')).toHaveLength(1);
-		expect(errors.filter((e) => e.err?.code === 'TIMEOUT').length).toBeGreaterThanOrEqual(2);
-		await fx.drain();
+		vi.useFakeTimers();
+		try {
+			const { errors } = captureErrors();
+			const fx = setupEffect({ maxConcurrent: 2, maxQueued: 2, timeoutMs: 400 });
+			for (let i = 1; i <= 6; i++) fx.publish(i);
+			await flush();
+			expect(fx.started).toEqual([1, 2]);
+			// Every call hangs; deadlines keep the effect moving through its queue.
+			await vi.advanceTimersByTimeAsync(500);
+			expect(fx.started).toEqual([1, 2, 3, 4]);
+			for (let i = 7; i <= 8; i++) fx.publish(i);
+			await vi.advanceTimersByTimeAsync(500);
+			expect(fx.started).toEqual([1, 2, 3, 4, 7, 8]);
+			expect(errors.filter((e) => e.err?.code === 'OVERLOADED')).toHaveLength(1);
+			expect(errors.filter((e) => e.err?.code === 'TIMEOUT')).toHaveLength(2);
+			await fx.drain();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('releases a hung call between timeoutMs and 1.25 x timeoutMs, 30000 by default', async () => {

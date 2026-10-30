@@ -242,6 +242,17 @@ describe('derived', () => {
 
 describe('effect', () => {
 	it('counts handler results and reports the age of the oldest waiting call', async () => {
+		let mono = 1000;
+		setRuntimeEnv({ clock: { monotonic: () => mono } });
+		vi.useFakeTimers();
+		try {
+			await countsAndAge(() => mono, (v) => { mono = v; });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	async function countsAndAge(getMono, setMono) {
 		setOperationalEventSink(() => {});
 		onError(() => {});
 		const waiting = [];
@@ -256,8 +267,10 @@ describe('effect', () => {
 		expect(total('effect', 'error')).toBe(1);
 		expect(gauge(INFLIGHT, 'effect')).toBe(1);
 		expect(gauge(QUEUED, 'effect')).toBe(2);
-		await new Promise((r) => setTimeout(r, 1100));
-		expect(gauge(AGE, 'effect')).toBeGreaterThanOrEqual(0.9);
+		// The oldest call has waited 1.5 s when the next sample runs.
+		setMono(getMono() + 1500);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(gauge(AGE, 'effect')).toBe(1.5);
 		for (let rounds = 0; rounds < 10; rounds++) {
 			for (const release of waiting.splice(0)) release();
 			await flush();
@@ -267,7 +280,7 @@ describe('effect', () => {
 		expect(gauge(QUEUED, 'effect')).toBe(0);
 		expect(gauge(INFLIGHT, 'effect')).toBe(0);
 		expect(gauge(AGE, 'effect')).toBe(0);
-	}, 10000);
+	}
 
 	it('writes the running and waiting gauges once per microtask, not once per call', async () => {
 		const effect = live.effect(['burst'], () => {});
