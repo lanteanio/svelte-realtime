@@ -386,3 +386,68 @@ describe('in-memory job store capacity', () => {
 		expect(() => s.begin({ id: 'over', runId: 'r', userIdHash: 'h', tenantId: null, userId: 'u', cascade: true, at: 0, leaseUntil: 1 })).toThrow(/full/);
 	});
 });
+
+describe('erasure input and store bounds', () => {
+	afterEach(() => configureWebhooks({ deadLetter: false }));
+
+	/** Settles with the outcome, or 'hung' when nothing settles within `ms`. */
+	const within = (p, ms = 2000) => Promise.race([
+		p.then((v) => ({ value: v }), (e) => ({ error: e })),
+		new Promise((r) => setTimeout(() => r('hung'), ms))
+	]);
+
+	it('validates the cascade a resume replays and records the job as failed', async () => {
+		const jobs = createForgetJobStore();
+		const purgeUser = vi.fn(async () => 0);
+		configureForget({ store: partial(), jobs });
+		await live.forget('alice', { tenantId: null }).catch(() => {});
+		for (const cascade of [{ crdt: 'notes:1' }, 'yes', { crdt: [''] }]) {
+			configureForget({ store: { purgeUser }, jobs: { ...jobs, claim: (r) => { const c = jobs.claim(r); return c && { ...c, cascade }; } } });
+			const [job] = await listForgetJobs();
+			const res = await resumeForgetJobs({ id: job.id });
+			expect(res.results).toEqual([{ id: job.id, status: 'failed', code: 'INVALID_REQUEST' }]);
+		}
+		expect(purgeUser).not.toHaveBeenCalled();
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'failed', error: { code: 'INVALID_REQUEST' } });
+	});
+
+	it('bounds a durable store that never answers', async () => {
+		configureForget({ store: { purgeUser: () => new Promise(() => {}) }, timeoutMs: 50 });
+		const r = await within(live.forget('alice', { tenantId: null }));
+		expect(r).not.toBe('hung');
+		expect(r.error).toMatchObject({ code: 'FORGET_STORE_FAILED' });
+	});
+
+	it('bounds every surface on its own, so one hung surface does not starve the rest', async () => {
+		configureWebhooks({ deadLetter: { add() { return null; }, purgeUser: () => new Promise(() => {}) } });
+		configureForget({ store: durable(), jobs: true, timeoutMs: 50 });
+		const r = await within(live.forget('alice', { tenantId: null }));
+		expect(r.error).toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		expect(rows.has('alice')).toBe(false);
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'failed', error: { failedSurfaces: ['webhookDeadLetter'] } });
+	});
+
+	it('bounds a job store that never answers', async () => {
+		const purgeUser = vi.fn(async () => 0);
+		const jobs = createForgetJobStore();
+		configureForget({ store: { purgeUser }, jobs: { ...jobs, begin: () => new Promise(() => {}) }, timeoutMs: 50 });
+		const r = await within(live.forget('alice', { tenantId: null }));
+		expect(r.error).toMatchObject({ code: 'FORGET_JOB_FAILED' });
+		expect(purgeUser).not.toHaveBeenCalled();
+	});
+
+	it('keeps the lease longer than every bounded wait of a run', async () => {
+		const leases = [];
+		const jobs = createForgetJobStore();
+		configureForget({ jobs: { ...jobs, begin: (i) => { leases.push(i.leaseUntil - i.at); return jobs.begin(i); } }, timeoutMs: 1000 });
+		await live.forget('alice', { tenantId: null });
+		// begin, each in-memory surface, the durable store and the outcome write.
+		expect(leases[0]).toBeGreaterThan(1000 * (7 + 3));
+	});
+
+	it('validates timeoutMs', () => {
+		for (const timeoutMs of [0, -1, 1.5, '50', 600_001]) {
+			expect(() => configureForget({ timeoutMs })).toThrow(/timeoutMs/);
+		}
+	});
+});

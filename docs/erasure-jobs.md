@@ -34,4 +34,8 @@ A store that must survive restarts implements these methods, each atomic per job
 
 A single `due_at` column (or sorted-set score) holds the lease end while a run holds the job and `retryAt` after a failure, so `due` is one range read. In PostgreSQL `claim` is `UPDATE ... SET lease_run_id = $runId, due_at = $leaseUntil, attempts = attempts + 1 WHERE id = $id AND status <> 'completed' AND (lease_run_id IS NULL OR due_at <= $at) RETURNING ...`, and `complete`/`fail` add `AND lease_run_id = $runId`; in Redis each method is one script over the job hash and the due sorted set.
 
+Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - is bounded by `configureForget({ timeoutMs })` (default 30 seconds). A lease lasts the number of those waits plus one, times `timeoutMs`, so a live run records its outcome while it holds the lease and only a run whose process died lets its job fall due early. A call that times out keeps running in the store, so every surface must tolerate a late finish; a timed-out `begin` may still create the job, which then falls due when its lease ends.
+
+A resume replays the stored `cascade` only in a shape `live.forget` accepts; a damaged record fails with `INVALID_REQUEST` and stays listed as a failed job.
+
 An outcome a store does not record (it throws, or answers `false` because the run no longer holds the lease) leaves the job unfinished and emits `forget.job-unrecorded`; the job becomes due again when the lease ends.

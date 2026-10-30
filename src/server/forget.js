@@ -18,7 +18,7 @@
 // store, it only duck-types `store.purgeUser`.
 
 import { _IS_DEV } from './env.js';
-import { wallEpoch, randomUuid } from '../shared/runtime.js';
+import { wallEpoch, randomUuid, setTimer, clearTimer } from '../shared/runtime.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _validTenantId, _tenantKey, _isTenancyEnabled } from './tenant.js';
@@ -77,9 +77,16 @@ let _forgetJobs = null;
 
 const _JOB_METHODS = ['begin', 'claim', 'complete', 'fail', 'list', 'due'];
 
-// A run's lease on its job. A run records its outcome well within it; a run
-// whose process died leaves the job due again once it ends.
-const _LEASE_MS = 5 * 60_000;
+const _DEFAULT_TIMEOUT_MS = 30_000;
+const _MAX_TIMEOUT_MS = 600_000;
+
+/**
+ * The longest an erasure waits on any one store call (the job record, each
+ * surface, the durable store, the outcome) before treating it as failed. Set
+ * via `configureForget({ timeoutMs })`.
+ */
+let _forgetTimeoutMs = _DEFAULT_TIMEOUT_MS;
+
 const _RETRY_BASE_MS = 1000;
 const _RETRY_MAX_MS = 60 * 60_000;
 /** @type {ReadonlySet<string>} */
@@ -99,21 +106,54 @@ function _readHashKey(key) {
 }
 
 /**
+ * A run's lease on its job: longer than every bounded wait of one run (the job
+ * record, each in-memory surface, the durable store, the outcome) plus one
+ * more, so a live run always records its outcome while it holds the lease and
+ * only a run whose process died lets its job fall due.
+ */
+function _leaseMs() {
+	return (_descriptors.length + 4) * _forgetTimeoutMs;
+}
+
+/**
+ * Wait for a store call, at most `_forgetTimeoutMs`. A plain value passes
+ * through; a call that does not settle in time rejects, while the call itself
+ * keeps running, so every erasure surface is idempotent under a late finish.
+ * @template T
+ * @param {T | Promise<T>} value
+ * @returns {T | Promise<T>}
+ */
+function _bounded(value) {
+	if (value === null || (typeof value !== 'object' && typeof value !== 'function') || typeof (/** @type {any} */ (value)).then !== 'function') return value;
+	return new Promise((resolve, reject) => {
+		const timer = setTimer(() => reject(new Error('store call timed out')), _forgetTimeoutMs);
+		/** @type {Promise<T>} */ (value).then(
+			(v) => { clearTimer(timer); resolve(v); },
+			(e) => { clearTimer(timer); reject(e); }
+		);
+	});
+}
+
+/**
  * Configure the forget subsystem. `store` plugs in durable erasure; `platform`
  * supplies the cluster Redis handle. `hashKey` opts audit records into HMAC.
  * `jobs` records each erasure as a resumable job (`true` = in-memory store).
+ * `timeoutMs` bounds each store call an erasure waits on.
  * Omitted settings are retained; `null` clears all of them.
  *
- * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null } | null} config
+ * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null, timeoutMs?: number } | null} config
  */
 export function configureForget(config) {
 	if (config === null) { _resetForget(); return; }
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
 	}
-	const { store, platform, hashKey, jobs } = config;
-	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined) {
-		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey or jobs');
+	const { store, platform, hashKey, jobs, timeoutMs } = config;
+	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined && timeoutMs === undefined) {
+		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey, jobs or timeoutMs');
+	}
+	if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > _MAX_TIMEOUT_MS)) {
+		throw new Error('[svelte-realtime] configureForget: timeoutMs must be an integer from 1 to ' + _MAX_TIMEOUT_MS);
 	}
 	if (jobs !== undefined && jobs !== null && typeof jobs !== 'boolean' &&
 		(typeof jobs !== 'object' || _JOB_METHODS.some((m) => typeof (/** @type {any} */ (jobs))[m] !== 'function'))) {
@@ -128,6 +168,7 @@ export function configureForget(config) {
 	if (platform !== undefined) _forgetPlatform = platform;
 	_forgetHashKey = nextHashKey;
 	if (jobs !== undefined) _forgetJobs = jobs === true ? createForgetJobStore() : (jobs || null);
+	if (timeoutMs !== undefined) _forgetTimeoutMs = timeoutMs;
 }
 
 /**
@@ -280,6 +321,20 @@ function _reportJobUnrecorded(job, outcome) {
 }
 
 /**
+ * What is wrong with a cascade option, or null when it is valid: a boolean, or
+ * an object whose optional `crdt` is an array of non-empty document names.
+ * @param {unknown} cascade
+ * @returns {'crdt' | 'shape' | null}
+ */
+function _cascadeProblem(cascade) {
+	if (typeof cascade === 'boolean') return null;
+	if (cascade === null || typeof cascade !== 'object') return 'shape';
+	const crdt = /** @type {any} */ (cascade).crdt;
+	if (crdt !== undefined && (!Array.isArray(crdt) || crdt.some((n) => typeof n !== 'string' || n.length === 0))) return 'crdt';
+	return null;
+}
+
+/**
  * Attach the job reference to an erasure error for the server caller. It is
  * not enumerable and not in `details`, so an error rethrown to a client or
  * serialized into a response does not carry it.
@@ -324,13 +379,11 @@ const _liveForget = async function forget(userId, opts) {
 	// which documents the user contributed to). The value is also threaded to
 	// every descriptor and the durable store unchanged.
 	const cascade = o.cascade === undefined ? true : o.cascade;
-	if (cascade !== undefined && typeof cascade === 'object' && cascade !== null) {
-		if (cascade.crdt !== undefined) {
-			if (!Array.isArray(cascade.crdt) || cascade.crdt.some((n) => typeof n !== 'string' || n.length === 0)) {
-				throw new LiveError('INVALID_REQUEST', 'live.forget: cascade.crdt must be an array of non-empty document topic names');
-			}
-		}
-	} else if (typeof cascade !== 'boolean') {
+	const cascadeProblem = _cascadeProblem(cascade);
+	if (cascadeProblem === 'crdt') {
+		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade.crdt must be an array of non-empty document topic names');
+	}
+	if (cascadeProblem === 'shape') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade must be a boolean or an object ({ crdt?: string[] })');
 	}
 	const onForget = o.onForget;
@@ -377,7 +430,7 @@ async function _runErasure(jobs, job, run, onForget) {
 		if (job !== null && !job.claimed) {
 			const at = wallEpoch();
 			try {
-				await jobs.begin({ id: job.id, runId: job.runId, userIdHash, tenantId, userId, cascade, at, leaseUntil: at + _LEASE_MS });
+				await _bounded(jobs.begin({ id: job.id, runId: job.runId, userIdHash, tenantId, userId, cascade, at, leaseUntil: at + _leaseMs() }));
 			} catch {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
@@ -433,7 +486,7 @@ async function _runErasure(jobs, job, run, onForget) {
 async function _recordOutcome(jobs, method, outcome) {
 	let recorded;
 	try {
-		recorded = await jobs[method](outcome);
+		recorded = await _bounded(jobs[method](outcome));
 	} catch {
 		recorded = false;
 	}
@@ -474,7 +527,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 		if (skip.has(d.name)) continue;
 		let count = 0;
 		try {
-			count = await d.run(tenantId, userId, cascade);
+			count = await _bounded(d.run(tenantId, userId, cascade));
 			if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
 			doneSurfaces.push(d.name);
 		} catch {
@@ -509,7 +562,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	if (_forgetStore && !skip.has('durable')) {
 		let successions = null;
 		try {
-			const durable = await _forgetStore.purgeUser(tenantId, userId, cascade);
+			const durable = await _bounded(_forgetStore.purgeUser(tenantId, userId, cascade));
 			// The store may return a total (number), a per-store count
 			// breakdown (object), or the owner-succession envelope
 			// `{ rowsAffected?, ownerSuccessions? }` - detected by an
@@ -598,6 +651,7 @@ export function _resetForget() {
 	_forgetPlatform = null;
 	_forgetHashKey = null;
 	_forgetJobs = null;
+	_forgetTimeoutMs = _DEFAULT_TIMEOUT_MS;
 }
 
 /** @param {string} message */
@@ -654,7 +708,7 @@ export async function listForgetJobs(filter = {}) {
 	if (jobs === null) return [];
 	let rows;
 	try {
-		rows = await jobs.list(status === undefined ? { limit } : { status, limit });
+		rows = await _bounded(jobs.list(status === undefined ? { limit } : { status, limit }));
 	} catch {
 		throw new LiveError('FORGET_JOB_FAILED', 'listForgetJobs: the erasure job store could not be read');
 	}
@@ -691,7 +745,7 @@ export async function resumeForgetJobs(opts = {}) {
 		ids = [id];
 	} else {
 		try {
-			const due = await jobs.due({ at: wallEpoch(), limit });
+			const due = await _bounded(jobs.due({ at: wallEpoch(), limit }));
 			ids = (Array.isArray(due) ? due : []).slice(0, limit).map((j) => String(j.id));
 		} catch {
 			throw new LiveError('FORGET_JOB_FAILED', 'resumeForgetJobs: the erasure job store could not be read');
@@ -703,7 +757,7 @@ export async function resumeForgetJobs(opts = {}) {
 		const at = wallEpoch();
 		let claim;
 		try {
-			claim = await jobs.claim({ id: jobId, runId, at, leaseUntil: at + _LEASE_MS });
+			claim = await _bounded(jobs.claim({ id: jobId, runId, at, leaseUntil: at + _leaseMs() }));
 		} catch {
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code: 'FORGET_JOB_FAILED' });
@@ -724,8 +778,14 @@ export async function resumeForgetJobs(opts = {}) {
 				throw _invalidJobRequest('resumeForgetJobs: the stored job has no valid user id');
 			}
 			const scope = tenantId == null ? null : _validTenantId(tenantId);
+			// The stored cascade is replayed only in a shape live.forget accepts,
+			// so a damaged record cannot run a different erasure than requested.
+			const stored = cascade ?? true;
+			if (_cascadeProblem(stored) !== null) {
+				throw _invalidJobRequest('resumeForgetJobs: the stored job has an invalid cascade');
+			}
 			const userIdHash = typeof claim.userIdHash === 'string' ? claim.userIdHash : _hashUserId(userId, _forgetHashKey);
-			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: cascade ?? true }, onForget);
+			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: stored }, onForget);
 			out.completed++;
 			out.results.push({ id: jobId, status: 'completed' });
 		} catch (err) {

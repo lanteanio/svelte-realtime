@@ -4832,6 +4832,11 @@ export interface ForgetStore {
  * `jobs` records every erasure as a resumable job: `true` for the in-memory
  * store, a `ForgetJobStore` that survives restarts, or `null`/`false` for none
  * (the default). With a job store, `live.forget` requires `tenantId`.
+ * `timeoutMs` (1 to 600000, default 30000) bounds each store call an erasure
+ * waits on - the job record, each in-memory surface, the durable store and
+ * the outcome write - so a store that never answers fails that surface
+ * instead of holding `live.forget` forever. A job's lease lasts longer than
+ * all of a run's bounded waits together.
  */
 export function configureForget(
 	config:
@@ -4841,6 +4846,8 @@ export function configureForget(
 			/** UTF-8 string or bytes, at least 32 bytes; null restores unkeyed audit identifiers. */
 			hashKey?: string | Uint8Array | null;
 			jobs?: boolean | ForgetJobStore | null;
+			/** Longest wait on one store call, in ms (1 to 600000, default 30000). */
+			timeoutMs?: number;
 		}
 		| null
 ): void;
