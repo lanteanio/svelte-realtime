@@ -18,7 +18,7 @@ import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './rate-limit.js';
-import { _recordRpcMetrics, _recordRpcDelivery, _recordRejectedRpc, _rpcClosedSockets } from './metrics.js';
+import { _recordRpcMetrics, _recordRpcDelivery, _recordRejectedRpc, _recordRpcOverload, _rpcClosedSockets } from './metrics.js';
 import { _shouldShed } from './admission.js';
 import { _getIdentityKey, _getAuthenticatedId } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
@@ -30,7 +30,7 @@ import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _h
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
 import { beginDeliveryAdmission, endDeliveryAdmission } from './delivery-authorization.js';
-import { _rpcRoute, _admitRpc, _releaseRpc } from './rpc-admission.js';
+import { RPC_ROUTE, rpcTick, _rpcRoute, _admitRpc, _releaseRpc } from './rpc-admission.js';
 
 const textDecoder = new TextDecoder();
 
@@ -1513,15 +1513,16 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 
 	// Occupancy admission: a call that cannot start waits in the bounded queue
 	// or is refused at once, and a refused call runs nothing.
-	const route = _rpcRoute(path, fn);
-	let permit = _admitRpc(ws, route);
-	if (/** @type {any} */ (permit).ctrl === undefined) {
+	const route = /** @type {any} */ (fn)[RPC_ROUTE] || _rpcRoute(path, fn);
+	const arrived = rpcTick;
+	let permit = _admitRpc(ws, route, arrived);
+	if (/** @type {any} */ (permit).active === undefined) {
 		if (/** @type {any} */ (permit).reason === undefined) permit = await permit;
-		if (/** @type {any} */ (permit).ctrl === undefined) {
+		if (/** @type {any} */ (permit).active === undefined) {
 			return { id, ..._overloaded(path, /** @type {any} */ (permit), _metricsStart, ws) };
 		}
 	}
-	const sig = /** @type {import('./rpc-admission.js').RpcSignal} */ (permit);
+	const conn = /** @type {import('./rpc-admission.js').RpcConn} */ (permit);
 	// A middleware that answers early leaves the handler running; its permit
 	// then goes back when that handler settles.
 	let detached = false;
@@ -1530,11 +1531,12 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	try {
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
 	} catch (err) {
-		// A socket that closed under the call can throw on access.
-		_releaseRpc(route, sig);
+		// A closed socket or a tenant resolver can throw; the call then holds nothing.
+		_releaseRpc(route, conn, null);
 		throw err;
 	}
-	ctx.abortSignal = sig.signal;
+	ctx._rpcConn = conn;
+	ctx._rpcDeadline = route.ticks === 0 ? -1 : arrived + route.ticks;
 	/** @type {{ topic: any, claimTopic: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} */
 	const _subscribedRef = { topic: null, claimTopic: null };
 	// Only a middleware can answer while the chain still runs; the chain's
@@ -1547,7 +1549,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 		settled() {
 			if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
 			if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
-			_releaseRpc(route, sig);
+			_releaseRpc(route, conn, ctx);
 		}
 	} : undefined;
 
@@ -1676,7 +1678,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			});
 		return { id, ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' };
 	} finally {
-		if (!detached) _releaseRpc(route, sig);
+		if (!detached) _releaseRpc(route, conn, ctx);
 	}
 }
 
@@ -1695,7 +1697,8 @@ function _overloaded(path, rejection, metricsStart, ws) {
 		return { ok: false, code: 'CONNECTION_CLOSED', error: 'The connection closed' };
 	}
 	const { reason, scope } = rejection;
-	_recordRpcMetrics(path, 'OVERLOADED', metricsStart, ws, reason, scope);
+	_recordRpcMetrics(path, 'OVERLOADED', metricsStart, ws);
+	_recordRpcOverload(path, reason, scope);
 	if (rejection.expired) return { ok: false, code: 'OVERLOADED', error: 'The call waited past its deadline', reason, scope };
 	if (reason === 'queue_full') return { ok: false, code: 'OVERLOADED', error: 'The call queue is full', reason, scope };
 	return { ok: false, code: 'OVERLOADED', error: 'Too many concurrent calls', reason, scope };
@@ -1772,26 +1775,28 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		return;
 	}
 
-	const route = _rpcRoute(path, fn);
-	let permit = _admitRpc(ws, route);
-	if (/** @type {any} */ (permit).ctrl === undefined) {
+	const route = /** @type {any} */ (fn)[RPC_ROUTE] || _rpcRoute(path, fn);
+	const arrived = rpcTick;
+	let permit = _admitRpc(ws, route, arrived);
+	if (/** @type {any} */ (permit).active === undefined) {
 		if (/** @type {any} */ (permit).reason === undefined) permit = await permit;
-		if (/** @type {any} */ (permit).ctrl === undefined) {
+		if (/** @type {any} */ (permit).active === undefined) {
 			_respond(ws, platform, id, _overloaded(path, /** @type {any} */ (permit), _metricsStart, ws), requestId, path);
 			return;
 		}
 	}
-	const sig = /** @type {import('./rpc-admission.js').RpcSignal} */ (permit);
+	const conn = /** @type {import('./rpc-admission.js').RpcConn} */ (permit);
 	let detached = false;
 
 	let ctx;
 	try {
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), null, null, requestId);
 	} catch (err) {
-		_releaseRpc(route, sig);
+		_releaseRpc(route, conn, null);
 		throw err;
 	}
-	ctx.abortSignal = sig.signal;
+	ctx._rpcConn = conn;
+	ctx._rpcDeadline = route.ticks === 0 ? -1 : arrived + route.ticks;
 
 	try {
 		let answer = await _runRpcChain(ctx, async () => {
@@ -1810,7 +1815,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			return { ok: true, data: result };
-		}, _hasMiddleware() ? { path, cancel() { detached = true; }, settled() { _releaseRpc(route, sig); } } : undefined);
+		}, _hasMiddleware() ? { path, cancel() { detached = true; }, settled() { _releaseRpc(route, conn, ctx); } } : undefined);
 		// Consumed only by an answer that succeeds, so a middleware refusal
 		// leaves the one-shot deprecation signal for a later call.
 		if (answer.ok !== false) {
@@ -1846,7 +1851,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, requestId, path);
 		}
 	} finally {
-		if (!detached) _releaseRpc(route, sig);
+		if (!detached) _releaseRpc(route, conn, ctx);
 	}
 }
 

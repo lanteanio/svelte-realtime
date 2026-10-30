@@ -1,4 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
+
+/** A full collection, so heap readings compare what is still reachable. */
+function gc() {
+	if (!globalThis.gc) {
+		setFlagsFromString('--expose-gc');
+		globalThis.gc = runInNewContext('gc');
+	}
+	globalThis.gc();
+}
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
@@ -14,7 +25,7 @@ beforeEach(async () => {
 	api.__register('warm/up', api.live(() => 0));
 	api.handleRpc(mockWs({ id: 'warm' }), text('warm/up', 'warm'), mockPlatform());
 	await settle();
-});
+}, 30000);
 afterEach(() => {
 	admission._resetRpcAdmission();
 	api._resetMiddleware?.();
@@ -31,16 +42,20 @@ function fakeTime() {
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 const text = (path, id, args = []) => toArrayBuffer({ rpc: path, id, args });
 
-/** A handler that holds every call until `open()` and records the ctx of each call it is running. */
+/**
+ * A handler that holds every call until `open()` and records the ctx of each
+ * call it is running. `another()` makes one more function on the same gate,
+ * for a second route.
+ */
 function gated() {
 	let open;
 	const gate = new Promise(resolve => { open = resolve; });
 	const running = new Set();
-	const handler = api.live(async (ctx) => {
+	const make = () => api.live(async (ctx) => {
 		running.add(ctx);
 		try { await gate; return 'done'; } finally { running.delete(ctx); }
 	});
-	return { handler, running, open: () => open() };
+	return { handler: make(), another: make, running, open: () => open() };
 }
 
 /** The reply each correlation id got, in arrival order. */
@@ -82,30 +97,35 @@ describe('a gated handler under a flood of arrivals', () => {
 		});
 	}
 
-	it('keeps retained call state flat as arrivals grow', async () => {
-		const retained = [];
+	it('keeps the retained heap flat as arrivals grow', async () => {
+		// Each call carries 4 KB of arguments. Admitted, the worker retains
+		// 512 calls whatever arrives; without admission it retains every one,
+		// about 80 MB more at 20000 than at 1000.
+		const payload = 'x'.repeat(4096);
+		const held = [];
+		const platform = { ...mockPlatform(), send() { return 1; } };
 		for (const arrivals of [1000, 20000]) {
-			admission._resetRpcAdmission();
-			const { handler, running, open } = gated();
-			api.__register('flood/flat', handler);
-			const platform = mockPlatform();
-			const sockets = Array.from({ length: Math.ceil(arrivals / 10) }, (_, i) => mockWs({ id: 'u' + i }));
-			for (let i = 0; i < arrivals; i++) api.handleRpc(sockets[i % sockets.length], text('flood/flat', 'c' + i, ['x'.repeat(64)]), platform);
+			const { handler, open } = gated();
+			const path = 'flood/flat' + arrivals;
+			api.__register(path, handler);
+			let sockets = Array.from({ length: Math.ceil(arrivals / 10) }, (_, i) => mockWs({ id: 'u' + i }));
+			gc();
+			const before = process.memoryUsage().heapUsed;
+			for (let i = 0; i < arrivals; i++) api.handleRpc(sockets[i % sockets.length], text(path, 'c' + i, [payload]), platform);
 			await settle();
-			const snap = admission._rpcAdmissionSnapshot();
-			retained.push(running.size + (snap.queued ?? 0));
+			sockets = null;
+			gc();
+			held.push(process.memoryUsage().heapUsed - before);
 			open();
 			await settle();
 			await settle();
 		}
-		// Running contexts plus queued calls are the call state the worker
-		// holds; without admission it grows with the arrivals.
-		expect(retained).toEqual([512, 512]);
+		expect(held[1] - held[0]).toBeLessThan(8 * 1024 * 1024);
 	});
 
 	it('bounds the worker at globalConcurrent across routes', async () => {
-		const { handler, running, open } = gated();
-		for (let r = 0; r < 5; r++) api.__register('flood/r' + r, handler);
+		const { another, running, open } = gated();
+		for (let r = 0; r < 5; r++) api.__register('flood/r' + r, another());
 		const platform = mockPlatform();
 		const sockets = Array.from({ length: 400 }, (_, i) => mockWs({ id: 'u' + i }));
 		for (let i = 0; i < 2000; i++) api.handleRpc(sockets[i % 400], text('flood/r' + (i % 5), 'c' + i), platform);
@@ -124,9 +144,9 @@ describe('a gated handler under a flood of arrivals', () => {
 describe('scope order and the disabled queue', () => {
 	it('names the connection, then the route, then the global scope as the limit', async () => {
 		api.configureRpc({ perConnectionConcurrent: 2, perRouteConcurrent: 3, globalConcurrent: 4, maxQueue: 0 });
-		const { handler, open } = gated();
+		const { handler, another, open } = gated();
 		api.__register('order/a', handler);
-		api.__register('order/b', handler);
+		api.__register('order/b', another());
 		const platform = mockPlatform();
 		const one = mockWs({ id: 'one' });
 		const two = mockWs({ id: 'two' });
@@ -208,6 +228,22 @@ describe('route options', () => {
 		await settle();
 	});
 
+	it('one function registered under two paths is one route', async () => {
+		api.configureRpc({ maxQueue: 0 });
+		let open;
+		const gate = new Promise(resolve => { open = resolve; });
+		const shared = api.live(async () => { await gate; return 1; }, { perRouteConcurrent: 1 });
+		api.__register('route/first', shared);
+		api.__register('route/second', shared);
+		const platform = mockPlatform();
+		api.handleRpc(mockWs({ id: 'a' }), text('route/first', 'f'), platform);
+		api.handleRpc(mockWs({ id: 'b' }), text('route/second', 's'), platform);
+		await settle();
+		expect(replies(platform).get('s')).toMatchObject({ code: 'OVERLOADED', scope: 'route' });
+		open();
+		await settle();
+	});
+
 	it('reads a route option through a wrapper', async () => {
 		api.configureRpc({ maxQueue: 0 });
 		let open;
@@ -259,7 +295,7 @@ describe('option validation', () => {
 
 	it('takes defaults for omitted keys and 0 to disable a limit', () => {
 		api.realtime({ rpc: { globalConcurrent: 0 } });
-		expect(admission._rpcAdmissionSnapshot().config).toEqual({ perConnectionConcurrent: 32, perRouteConcurrent: 256, globalConcurrent: 0, maxQueue: 256, timeout: 30000 });
+		expect(admission._rpcAdmissionSnapshot().config).toEqual({ perConnectionConcurrent: 32, perConnectionQueue: 32, perRouteConcurrent: 256, globalConcurrent: 0, maxQueue: 256, timeout: 30000 });
 		api.configureRpc(null);
 		expect(admission._rpcAdmissionSnapshot().config).toEqual(admission.RPC_ADMISSION_DEFAULTS);
 	});
@@ -442,7 +478,8 @@ describe('other call shapes', () => {
 		await settle();
 		expect(runs).toBe(1);
 		expect(platform.sent.filter(row => row.topic === '__rpc')).toHaveLength(0);
-		expect(counters.get('svelte_realtime_rpc_errors_total')).toEqual([{ path: 'shape/move', code: 'OVERLOADED', reason: 'concurrency_limit', scope: 'connection' }]);
+		expect(counters.get('svelte_realtime_rpc_errors_total')).toEqual([{ path: 'shape/move', code: 'OVERLOADED' }]);
+		expect(counters.get('svelte_realtime_rpc_overloaded_total')).toEqual([{ path: 'shape/move', reason: 'concurrency_limit', scope: 'connection' }]);
 		finish();
 		await settle();
 	});
@@ -518,7 +555,8 @@ describe('other call shapes', () => {
 });
 
 describe('metrics', () => {
-	it('writes in-flight and queued gauges per route', async () => {
+	it('samples in-flight and queued gauges per route', async () => {
+		fakeTime();
 		const gauges = new Map();
 		api.live.metrics({
 			counter() { return { inc() {} }; },
@@ -531,17 +569,23 @@ describe('metrics', () => {
 		const platform = mockPlatform();
 		const ws = mockWs({ id: 'u' });
 		for (let i = 0; i < 5; i++) api.handleRpc(ws, text('gauge/slow', 'g' + i), platform);
-		await settle();
+		await vi.advanceTimersByTimeAsync(0);
+		// Calls move counters only; the sampler writes them.
+		expect(gauges.get('svelte_realtime_rpc_inflight').some(([path]) => path === 'gauge/slow')).toBe(false);
+		await vi.advanceTimersByTimeAsync(1000);
 		expect(gauges.get('svelte_realtime_rpc_inflight').at(-1)).toEqual(['gauge/slow', 2]);
 		expect(gauges.get('svelte_realtime_rpc_queued').at(-1)).toEqual(['gauge/slow', 3]);
+		const writes = gauges.get('svelte_realtime_rpc_inflight').length;
+		await vi.advanceTimersByTimeAsync(1000);
+		// Unchanged counts are not written again.
+		expect(gauges.get('svelte_realtime_rpc_inflight')).toHaveLength(writes);
 		open();
-		await settle();
-		await settle();
+		await vi.advanceTimersByTimeAsync(1000);
 		expect(gauges.get('svelte_realtime_rpc_inflight').at(-1)).toEqual(['gauge/slow', 0]);
 		expect(gauges.get('svelte_realtime_rpc_queued').at(-1)).toEqual(['gauge/slow', 0]);
 	});
 
-	it('labels a refusal with its reason and scope on the error counter', async () => {
+	it('counts a refusal as an OVERLOADED error and by reason and scope', async () => {
 		const counters = new Map();
 		api.live.metrics({
 			counter({ name }) { const rows = []; counters.set(name, rows); return { inc(labels) { rows.push(labels); } }; },
@@ -555,7 +599,9 @@ describe('metrics', () => {
 		const ws = mockWs({ id: 'u' });
 		for (let i = 0; i < 3; i++) api.handleRpc(ws, text('gauge/full', 'f' + i), platform);
 		await settle();
-		expect(counters.get('svelte_realtime_rpc_errors_total')).toEqual([{ path: 'gauge/full', code: 'OVERLOADED', reason: 'queue_full', scope: 'global' }]);
+		expect(counters.get('svelte_realtime_rpc_errors_total')).toEqual([{ path: 'gauge/full', code: 'OVERLOADED' }]);
+		expect(counters.get('svelte_realtime_rpc_overloaded_total')).toEqual([{ path: 'gauge/full', reason: 'queue_full', scope: 'global' }]);
+		for (const rows of counters.values()) for (const labels of rows) for (const value of Object.values(labels || {})) expect(value).not.toBe('');
 		open();
 		await settle();
 		await settle();

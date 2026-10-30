@@ -1,5 +1,5 @@
 // @ts-check
-import { setIntervalTimer, clearIntervalTimer, microtask } from '../shared/runtime.js';
+import { setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { state } from './state.js';
 
@@ -7,24 +7,33 @@ import { state } from './state.js';
 // resolved to a registered function. A call holds one permit in each of three
 // scopes - its connection, its route and the worker - from admission until its
 // handler settles. A call that finds a scope full waits in one bounded FIFO
-// shared by the worker; a full queue (or a disabled one) refuses it at once.
-// The vocabulary is the adapter's established-message admission: the reasons
-// are `concurrency_limit` and `queue_full`, every limit is per worker, and a
-// limit of 0 is disabled.
+// shared by the worker, in which one connection holds a bounded share; a full
+// queue (or a disabled one) refuses it at once. The vocabulary is the
+// adapter's established-message admission: the reasons are
+// `concurrency_limit` and `queue_full`, every limit is per worker, and a limit
+// of 0 is disabled.
 //
-// Every call also gets an AbortSignal that fires at its deadline or when its
-// connection closes. Instead of one controller and one timer per call, calls
-// share a controller per connection and deadline tick: a ticker runs every
-// _TICK_MS while anything is pending, a call's deadline lands in the tick at
-// or after it, and the signal fires between the deadline and one tick past
-// it. A connection that keeps calling reuses its controller, so the
-// unsaturated path allocates nothing per call. A permit is released when the
+// The unsaturated path is three compares and three counters: the route's
+// record hangs off its registered function, the connection's record is found
+// by socket (the last socket is remembered, so a connection calling again
+// skips the map), and the worker's count is a module integer.
+//
+// A call's deadline is counted in ticks of RPC_DEADLINE_TICK_MS from the tick
+// it arrived in. The ticker runs while calls run, wait or hold a deadline, and
+// stops on the first tick that finds none, so an idle worker has no timer. A
+// call's `ctx.abortSignal` is created when the handler first reads it; its
+// controller then joins the connection's running calls and the bucket of its
+// deadline tick, and the ticker aborts what is in a bucket when its tick
+// arrives, so the signal fires within one tick after the deadline. When the call settles, its
+// controller leaves both and is never aborted afterwards. A handler that never
+// reads the signal allocates nothing for it. A permit is released when the
 // handler settles, never when its signal fires: a handler that ignores the
 // signal keeps holding its own permit and nothing else.
 
 /** The limits a worker starts with. */
 export const RPC_ADMISSION_DEFAULTS = Object.freeze({
 	perConnectionConcurrent: 32,
+	perConnectionQueue: 32,
 	perRouteConcurrent: 256,
 	globalConcurrent: 1024,
 	maxQueue: 256,
@@ -34,12 +43,15 @@ export const RPC_ADMISSION_DEFAULTS = Object.freeze({
 const _KEYS = new Set(Object.keys(RPC_ADMISSION_DEFAULTS));
 const _MAX_TIMEOUT_MS = 2147483647;
 /** Deadline resolution: a signal fires at most this long after its deadline. */
-const _TICK_MS = 250;
+export const RPC_DEADLINE_TICK_MS = 250;
+/** A disabled limit compares as this, so the admit check needs no branch for 0. */
+const _UNBOUNDED = Number.MAX_SAFE_INTEGER;
 
 /** @type {typeof RPC_ADMISSION_DEFAULTS} */
 let _config = RPC_ADMISSION_DEFAULTS;
-/** Bumped on every configuration change so cached routes re-read their limits. */
-let _epoch = 0;
+let _connCap = RPC_ADMISSION_DEFAULTS.perConnectionConcurrent;
+let _connQueueCap = RPC_ADMISSION_DEFAULTS.perConnectionQueue;
+let _globalCap = RPC_ADMISSION_DEFAULTS.globalConcurrent;
 
 /**
  * @param {unknown} value
@@ -53,18 +65,27 @@ function _limit(value, name, max = Number.MAX_SAFE_INTEGER) {
 	return /** @type {number} */ (value);
 }
 
+/** Apply `_config` to the module caps and every known route, and start what now fits. */
+function _applyConfig() {
+	_connCap = _config.perConnectionConcurrent || _UNBOUNDED;
+	_connQueueCap = _config.perConnectionQueue || _UNBOUNDED;
+	_globalCap = _config.globalConcurrent || _UNBOUNDED;
+	for (const route of _routes.values()) _applyRoute(route);
+	if (_queue.length !== 0) _drain();
+}
+
 /**
  * Configure RPC admission for this worker. Omitted keys take their defaults;
  * `null` restores every default. Each limit is a non-negative integer and 0
  * disables it: `maxQueue: 0` refuses a call that cannot start at once,
  * `timeout: 0` gives calls no deadline.
  *
- * @param {{ perConnectionConcurrent?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number } | null | undefined} options
+ * @param {{ perConnectionConcurrent?: number, perConnectionQueue?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number } | null | undefined} options
  */
 export function configureRpc(options) {
 	if (options === null || options === undefined) {
 		_config = RPC_ADMISSION_DEFAULTS;
-		_epoch++;
+		_applyConfig();
 		return;
 	}
 	if (typeof options !== 'object' || Array.isArray(options)) {
@@ -78,12 +99,13 @@ export function configureRpc(options) {
 		options[key] === undefined ? RPC_ADMISSION_DEFAULTS[key] : _limit(options[key], 'rpc.' + key, max);
 	_config = Object.freeze({
 		perConnectionConcurrent: read('perConnectionConcurrent'),
+		perConnectionQueue: read('perConnectionQueue'),
 		perRouteConcurrent: read('perRouteConcurrent'),
 		globalConcurrent: read('globalConcurrent'),
 		maxQueue: read('maxQueue'),
 		timeout: read('timeout', _MAX_TIMEOUT_MS)
 	});
-	_epoch++;
+	_applyConfig();
 }
 
 /**
@@ -102,32 +124,22 @@ export function _validateRouteConcurrent(value, where) {
 
 /**
  * @typedef {object} RpcRoute
- * @property {string} path
- * @property {Function | null} fn - the registered function the limits were read from
- * @property {number} epoch
- * @property {number} limit - concurrent calls of this route, 0 for no limit
+ * @property {string} path - the first path the function was registered under
+ * @property {number | undefined} ownLimit - the function's own `perRouteConcurrent`
+ * @property {number | undefined} ownTimeout - the function's own `timeout`
+ * @property {number} cap - concurrent calls of this route; a disabled limit is unbounded
  * @property {number} ticks - deadline in ticks, 0 for no deadline
  * @property {number} active
  * @property {number} queued
- * @property {boolean} dirty - gauges owe a write
- * @property {{ path: string }} labels
- */
-
-/**
- * @typedef {object} RpcSignal
- * @property {AbortController} ctrl
- * @property {AbortSignal} signal - `ctrl.signal`, read once
- * @property {RpcConn} conn
- * @property {number} tick - the deadline tick, -1 for none
- * @property {number} refs - calls holding it, queued or running
+ * @property {string} label - the gauge label, the path folded to a bounded length
  */
 
 /**
  * @typedef {object} RpcConn
- * @property {number} active
+ * @property {number} active - calls running
+ * @property {number} queued - calls waiting in the queue
  * @property {boolean} closed
- * @property {RpcSignal | null} sig - the signal the next call with the same deadline reuses
- * @property {RpcSignal[]} sigs - every signal not yet fired
+ * @property {Set<any> | null} calls - contexts of running calls whose handler read its signal
  */
 
 /**
@@ -142,26 +154,30 @@ export function _validateRouteConcurrent(value, where) {
  * @typedef {object} QueuedCall
  * @property {RpcConn} conn
  * @property {RpcRoute} route
- * @property {RpcSignal} sig
- * @property {'connection' | 'route' | 'global'} scope
- * @property {(result: RpcSignal | RpcRejection) => void} resolve
+ * @property {'connection' | 'route' | 'global'} scope - the scope that was full when it queued
+ * @property {number} deadline - its deadline tick, -1 for none
+ * @property {(result: RpcConn | RpcRejection) => void} resolve
  */
+
+/** Where a registered function keeps its route record. */
+export const RPC_ROUTE = Symbol('svelte-realtime.rpc.route');
 
 /** @type {Map<string, RpcRoute>} */
 const _routes = new Map();
 /** @type {WeakMap<object, RpcConn>} */
 const _conns = new WeakMap();
+/** The socket of the last admitted call and its record, so a connection calling again skips the map. */
+let _lastWs = /** @type {object | null} */ (null);
+let _lastConn = /** @type {RpcConn | null} */ (null);
 let _active = 0;
 /** @type {QueuedCall[]} */
 const _queue = [];
-/** @type {Map<number, Set<RpcSignal>>} */
+/** Running calls whose signal was read, by deadline tick. @type {Map<number, Set<any>>} */
 const _buckets = new Map();
-let _tick = 0;
+/** The deadline clock, in ticks of RPC_DEADLINE_TICK_MS. Read it to stamp a call's arrival. */
+export let rpcTick = 0;
 /** @type {any} */
 let _ticker = null;
-
-const _DEADLINE = new LiveError('TIMEOUT', 'The call passed its deadline');
-const _CLOSED = new LiveError('CONNECTION_CLOSED', 'The connection closed');
 
 /** @param {'concurrency_limit' | 'queue_full'} reason @param {'connection' | 'route' | 'global'} scope @param {boolean} expired @param {boolean} [closed] */
 const _rejection = (reason, scope, expired, closed = false) => /** @type {RpcRejection} */ (Object.freeze({ reason, scope, expired, closed }));
@@ -176,6 +192,7 @@ const _EXPIRED = {
 	global: _rejection('concurrency_limit', 'global', true)
 };
 const _QUEUE_FULL = _rejection('queue_full', 'global', false);
+const _CONNECTION_QUEUE_FULL = _rejection('queue_full', 'connection', false);
 const _CLOSED_WAITING = _rejection('concurrency_limit', 'connection', false, true);
 
 /** A signal for work outside a wire call (cron, effects, direct calls); it never fires. */
@@ -196,51 +213,50 @@ function _routeOption(fn, key) {
 	return undefined;
 }
 
-/**
- * @param {string} path
- * @param {Function} fn
- * @param {RpcRoute | undefined} route
- * @returns {RpcRoute}
- */
-function _refreshRoute(path, fn, route) {
-	const ownLimit = _routeOption(fn, '__perRouteConcurrent');
-	const ownTimeout = _routeOption(fn, '__rpcTimeout');
-	const timeout = ownTimeout !== undefined ? ownTimeout : _config.timeout;
-	const limit = ownLimit !== undefined ? ownLimit : _config.perRouteConcurrent;
-	const ticks = timeout === 0 ? 0 : Math.ceil(timeout / _TICK_MS) + 1;
-	if (route === undefined) {
-		// The same length fold as every other RPC series label.
-		const label = path.length <= 96 ? path : '__toolong__';
-		route = { path, fn, epoch: _epoch, limit, ticks, active: 0, queued: 0, dirty: false, labels: Object.freeze({ path: label }) };
-		_routes.set(path, route);
-	} else {
-		route.fn = fn;
-		route.epoch = _epoch;
-		route.limit = limit;
-		route.ticks = ticks;
-	}
-	return route;
+/** @param {RpcRoute} route */
+function _applyRoute(route) {
+	const limit = route.ownLimit !== undefined ? route.ownLimit : _config.perRouteConcurrent;
+	const timeout = route.ownTimeout !== undefined ? route.ownTimeout : _config.timeout;
+	route.cap = limit || _UNBOUNDED;
+	route.ticks = timeout === 0 ? 0 : Math.ceil(timeout / RPC_DEADLINE_TICK_MS) + 1;
 }
 
 /**
- * The admission record of a registered path.
+ * Give a registered function its route record. Registration calls this, so a
+ * call reads the record with one property load. The record belongs to the
+ * path: a function registered again (a development reload) takes over the
+ * path's counts. A function registered under a second path keeps its first
+ * record, so the two paths share one bound.
  * @param {string} path
  * @param {Function} fn
  * @returns {RpcRoute}
  */
 export function _rpcRoute(path, fn) {
-	const route = _routes.get(path);
-	if (route !== undefined && route.fn === fn && route.epoch === _epoch) return route;
-	return _refreshRoute(path, fn, route);
+	const own = /** @type {any} */ (fn)[RPC_ROUTE];
+	if (own !== undefined) return own;
+	let route = _routes.get(path);
+	if (route === undefined) {
+		// The same length fold as every other RPC series label.
+		const label = path.length <= 96 ? path : '__toolong__';
+		route = { path, ownLimit: undefined, ownTimeout: undefined, cap: 0, ticks: 0, active: 0, queued: 0, label };
+		_routes.set(path, route);
+	}
+	route.ownLimit = _routeOption(fn, '__perRouteConcurrent');
+	route.ownTimeout = _routeOption(fn, '__rpcTimeout');
+	_applyRoute(route);
+	if (Object.isExtensible(fn)) Object.defineProperty(fn, RPC_ROUTE, { value: route, writable: true, configurable: true });
+	return route;
 }
 
 /** @param {object} ws @returns {RpcConn} */
-function _conn(ws) {
+function _connOf(ws) {
 	let conn = _conns.get(ws);
 	if (conn === undefined) {
-		conn = { active: 0, closed: false, sig: null, sigs: [] };
+		conn = { active: 0, queued: 0, closed: false, calls: null };
 		_conns.set(ws, conn);
 	}
+	_lastWs = ws;
+	_lastConn = conn;
 	return conn;
 }
 
@@ -252,116 +268,106 @@ function _conn(ws) {
  * @returns {'connection' | 'route' | 'global' | null}
  */
 function _blocked(conn, route) {
-	const config = _config;
-	if (config.perConnectionConcurrent !== 0 && conn.active >= config.perConnectionConcurrent) return 'connection';
-	if (route.limit !== 0 && route.active >= route.limit) return 'route';
-	if (config.globalConcurrent !== 0 && _active >= config.globalConcurrent) return 'global';
+	if (conn.active >= _connCap) return 'connection';
+	if (route.active >= route.cap) return 'route';
+	if (_active >= _globalCap) return 'global';
 	return null;
 }
 
 /**
- * Take a reference on the signal a new call of `route` on `conn` uses.
- * @param {RpcConn} conn
- * @param {RpcRoute} route
- * @returns {RpcSignal}
- */
-function _takeSignal(conn, route) {
-	if (conn.closed) {
-		// A call that resolved its path after its connection closed.
-		const ctrl = new AbortController();
-		ctrl.abort(_CLOSED);
-		return { ctrl, signal: ctrl.signal, conn, tick: -1, refs: 1 };
-	}
-	const tick = route.ticks === 0 ? -1 : _tick + route.ticks;
-	let sig = conn.sig;
-	if (sig !== null && sig.tick === tick) {
-		sig.refs++;
-		return sig;
-	}
-	if (sig !== null && sig.refs === 0) _dropSignal(sig);
-	const ctrl = new AbortController();
-	sig = { ctrl, signal: ctrl.signal, conn, tick, refs: 1 };
-	conn.sig = sig;
-	conn.sigs.push(sig);
-	if (tick !== -1) {
-		let bucket = _buckets.get(tick);
-		if (bucket === undefined) {
-			bucket = new Set();
-			_buckets.set(tick, bucket);
-		}
-		bucket.add(sig);
-		if (_ticker === null) _startTicker();
-	}
-	return sig;
-}
-
-/** @param {RpcSignal} sig */
-function _dropSignal(sig) {
-	const conn = sig.conn;
-	if (conn.sig === sig) conn.sig = null;
-	const at = conn.sigs.indexOf(sig);
-	if (at !== -1) conn.sigs.splice(at, 1);
-	if (sig.tick !== -1) _buckets.get(sig.tick)?.delete(sig);
-}
-
-/** @param {RpcSignal} sig */
-function _unrefSignal(sig) {
-	if (--sig.refs === 0 && sig.conn.sig !== sig) _dropSignal(sig);
-}
-
-/**
- * Admit a call of `route` from `ws`. Returns the call's signal record (its
- * permit) when it may start now, a rejection when it is refused, or a
- * promise of either when it waits in the queue. A rejected call holds
- * nothing.
+ * Admit a call of `route` from `ws` that arrived at deadline tick `arrived`.
+ * Returns the connection's record (the permit) when the call may start now,
+ * a rejection when it is refused, or a promise of either when it waits in the
+ * queue. A rejected call holds nothing.
  * @param {object} ws
  * @param {RpcRoute} route
- * @returns {RpcSignal | RpcRejection | Promise<RpcSignal | RpcRejection>}
+ * @param {number} arrived - `rpcTick` when the call arrived
+ * @returns {RpcConn | RpcRejection | Promise<RpcConn | RpcRejection>}
  */
-export function _admitRpc(ws, route) {
-	const conn = _conn(ws);
-	const config = _config;
-	// The unsaturated path, written out: every scope has room and the
-	// connection's current signal has this call's deadline.
-	if ((config.perConnectionConcurrent === 0 || conn.active < config.perConnectionConcurrent) &&
-		(route.limit === 0 || route.active < route.limit) &&
-		(config.globalConcurrent === 0 || _active < config.globalConcurrent)) {
+export function _admitRpc(ws, route, arrived) {
+	const conn = ws === _lastWs ? /** @type {RpcConn} */ (_lastConn) : _connOf(ws);
+	if (conn.active < _connCap && route.active < route.cap && _active < _globalCap) {
 		conn.active++;
 		route.active++;
 		_active++;
-		if (_metered) _touch(route);
-		const sig = conn.sig;
-		if (sig !== null && sig.tick === (route.ticks === 0 ? -1 : _tick + route.ticks)) {
-			sig.refs++;
-			return sig;
-		}
-		return _takeSignal(conn, route);
+		if (_ticker === null) _startTicker();
+		return conn;
 	}
 	const scope = /** @type {'connection' | 'route' | 'global'} */ (_blocked(conn, route));
-	if (config.maxQueue === 0) return _LIMITED[scope];
+	if (_config.maxQueue === 0) return _LIMITED[scope];
+	if (conn.queued >= _connQueueCap) return _CONNECTION_QUEUE_FULL;
 	if (_queue.length >= _config.maxQueue) return _QUEUE_FULL;
-	const sig = _takeSignal(conn, route);
+	conn.queued++;
 	route.queued++;
-	if (_metered) _touch(route);
+	const deadline = route.ticks === 0 ? -1 : arrived + route.ticks;
+	if (deadline !== -1 && _ticker === null) _startTicker();
 	return new Promise((resolve) => {
-		_queue.push({ conn, route, sig, scope, resolve });
+		_queue.push({ conn, route, scope, deadline, resolve });
 	});
 }
 
 /**
- * The handler of an admitted call settled: give its permits back and start
- * what the queue can now run.
+ * The handler of an admitted call settled: give its permits back, retire its
+ * signal so it never fires, and start what the queue can now run.
  * @param {RpcRoute} route
- * @param {RpcSignal} sig
+ * @param {RpcConn} conn
+ * @param {any} ctx - the call's context, or null when it was never built
  */
-export function _releaseRpc(route, sig) {
-	const conn = sig.conn;
+export function _releaseRpc(route, conn, ctx) {
 	conn.active--;
 	route.active--;
 	_active--;
-	if (--sig.refs === 0 && conn.sig !== sig) _dropSignal(sig);
-	if (_metered) _touch(route);
+	if (ctx !== null) {
+		ctx._rpcConn = null;
+		if (ctx._abortCtrl !== null) _retireCall(ctx, conn);
+	}
 	if (_queue.length !== 0) _drain();
+}
+
+/**
+ * The handler read `ctx.abortSignal` for the first time: create its
+ * controller and register it for its deadline and its connection's close.
+ * @param {any} ctx
+ * @returns {AbortSignal}
+ */
+export function _openCallSignal(ctx) {
+	const ctrl = new AbortController();
+	ctx._abortCtrl = ctrl;
+	ctx._abortSignal = ctrl.signal;
+	const conn = /** @type {RpcConn} */ (ctx._rpcConn);
+	const deadline = ctx._rpcDeadline;
+	if (conn.closed) {
+		ctrl.abort(new LiveError('CONNECTION_CLOSED', 'The connection closed'));
+	} else if (deadline !== -1 && deadline <= rpcTick) {
+		ctrl.abort(new LiveError('TIMEOUT', 'The call passed its deadline'));
+	} else {
+		(conn.calls || (conn.calls = new Set())).add(ctx);
+		if (deadline !== -1) {
+			let bucket = _buckets.get(deadline);
+			if (bucket === undefined) {
+				bucket = new Set();
+				_buckets.set(deadline, bucket);
+			}
+			bucket.add(ctx);
+			if (_ticker === null) _startTicker();
+		}
+	}
+	return ctrl.signal;
+}
+
+/**
+ * Take a settled call's controller out of its connection and its deadline
+ * bucket.
+ * @param {any} ctx
+ * @param {RpcConn} conn
+ */
+function _retireCall(ctx, conn) {
+	conn.calls?.delete(ctx);
+	const deadline = ctx._rpcDeadline;
+	if (deadline !== -1) {
+		const bucket = _buckets.get(deadline);
+		if (bucket !== undefined && bucket.delete(ctx) && bucket.size === 0) _buckets.delete(deadline);
+	}
 }
 
 /** Start queued calls, oldest first, while their scopes have room. */
@@ -371,12 +377,12 @@ function _drain() {
 		if (_blocked(entry.conn, entry.route) !== null) { i++; continue; }
 		_queue.splice(i, 1);
 		const { conn, route } = entry;
+		conn.queued--;
 		route.queued--;
 		conn.active++;
 		route.active++;
 		_active++;
-		if (_metered) _touch(route);
-		entry.resolve(entry.sig);
+		entry.resolve(conn);
 	}
 }
 
@@ -387,57 +393,62 @@ function _drain() {
  */
 function _dropQueued(index, rejection) {
 	const [entry] = _queue.splice(index, 1);
+	entry.conn.queued--;
 	entry.route.queued--;
-	if (_metered) _touch(entry.route);
-	_unrefSignal(entry.sig);
 	entry.resolve(rejection);
 }
 
 /**
- * The connection closed: fire its calls' signals and refuse its queued calls.
- * Running calls keep their permits until their handlers settle.
+ * The connection closed: fire the signals its running calls read and drop its
+ * queued calls. Running calls keep their permits until their handlers settle.
  * @param {object} ws
  */
 export function _closeRpcConnection(ws) {
 	const conn = _conns.get(ws);
+	if (_lastWs === ws) {
+		_lastWs = null;
+		_lastConn = null;
+	}
 	if (conn === undefined) return;
 	conn.closed = true;
 	for (let i = _queue.length - 1; i >= 0; i--) {
 		if (_queue[i].conn === conn) _dropQueued(i, _CLOSED_WAITING);
 	}
-	const sigs = conn.sigs;
-	conn.sigs = [];
-	conn.sig = null;
-	for (const sig of sigs) {
-		if (sig.tick !== -1) _buckets.get(sig.tick)?.delete(sig);
-		sig.ctrl.abort(_CLOSED);
+	const calls = conn.calls;
+	conn.calls = null;
+	if (calls !== null) {
+		for (const ctx of calls) {
+			const deadline = ctx._rpcDeadline;
+			if (deadline !== -1) _buckets.get(deadline)?.delete(ctx);
+			ctx._abortCtrl.abort(new LiveError('CONNECTION_CLOSED', 'The connection closed'));
+		}
 	}
 	if (_queue.length !== 0) _drain();
 }
 
 function _startTicker() {
-	_ticker = setIntervalTimer(_onTick, _TICK_MS);
+	_ticker = setIntervalTimer(_onTick, RPC_DEADLINE_TICK_MS);
 	if (_ticker && _ticker.unref) _ticker.unref();
 }
 
 function _onTick() {
-	_tick++;
-	const bucket = _buckets.get(_tick);
+	const tick = ++rpcTick;
+	const bucket = _buckets.get(tick);
 	if (bucket !== undefined) {
-		_buckets.delete(_tick);
-		for (const sig of bucket) {
-			const conn = sig.conn;
-			if (conn.sig === sig) conn.sig = null;
-			const at = conn.sigs.indexOf(sig);
-			if (at !== -1) conn.sigs.splice(at, 1);
-			sig.ctrl.abort(_DEADLINE);
+		_buckets.delete(tick);
+		for (const ctx of bucket) {
+			ctx._rpcConn?.calls?.delete(ctx);
+			ctx._abortCtrl.abort(new LiveError('TIMEOUT', 'The call passed its deadline'));
 		}
 	}
+	let deadlines = false;
 	for (let i = _queue.length - 1; i >= 0; i--) {
 		const entry = _queue[i];
-		if (entry.sig.signal.aborted) _dropQueued(i, _EXPIRED[entry.scope]);
+		if (entry.deadline === -1) continue;
+		if (entry.deadline <= tick) _dropQueued(i, _EXPIRED[_blocked(entry.conn, entry.route) || entry.scope]);
+		else deadlines = true;
 	}
-	if (_buckets.size === 0 && _queue.length === 0) {
+	if (_buckets.size === 0 && !deadlines && _active === 0) {
 		clearIntervalTimer(_ticker);
 		_ticker = null;
 	}
@@ -447,57 +458,79 @@ function _onTick() {
 // Gauges
 // ---------------------------------------------------------------------------
 
-/** @type {RpcRoute[]} */
-const _dirty = [];
-/** Whether `live.metrics()` installed the gauges; the hot path reads this flag, not the registry. */
-let _metered = false;
+/** How often the in-flight and queued gauges are sampled while metrics are installed. */
+export const RPC_GAUGE_SAMPLE_MS = 1000;
+/** @type {any} */
+let _sampler = null;
+/** What each gauge label last got, so an unchanged value is not written again. @type {Map<string, { active: number, queued: number }>} */
+const _shown = new Map();
 
-/** @param {RpcRoute} route */
-function _touch(route) {
-	if (route.dirty) return;
-	route.dirty = true;
-	if (_dirty.push(route) === 1) microtask(_flushGauges);
-}
-
-// The in-flight and queued gauges are written once per microtask in which
-// they changed, like the background-work gauges: a burst moves the counts
-// many times in one turn and only the value a scrape can see matters.
-function _flushGauges() {
+// The gauges are sampled, not written per call: a call only moves its
+// counters, and the sampler writes each label whose sums changed since its
+// last write. Routes whose paths fold to one label add up under it. A scrape
+// sees values at most one sample old.
+export function _sampleRpcGauges() {
 	const mi = state.metricsInstruments;
-	const routes = _dirty.splice(0);
-	for (const route of routes) route.dirty = false;
 	if (!mi) return;
-	const inflight = mi.rpcInflight;
-	const queued = mi.rpcQueued;
-	for (const route of routes) {
-		if (inflight && typeof inflight.set === 'function') inflight.set(route.labels, route.active);
-		if (queued && typeof queued.set === 'function') queued.set(route.labels, route.queued);
+	const inflight = typeof mi.rpcInflight?.set === 'function' ? mi.rpcInflight : null;
+	const queued = typeof mi.rpcQueued?.set === 'function' ? mi.rpcQueued : null;
+	/** @type {Map<string, { active: number, queued: number }>} */
+	const sums = new Map();
+	for (const route of _routes.values()) {
+		const sum = sums.get(route.label);
+		if (sum === undefined) sums.set(route.label, { active: route.active, queued: route.queued });
+		else {
+			sum.active += route.active;
+			sum.queued += route.queued;
+		}
+	}
+	for (const [path, sum] of sums) {
+		const shown = _shown.get(path);
+		const labels = { path };
+		if (inflight && shown?.active !== sum.active) inflight.set(labels, sum.active);
+		if (queued && shown?.queued !== sum.queued) queued.set(labels, sum.queued);
+		_shown.set(path, sum);
 	}
 }
 
-/** Write every route's gauges, for `live.metrics()` installing them while calls already run. */
+/** Start sampling the gauges, for `live.metrics()` installing them. */
 export function _publishRpcGauges() {
-	_metered = true;
-	for (const route of _routes.values()) _touch(route);
+	_shown.clear();
+	_sampleRpcGauges();
+	if (_sampler !== null) clearIntervalTimer(_sampler);
+	_sampler = setIntervalTimer(_sampleRpcGauges, RPC_GAUGE_SAMPLE_MS);
+	if (_sampler && _sampler.unref) _sampler.unref();
 }
 
 /** Current totals, for tests and introspection. */
 export function _rpcAdmissionSnapshot() {
 	const routes = {};
-	for (const [path, route] of _routes) routes[path] = { active: route.active, queued: route.queued, limit: route.limit };
-	return { active: _active, queued: _queue.length, config: _config, routes };
+	for (const [path, route] of _routes) routes[path] = { active: route.active, queued: route.queued, cap: route.cap };
+	let pendingSignals = 0;
+	for (const bucket of _buckets.values()) pendingSignals += bucket.size;
+	return { active: _active, queued: _queue.length, config: _config, routes, pendingSignals, buckets: _buckets.size, ticking: _ticker !== null };
 }
 
-/** Forget every count, queue and timer, and restore the defaults. Tests only. */
+/**
+ * Forget every count, queue and timer, and restore the defaults. Route
+ * records stay attached to their functions with their counts zeroed. Tests
+ * only.
+ */
 export function _resetRpcAdmission() {
 	_config = RPC_ADMISSION_DEFAULTS;
-	_epoch++;
-	_routes.clear();
-	_active = 0;
+	for (const route of _routes.values()) {
+		route.active = 0;
+		route.queued = 0;
+	}
 	_queue.length = 0;
+	_applyConfig();
+	_active = 0;
+	_lastWs = null;
+	_lastConn = null;
 	_buckets.clear();
-	_dirty.length = 0;
-	_metered = false;
+	_shown.clear();
 	if (_ticker !== null) clearIntervalTimer(_ticker);
 	_ticker = null;
+	if (_sampler !== null) clearIntervalTimer(_sampler);
+	_sampler = null;
 }

@@ -513,7 +513,7 @@ function _withLockDeadline(lock, key, fn, ctx, args, opts, maxExecutionMs) {
 				reject(error);
 				controller.abort(error);
 			}, maxExecutionMs);
-			try { return await fn({ ...ctx, lockSignal: signal }, ...args); }
+			try { return await fn({ ...ctx, lockSignal: signal, abortSignal: ctx.abortSignal }, ...args); }
 			finally { clearTimer(timer); }
 		}, opts);
 		Promise.resolve(held).then(resolve, reject);

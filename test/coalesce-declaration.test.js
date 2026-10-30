@@ -107,7 +107,7 @@ describe('declared coalescing', () => {
     { name: 'context property', factory: ctx => 'quotes:' + ctx.tenantId, probe: 'quotes:undefined', topic: 'quotes:one' },
     { name: 'optional context fallback', factory: (ctx, id) => `${ctx.user?.org ?? 'public'}:${id}`, probe: 'public:asset', topic: 'private:asset' },
     { name: 'context own keys', factory: (ctx, id) => `${Object.keys(ctx).length ? 'keys' : 'empty'}:${id}`, probe: 'keys:asset', topic: 'keys:asset' },
-    { name: 'context prototype', factory: (ctx, id) => `${Object.getPrototypeOf(ctx) === Object.prototype ? 'plain' : 'other'}:${id}`, probe: 'other:asset', topic: 'plain:asset' },
+    { name: 'context prototype', factory: (ctx, id) => `${Object.getPrototypeOf(ctx) === null ? 'bare' : 'proto'}:${id}`, probe: 'bare:asset', topic: 'proto:asset' },
     { name: 'caught context access', factory: (ctx, id) => { try { return `${ctx.user.org}:${id}`; } catch { return `fallback:${id}`; } }, probe: 'fallback:asset', topic: 'private:asset' },
     { name: 'object argument', factory: (_ctx, input) => 'quotes:' + input.id, probe: 'quotes:undefined', topic: 'quotes:asset', arg: { id: 'asset' } },
     { name: 'argument type fallback', factory: (_ctx, id) => typeof id === 'string' ? 'typed:' + id : 'fallback', probe: 'fallback', topic: 'typed:asset' },

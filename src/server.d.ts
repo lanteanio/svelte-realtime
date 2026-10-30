@@ -237,12 +237,15 @@ export interface LiveContext<UserData = RegisteredUser> {
 	/** Cooperative execution deadline from live.lock({ maxExecutionMs }); pass to abort-aware work. */
 	lockSignal?: AbortSignal;
 	/**
-	 * Fires when a wire call passes its deadline (reason `LiveError('TIMEOUT')`)
-	 * or its connection closes (reason `LiveError('CONNECTION_CLOSED')`). Pass it
-	 * to abort-aware work such as `fetch` or a database driver. The call keeps
-	 * its admission permit until the handler settles, so a handler that ignores
-	 * the signal still holds its place. Work outside a wire call (cron,
-	 * effects, direct calls, loader re-runs) gets a signal that never fires.
+	 * This call's own signal. It fires within one 250 ms tick after the call's
+	 * server budget (reason `LiveError('TIMEOUT')`) or when its connection
+	 * closes (reason `LiveError('CONNECTION_CLOSED')`), and never after the
+	 * call settled. Pass it to abort-aware work such as `fetch` or a database
+	 * driver; a handler that must finish a side effect after the client gave up
+	 * ignores it. The call keeps its admission place until the handler settles.
+	 * Created on first read, so an unread signal costs nothing. Work outside a
+	 * wire call (cron, effects, direct calls, loader re-runs) gets a signal that
+	 * never fires. An accessor: `{ ...ctx }` does not copy it.
 	 */
 	abortSignal: AbortSignal;
 	/** User data attached during the WebSocket upgrade handshake. */
@@ -1302,9 +1305,12 @@ export interface LiveOptions {
 	 * Default client request budget in milliseconds (integer, 1..2147483647).
 	 * The generated client stub waits this long before rejecting with
 	 * TIMEOUT; `.with({ timeout })` on a call overrides it, and functions that
-	 * declare none use `configure({ timeout })`. For `live()` and
-	 * `live.stream()` it is also the server deadline of the call:
-	 * `ctx.abortSignal` fires at it instead of at `realtime({ rpc: { timeout } })`.
+	 * declare none use `configure({ timeout })`. For `live()`,
+	 * `live.stream()` and `live.binary()` it is the call's budget on the
+	 * server too: `ctx.abortSignal` fires within one 250 ms tick after it,
+	 * where a function without one uses `realtime({ rpc: { timeout } })`
+	 * (default 30000). A per-call `.with({ timeout })` changes only the
+	 * client's budget; the budget is not sent with the call.
 	 */
 	timeout?: number;
 	/**
@@ -1322,7 +1328,8 @@ export interface LiveOptions {
  * A wire call (text, batch entry, binary call, fire-and-forget call or stream
  * subscribe) holds one place in its connection, its route and the worker
  * until its handler settles. A call that finds a scope full waits in one
- * shared FIFO queue; a full or disabled queue refuses it at once with
+ * shared FIFO queue, of which one connection holds at most
+ * `perConnectionQueue` calls; a full or disabled queue refuses it at once with
  * `OVERLOADED`, `reason` `queue_full` or `concurrency_limit` and `scope`
  * `connection`, `route` or `global`. A refused call never runs and is not
  * retried. Uploads keep their own limits and are not counted here.
@@ -1330,6 +1337,12 @@ export interface LiveOptions {
 export interface RpcAdmissionOptions {
 	/** Calls one connection may run at once, across routes. @default 32 */
 	perConnectionConcurrent?: number;
+	/**
+	 * Calls of one connection that may wait in the queue; one more is refused
+	 * with `queue_full`, scope `connection`. 0 lets one connection use the
+	 * whole queue. @default 32
+	 */
+	perConnectionQueue?: number;
 	/** Calls of one route that may run at once; a route's own `perRouteConcurrent` replaces it. @default 256 */
 	perRouteConcurrent?: number;
 	/** Calls the worker may run at once. @default 1024 */
@@ -1337,10 +1350,11 @@ export interface RpcAdmissionOptions {
 	/** Calls that may wait for a place; 0 refuses a call that cannot start at once. @default 256 */
 	maxQueue?: number;
 	/**
-	 * Deadline of a call in milliseconds, counted from its arrival, up to
-	 * 2147483647; a route's own `timeout` replaces it. `ctx.abortSignal` fires
-	 * within 250 ms after it, and a call still queued then is refused. 0 gives
-	 * calls no deadline.
+	 * Server budget of a call in milliseconds, counted from its arrival, up to
+	 * 2147483647; a function's own `timeout` replaces it. `ctx.abortSignal`
+	 * fires within one 250 ms tick after it, and a call still queued then is
+	 * refused. Keep it equal to the client's `configure({ timeout })` so both
+	 * ends give up together. 0 gives calls no deadline.
 	 * @default 30000
 	 */
 	timeout?: number;
@@ -1836,6 +1850,8 @@ export namespace live {
 		options?: {
 			/** Largest payload in bytes. @default 10485760 */
 			maxSize?: number;
+			/** The call's budget in milliseconds, on the client stub and as the server deadline; see {@link LiveOptions.timeout}. */
+			timeout?: number;
 			/** Calls of this function that may run at once in a worker; see {@link LiveOptions.perRouteConcurrent}. */
 			perRouteConcurrent?: number;
 		}

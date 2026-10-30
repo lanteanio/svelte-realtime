@@ -92,7 +92,7 @@ export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';
 import { configureForget, _resetForget, installForget } from './server/forget.js';
 export { configureForget, _resetForget };
-import { configureRpc, _validateRouteConcurrent, _closeRpcConnection } from './server/rpc-admission.js';
+import { configureRpc, _validateRouteConcurrent, _closeRpcConnection, _rpcRoute, NEVER_ABORTED } from './server/rpc-admission.js';
 export { configureRpc };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
@@ -1223,6 +1223,7 @@ export function __register(path, fn, modulePath) {
 	// Cache module path to avoid recomputing substring on every RPC call
 	/** @type {any} */ (fn).__modulePath = modulePath || path.substring(0, path.lastIndexOf('/'));
 	_propagateWrapperPath(fn, path);
+	_rpcRoute(path, fn);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -1278,6 +1279,7 @@ async function _resolveRegistryEntry(path) {
 	registry.set(path, fn);
 	/** @type {any} */ (fn).__modulePath = hint || path.substring(0, path.lastIndexOf('/'));
 	_propagateWrapperPath(fn, path);
+	_rpcRoute(path, fn);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -1881,7 +1883,8 @@ live.channel = function channel(topic, options) {
  * @returns {Function}
  */
 live.binary = function binary(fn, options) {
-	_markRoute(fn, { perRouteConcurrent: options?.perRouteConcurrent }, 'live.binary');
+	validateFunctionTimeout(options?.timeout);
+	_markRoute(fn, { timeout: options?.timeout, perRouteConcurrent: options?.perRouteConcurrent }, 'live.binary');
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__isBinary = true;
 	if (options?.maxSize) /** @type {any} */ (fn).__maxBinarySize = options.maxSize;
@@ -4078,7 +4081,7 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 	// helper (the hook topics here are already wire topics). Both reduce to the
 	// originals with no tenant resolver configured (tenantId null, _publishWire === publish).
 	const _helpers = _getCtxHelpers(platform);
-	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId, _publishWire: _helpers.publish, _releasedDerived: releasedDerived };
+	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId, _publishWire: _helpers.publish, _releasedDerived: releasedDerived, abortSignal: NEVER_ABORTED };
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing
@@ -4141,10 +4144,10 @@ const _firedUnsubscribes = new WeakMap();
 export function close(ws, { platform, subscriptions }) {
 	forgetDeliverySubscription(ws);
 	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
-	// Fire the abort signal of every call still running for this socket and
-	// refuse its queued calls; running calls keep their permits until their
-	// handlers settle.
+	// Fire the signals the socket's running calls read and drop its queued
+	// calls; running calls keep their permits until their handlers settle.
 	_closeRpcConnection(ws);
+
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
 	// sync/command handler awoken after this call re-checks the mark and bails
@@ -4161,7 +4164,7 @@ export function close(ws, { platform, subscriptions }) {
 	// Carries the connection's tenant + raw wire-publish for tenant-scoped close
 	// drains (room-enumeration roster release + delta), exactly like unsubscribe().
 	const _helpers = _getCtxHelpers(platform);
-	const closeCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish };
+	const closeCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish, abortSignal: NEVER_ABORTED };
 
 	// Drain tracked stream subscriptions (from the RPC subscribe path)
 	if (topicMap) {
@@ -4474,7 +4477,7 @@ export function publish(topic, event, data, options) {
  *   privacySecret?: string,
  *   authorizeDelivery?: (ctx: any, delivery: any) => unknown,
  *   deliveryAuthorizationOptions?: { maxPendingBytes?: number, timeoutMs?: number },
- *   rpc?: { perConnectionConcurrent?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number },
+ *   rpc?: { perConnectionConcurrent?: number, perConnectionQueue?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number },
  * }} [config]
  */
 export function realtime(config) {

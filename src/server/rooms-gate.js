@@ -50,6 +50,7 @@
 import { _getCtxHelpers } from './ctx.js';
 import { _resolveTenant } from './tenant.js';
 import { _IS_DEV } from './env.js';
+import { NEVER_ABORTED } from './rpc-admission.js';
 
 /**
  * Gated enumeration channels: wire topic -> the export's visibility
@@ -227,7 +228,7 @@ async function _deliver(platform, predicate, topic, event, data) {
 			try {
 				// The same ctx shape the unsubscribe/close drains build for this
 				// connection: the adapter's userData IS the connection's user.
-				const ctx = { user: t.user, ws: t.ws, platform, publish: helpers.publish, cursor: null, tenantId: _resolveTenant(t.user), _publishWire: helpers.publish };
+				const ctx = { user: t.user, ws: t.ws, platform, publish: helpers.publish, cursor: null, tenantId: _resolveTenant(t.user), _publishWire: helpers.publish, abortSignal: NEVER_ABORTED };
 				const r = predicate(ctx, room);
 				allowed = (r && typeof r.then === 'function') ? !!(await r) : !!r;
 			} catch {

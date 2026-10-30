@@ -55,6 +55,20 @@ export function _recordRejectedRpc(path, code, ws) {
 	_recordRpcMetrics(_registeredPathLabel(path), code, monotonicNow(), ws);
 }
 
+/**
+ * Count a call RPC admission refused, by registered path, reason and scope.
+ * The same call also counts as an `OVERLOADED` error through
+ * `_recordRpcMetrics`.
+ * @param {string} path - a registered path
+ * @param {'concurrency_limit' | 'queue_full'} reason
+ * @param {'connection' | 'route' | 'global'} scope
+ */
+export function _recordRpcOverload(path, reason, scope) {
+	const mi = state.metricsInstruments;
+	if (!mi || !mi.rpcOverloaded) return;
+	mi.rpcOverloaded.inc({ path: _metricPath(path), reason, scope });
+}
+
 /** Distinct cohort labels seen, bounded so a buggy classifier cannot explode series cardinality. */
 const _cohortSeen = new Set();
 const _MAX_COHORTS = 16;
@@ -122,10 +136,8 @@ function _cohortOf(ws) {
  * @param {string} code - error code, or empty string for success
  * @param {number} startTime - from monotonicNow(), or 0 to skip duration
  * @param {any} [ws] - the calling socket, for the cohort label (guard paths that reject pre-identification omit it)
- * @param {string} [reason] - why admission refused an `OVERLOADED` call; empty for every other error
- * @param {string} [scope] - the admission scope that refused it
  */
-export function _recordRpcMetrics(path, code, startTime, ws, reason = '', scope = '') {
+export function _recordRpcMetrics(path, code, startTime, ws) {
 	const mi = state.metricsInstruments;
 	if (!mi) return;
 	// Bound both label values so no path/code can inflate series cardinality.
@@ -135,12 +147,12 @@ export function _recordRpcMetrics(path, code, startTime, ws, reason = '', scope 
 	if (mi.cohortFn) {
 		const cohort = _cohortOf(ws);
 		mi.rpcCount.inc({ path, status, cohort });
-		if (code) mi.rpcErrors.inc({ path, code, cohort, reason, scope });
+		if (code) mi.rpcErrors.inc({ path, code, cohort });
 		if (startTime) mi.rpcDuration.observe({ path, cohort }, (monotonicNow() - startTime) / 1000);
 		return;
 	}
 	mi.rpcCount.inc({ path, status });
-	if (code) mi.rpcErrors.inc({ path, code, reason, scope });
+	if (code) mi.rpcErrors.inc({ path, code });
 	if (startTime) mi.rpcDuration.observe({ path }, (monotonicNow() - startTime) / 1000);
 }
 
@@ -204,7 +216,8 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		cohortFn,
 		rpcCount: registry.counter({ name: 'svelte_realtime_rpc_total', help: 'Total RPC calls', labelNames: rpcLabels }),
 		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: cohortFn ? ['path', 'cohort'] : ['path'], buckets: [...DURATION_BUCKETS_SECONDS] }),
-		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: cohortFn ? ['path', 'code', 'cohort', 'reason', 'scope'] : ['path', 'code', 'reason', 'scope'] }),
+		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: cohortFn ? ['path', 'code', 'cohort'] : ['path', 'code'] }),
+		rpcOverloaded: registry.counter({ name: 'svelte_realtime_rpc_overloaded_total', help: 'RPC calls refused by admission', labelNames: ['path', 'reason', 'scope'] }),
 		rpcInflight: registry.gauge({ name: 'svelte_realtime_rpc_inflight', help: 'RPC calls running in this process', labelNames: ['path'] }),
 		rpcQueued: registry.gauge({ name: 'svelte_realtime_rpc_queued', help: 'RPC calls waiting for admission in this process', labelNames: ['path'] }),
 		rpcDelivery: registry.counter({ name: 'svelte_realtime_rpc_delivery_total', help: 'RPC reply transport outcomes', labelNames: ['path', 'outcome'] }),

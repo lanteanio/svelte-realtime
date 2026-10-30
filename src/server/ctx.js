@@ -7,7 +7,7 @@ import { _maybeReplayPublish } from './replay-routing.js';
 import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor, _resolveCoalesce, UNSEQUENCED } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
 import { _shouldShed } from './admission.js';
-import { NEVER_ABORTED } from './rpc-admission.js';
+import { NEVER_ABORTED, _openCallSignal } from './rpc-admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
@@ -625,6 +625,103 @@ export function _rerunCtx(ctx, kind) {
 	return out;
 }
 
+/**
+ * The context of one operation. A class rather than a literal so every ctx
+ * shares one hidden class and `abortSignal` can be an accessor on the
+ * prototype: a wire call creates its controller only when the handler reads
+ * the signal. Field order is the hidden class; keep it fixed.
+ */
+class LiveCallContext {
+	constructor(user, ws, contextPlatform, publish, cursor, scopedHelpers, helpers, skip, connectionId, requestId, platform, idempotencyKey, tenantId) {
+		this.user = user;
+		this.ws = ws;
+		this.platform = contextPlatform;
+		this.publish = publish;
+		this.cursor = cursor;
+		// Same tenant namespace as ctx.publish: the deferred helpers and the
+		// batch list form take a handler-supplied topic too, so they cannot be
+		// the raw helper or they become the escape hatch the guard just closed.
+		this.publishThrottled = scopedHelpers.publishThrottled;
+		this.publishDebounced = scopedHelpers.publishDebounced;
+		this.throttle = scopedHelpers.throttle;
+		this.debounce = scopedHelpers.debounce;
+		this.signal = helpers.signal;
+		this.batch = scopedHelpers.batch;
+		this.shed = helpers.shed;
+		this.skip = skip;
+		this.connectionId = connectionId;
+		this.requestId = requestId;
+		// W3C operation context and vendor-neutral span boundary projected by
+		// the adapter. The context is captured for this handler while the trace
+		// helper remains the shared immutable surface.
+		this.traceContext = contextPlatform?.traceContext ?? null;
+		this.trace = contextPlatform?.trace ?? null;
+		// Clock and RNG come from the adapter platform's injectable runtime when
+		// present, so a loader/handler reads the same swappable source a seeded
+		// harness controls (ctx.now(), ctx.random.uuid(), etc.). Older adapters
+		// and mock platforms without them fall back to the framework's own
+		// runtime helpers, so the surface is always populated.
+		this.now = (platform && platform.now) || runtimeNow;
+		this.random = (platform && platform.random) || _runtimeRandom;
+		// Hybrid logical clock for events that must order consistently across
+		// workers (or across a coarse / briefly-backward wall clock). Comes
+		// from the adapter platform when it projects one, so a loader/handler
+		// reads the same swappable source a seeded harness controls; older
+		// adapters and mock platforms fall back to the framework's own
+		// runtime-backed stamp of the same {wall, logical, nodeId} shape.
+		this.hlc = (platform && platform.hlc) || _localHlc;
+		// Lag-compensated evaluation. The default throws with guidance; room
+		// actions on a room with a `history` config shadow it with the live
+		// implementation (the same shadow-and-restore pattern as ctx.publish).
+		// Declared here so every ctx shares one hidden class - the shadow
+		// swaps the value, never the shape.
+		this.compensate = _compensateUnavailable;
+		this._compensateDepth = 0;
+		// Per-room alarm (live.alarm). Defaults throw / return-null outside an
+		// alarm-enabled stream; an alarm-enabled stream/room shadows them with live
+		// closures bound to the room topic (same value-swap-not-shape-change rule as
+		// compensate, to keep one hidden class).
+		this.setAlarm = _alarmUnavailable;
+		this.getAlarm = _alarmGetUnavailable;
+		this.deleteAlarm = _alarmUnavailable;
+		this._idempotencyKey = idempotencyKey;
+		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
+		// null). `_publishWire` is the raw, non-prefixing publish for framework
+		// code that already holds a wire topic (presence/cursor/room-action), so it
+		// never double-prefixes. `tenant(id)` returns a publisher scoped to ANOTHER
+		// tenant - the explicit cross-tenant escape hatch. All three are present on
+		// every ctx (value swap, not shape change) to keep one hidden class.
+		this.tenantId = tenantId;
+		this._publishWire = helpers.publish;
+		this.tenant = (id) => _makeTenantScope(helpers.publish, id);
+		// Null on a client call. A loader the framework re-runs later on a
+		// subscriber's behalf carries 'invalidateOn', 'staleAfterMs' or 'derived'
+		// here, so middleware can tell it apart from the call it serves.
+		this.rerun = null;
+		// RPC admission: the call's connection record while the call runs, its
+		// deadline tick, and its abort signal once read or set.
+		this._rpcConn = null;
+		this._rpcDeadline = -1;
+		this._abortCtrl = null;
+		this._abortSignal = null;
+	}
+
+	/**
+	 * Fires at a wire call's deadline or when its connection closes. Work
+	 * outside a wire call, and a call that already settled, get a signal that
+	 * never fires.
+	 */
+	get abortSignal() {
+		if (this._abortSignal !== null) return this._abortSignal;
+		if (this._rpcConn === null) return NEVER_ABORTED;
+		return _openCallSignal(this);
+	}
+
+	set abortSignal(value) {
+		this._abortSignal = value;
+	}
+}
+
 /** Build background work without resolving a missing user's tenant. */
 export function _buildPersistedCtx(platform, helpers, tenantId) {
 	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
@@ -647,83 +744,27 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 	if (ws && platform) {
 		contextPlatform = { __proto__: platform, requestId, connectionId };
 	}
-	const ctx = {
+	const ctx = new LiveCallContext(
 		user,
 		ws,
-		platform: contextPlatform,
+		contextPlatform,
 		// ctx.publish already guards `__` inside the raw helper closure, so the
 		// no-tenancy path can stay the bare reference here.
-		publish: !tenancy ? helpers.publish : (tenantId ? _getScopedPublish(helpers.publish, tenantId) : _getUnscopedPublish(helpers.publish)),
+		!tenancy ? helpers.publish : (tenantId ? _getScopedPublish(helpers.publish, tenantId) : _getUnscopedPublish(helpers.publish)),
 		cursor,
-		// Same tenant namespace as ctx.publish: the deferred helpers and the
-		// batch list form take a handler-supplied topic too, so they cannot be
-		// the raw helper or they become the escape hatch the guard just closed.
-		publishThrottled: scopedHelpers.publishThrottled,
-		publishDebounced: scopedHelpers.publishDebounced,
-		throttle: scopedHelpers.throttle,
-		debounce: scopedHelpers.debounce,
-		signal: helpers.signal,
-		batch: scopedHelpers.batch,
-		shed: helpers.shed,
+		scopedHelpers,
+		helpers,
 		// Background work forces tenancy on for publish scoping, but an app without
 		// a resolver keeps bare skip keys so alarms and RPC handlers share one gate.
-		skip: tenantId === null && !tenancyEnabled ? helpers.skip : scopedHelpers.skip,
+		tenantId === null && !tenancyEnabled ? helpers.skip : scopedHelpers.skip,
 		connectionId,
 		requestId,
-		// W3C operation context and vendor-neutral span boundary projected by
-		// the adapter. The context is captured for this handler while the trace
-		// helper remains the shared immutable surface.
-		traceContext: contextPlatform?.traceContext ?? null,
-		trace: contextPlatform?.trace ?? null,
-		// Clock and RNG come from the adapter platform's injectable runtime when
-		// present, so a loader/handler reads the same swappable source a seeded
-		// harness controls (ctx.now(), ctx.random.uuid(), etc.). Older adapters
-		// and mock platforms without them fall back to the framework's own
-		// runtime helpers, so the surface is always populated.
-		now: (platform && platform.now) || runtimeNow,
-		random: (platform && platform.random) || _runtimeRandom,
-		// Hybrid logical clock for events that must order consistently across
-		// workers (or across a coarse / briefly-backward wall clock). Comes
-		// from the adapter platform when it projects one, so a loader/handler
-		// reads the same swappable source a seeded harness controls; older
-		// adapters and mock platforms fall back to the framework's own
-		// runtime-backed stamp of the same {wall, logical, nodeId} shape.
-		hlc: (platform && platform.hlc) || _localHlc,
-		// Lag-compensated evaluation. The default throws with guidance; room
-		// actions on a room with a `history` config shadow it with the live
-		// implementation (the same shadow-and-restore pattern as ctx.publish).
-		// Declared here so every ctx shares one hidden class - the shadow
-		// swaps the value, never the shape.
-		compensate: _compensateUnavailable,
-		_compensateDepth: 0,
-		// Per-room alarm (live.alarm). Defaults throw / return-null outside an
-		// alarm-enabled stream; an alarm-enabled stream/room shadows them with live
-		// closures bound to the room topic (same value-swap-not-shape-change rule as
-		// compensate, to keep one hidden class).
-		setAlarm: _alarmUnavailable,
-		getAlarm: _alarmGetUnavailable,
-		deleteAlarm: _alarmUnavailable,
-		_idempotencyKey: idempotencyKey || null,
-		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
-		// null). `_publishWire` is the raw, non-prefixing publish for framework
-		// code that already holds a wire topic (presence/cursor/room-action), so it
-		// never double-prefixes. `tenant(id)` returns a publisher scoped to ANOTHER
-		// tenant - the explicit cross-tenant escape hatch. All three are present on
-		// every ctx (value swap, not shape change) to keep one hidden class.
-		tenantId,
-		_publishWire: helpers.publish,
-		tenant: (id) => _makeTenantScope(helpers.publish, id),
-		// Null on a client call. A loader the framework re-runs later on a
-		// subscriber's behalf carries 'invalidateOn', 'staleAfterMs' or 'derived'
-		// here, so middleware can tell it apart from the call it serves.
-		rerun: null,
-		// Fires at a wire call's deadline or when its connection closes. Work
-		// outside a wire call gets a signal that never fires; a call swaps the
-		// value in, so every ctx keeps one hidden class.
-		abortSignal: NEVER_ABORTED
-	};
+		platform,
+		idempotencyKey || null,
+		tenantId
+	);
 	// `ctx.batch(fn)` atomic-collector overload beside the list form. Assigned
-	// after the literal so the closure can capture the ctx instance (the
+	// after construction so the closure can capture the ctx instance (the
 	// collector shadows THIS invocation's ctx.publish - per-call by
 	// construction, so concurrent handlers never interfere); a value swap on
 	// an existing slot, so the hidden class is unchanged.

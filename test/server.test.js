@@ -4180,10 +4180,10 @@ describe('0.5.7 single-wrap invariant (every publish relays exactly once)', () =
 		});
 		__register('hot/publish', handler);
 
-		const ws = mockWs();
+		// One socket per call: one connection runs 32 calls and queues 32 more.
 		for (let i = 0; i < 100; i++) {
 			const data = toArrayBuffer({ rpc: 'hot/publish', id: 'hot-' + i, args: [i] });
-			hooks.message(ws, { data, platform });
+			hooks.message(mockWs(), { data, platform });
 		}
 		await new Promise((r) => setTimeout(r, 60));
 

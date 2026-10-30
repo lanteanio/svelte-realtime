@@ -68,7 +68,7 @@ for (const [kind, frame] of Object.entries(frames)) {
 		const sent = kind === 'batch' ? platform.sent.at(-1).data.batch[0] : reply(platform, 'late');
 		expect(sent).toMatchObject({ ok: false, code: 'UNAVAILABLE' });
 		expect(counts()).toEqual([{ path: 'drain/echo', status: 'error' }]);
-		expect(errors()).toEqual([{ path: 'drain/echo', code: 'UNAVAILABLE', reason: '', scope: '' }]);
+		expect(errors()).toEqual([{ path: 'drain/echo', code: 'UNAVAILABLE' }]);
 		expect(durations).toEqual([{ path: 'drain/echo' }]);
 	});
 }
@@ -80,7 +80,7 @@ it('folds an unregistered path refused during the drain window to a bounded labe
 	api.handleRpc(mockWs({ id: 'u1' }), frames.text('../escape', 'b'), platform);
 	await flush();
 	expect(counts()).toEqual([{ path: '__unknown__', status: 'error' }, { path: '__invalid__', status: 'error' }]);
-	expect(errors()).toEqual([{ path: '__unknown__', code: 'UNAVAILABLE', reason: '', scope: '' }, { path: '__invalid__', code: 'UNAVAILABLE', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path: '__unknown__', code: 'UNAVAILABLE' }, { path: '__invalid__', code: 'UNAVAILABLE' }]);
 });
 
 it('counts an upload refused during the drain window', async () => {
@@ -91,7 +91,7 @@ it('counts an upload refused during the drain window', async () => {
 	await flush();
 	expect(platform.sent.at(-1).data).toMatchObject({ ok: false, code: 'UNAVAILABLE' });
 	expect(counts()).toEqual([{ path: 'drain/upload', status: 'error' }]);
-	expect(errors()).toEqual([{ path: 'drain/upload', code: 'UNAVAILABLE', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path: 'drain/upload', code: 'UNAVAILABLE' }]);
 });
 
 it('counts an upload refused at admission once', async () => {
@@ -105,7 +105,7 @@ it('counts an upload refused at admission once', async () => {
 	api.handleRpc(ws, open, platform);
 	api.handleRpc(ws, open, platform);
 	await flush();
-	expect(errors()).toEqual([{ path: 'drain/upload', code: 'INVALID_REQUEST', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path: 'drain/upload', code: 'INVALID_REQUEST' }]);
 	expect(counts()).toEqual([{ path: 'drain/upload', status: 'error' }]);
 	release();
 });
@@ -122,7 +122,7 @@ for (const kind of ['text', 'binary', 'upload']) {
 		await flush();
 		expect(platform.sent.find(row => row.data?.code === 'PROTOCOL_MISMATCH')).toBeTruthy();
 		expect(counts()).toEqual([{ path, status: 'error' }]);
-		expect(errors()).toEqual([{ path, code: 'PROTOCOL_MISMATCH', reason: '', scope: '' }]);
+		expect(errors()).toEqual([{ path, code: 'PROTOCOL_MISMATCH' }]);
 	});
 }
 
@@ -169,7 +169,7 @@ for (const terminal of ['sequence', 'cancel', 'buffer', 'disconnect']) {
 		if (terminal === 'disconnect') api.close(ws, { platform, subscriptions: [] });
 		const code = { sequence: 'INVALID_REQUEST', cancel: 'CANCELLED', buffer: 'FLOW_BACKPRESSURE', disconnect: 'DISCONNECTED' }[terminal];
 		expect(counts()).toEqual([{ path: 'outcome/upload', status: 'error' }]);
-		expect(errors()).toEqual([{ path: 'outcome/upload', code, reason: '', scope: '' }]);
+		expect(errors()).toEqual([{ path: 'outcome/upload', code }]);
 		expect(durations).toEqual([{ path: 'outcome/upload' }]);
 		await flush();
 		expect(handler).not.toHaveBeenCalled();
@@ -184,7 +184,7 @@ it('keeps a pending unknown upload path bounded when cancellation wins lookup', 
 	api.handleRpc(ws, cancelUpload(), platform);
 	await flush();
 	expect(counts()).toEqual([{ path: '__unknown__', status: 'error' }]);
-	expect(errors()).toEqual([{ path: '__unknown__', code: 'CANCELLED', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path: '__unknown__', code: 'CANCELLED' }]);
 });
 for (const stage of ['guard', 'handler']) {
 	it('keeps the original cancellation outcome when a delayed ' + stage + ' resolves', async () => {
@@ -205,7 +205,7 @@ for (const stage of ['guard', 'handler']) {
 			await waiting;
 			api.handleRpc(ws, cancelUpload(), platform);
 			expect(counts()).toEqual([{ path: 'outcome/upload', status: 'error' }]);
-			expect(errors()).toEqual([{ path: 'outcome/upload', code: 'CANCELLED', reason: '', scope: '' }]);
+			expect(errors()).toEqual([{ path: 'outcome/upload', code: 'CANCELLED' }]);
 			release(); await flush();
 			expect(counts()).toHaveLength(1);
 			expect(errors()).toHaveLength(1);
@@ -253,7 +253,7 @@ for (const outcome of ['success', 'cancel', 'drain']) {
 		await flush();
 		const code = outcome === 'success' ? null : outcome === 'cancel' ? 'CANCELLED' : 'UNAVAILABLE';
 		expect(counts()).toEqual([{ path: 'credit/upload', status: code ? 'error' : 'ok' }]);
-		expect(errors()).toEqual(code ? [{ path: 'credit/upload', code, reason: '', scope: '' }] : []);
+		expect(errors()).toEqual(code ? [{ path: 'credit/upload', code }] : []);
 		expect(durations).toEqual([{ path: 'credit/upload' }]);
 	});
 }
@@ -263,7 +263,7 @@ it('does not label an ambiguous credit header as either registered endpoint', as
 	api.handleRpc(mockWs({ id: 'u1' }), uploadChunk0(17, { path: 'credit/upload', rpc: 'credit/upload' }), platform);
 	await flush();
 	expect(counts()).toEqual([{ path: '__invalid__', status: 'error' }]);
-	expect(errors()).toEqual([{ path: '__invalid__', code: 'INVALID_REQUEST', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path: '__invalid__', code: 'INVALID_REQUEST' }]);
 });
 
 it.each([false, true])('bounds credit header labels on protocol refusal (ambiguous: %s)', async ambiguous => {
@@ -276,5 +276,5 @@ it.each([false, true])('bounds credit header labels on protocol refusal (ambiguo
 	await flush();
 	const path = ambiguous ? '__invalid__' : 'credit/upload';
 	expect(counts()).toEqual([{ path, status: 'error' }]);
-	expect(errors()).toEqual([{ path, code: 'PROTOCOL_MISMATCH', reason: '', scope: '' }]);
+	expect(errors()).toEqual([{ path, code: 'PROTOCOL_MISMATCH' }]);
 });
