@@ -57,6 +57,8 @@ export function createTestContext(options?: {
 	cursor?: any;
 	/** Build a background re-run context, as middleware sees it on a stream reload or derived recompute. */
 	rerun?: 'invalidateOn' | 'staleAfterMs' | 'derived' | null;
+	/** The signal `ctx.abortSignal` returns; pass an `AbortController`'s signal to test cancellation. Defaults to one that never fires. */
+	abortSignal?: AbortSignal;
 }): {
 	user: RegisteredUser | null;
 	ws: WebSocket<RegisteredUser> | null;
@@ -73,6 +75,7 @@ export function createTestContext(options?: {
 	traceContext: import('./server.js').OperationTraceContext | null;
 	trace: import('./server.js').OperationTrace | null;
 	rerun: 'invalidateOn' | 'staleAfterMs' | 'derived' | null;
+	abortSignal: AbortSignal;
 };
 
 /**

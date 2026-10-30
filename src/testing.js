@@ -3,7 +3,7 @@ import { __register, __registerGuard, __registerCron, __registerDerived, __regis
 import { isStaleRow } from './shared/merge.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
 import { _noteTopicPublish } from './server/publish-helpers.js';
-import { _openRpcConnection } from './server/rpc-admission.js';
+import { NEVER_ABORTED, _openRpcConnection } from './server/rpc-admission.js';
 
 /**
  * Build a `ctx`-shaped object suitable for direct unit tests of guards,
@@ -70,7 +70,8 @@ export function createTestContext(options) {
 		requestId,
 		traceContext,
 		trace: contextPlatform?.trace ?? null,
-		rerun: opts.rerun ?? null
+		rerun: opts.rerun ?? null,
+		abortSignal: opts.abortSignal ?? NEVER_ABORTED
 	};
 	// Mirror the production ctx.batch semantics so handler code under test
 	// behaves like it will in production: the list form publishes each message

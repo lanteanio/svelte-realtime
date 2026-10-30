@@ -16,7 +16,8 @@ import { state } from './state.js';
 // The unsaturated path is three compares and three counters: the route's
 // record hangs off its registered function, the connection's record sits in a
 // slot on the socket's user data (declared at open, like the adapter's own
-// per-connection slots), and the worker's count is a module integer.
+// per-connection slots), and the worker's count is a module integer. A closed
+// connection's count is pushed past every cap, so the same compares refuse it.
 //
 // A call's deadline is counted in ticks of RPC_DEADLINE_TICK_MS from the tick
 // it arrived in. The ticker runs while calls run, wait or hold a deadline, and
@@ -136,7 +137,7 @@ export function _validateRouteConcurrent(value, where) {
 
 /**
  * @typedef {object} RpcConn
- * @property {number} active - calls running
+ * @property {number} active - calls running, plus _CLOSED_OFFSET once closed
  * @property {number} queued - calls waiting in the queue
  * @property {boolean} closed
  * @property {Map<any, RpcCallSignal> | null} calls - running calls whose handler read its signal, by ctx
@@ -176,6 +177,8 @@ const _routes = new Map();
  * this module agree on it.
  */
 export const RPC_CONNECTION = Symbol.for('svelte-realtime.rpc.connection');
+/** Added to a closed connection's running count, so no call of it fits any cap. */
+const _CLOSED_OFFSET = 2 ** 40;
 /** Records of sockets whose user data cannot carry the slot (not an extensible object). @type {WeakMap<object, RpcConn>} */
 const _unslotted = new WeakMap();
 let _active = 0;
@@ -325,7 +328,7 @@ function _blocked(conn, route) {
  * arrived at deadline tick `arrived`. Returns the connection's record (the
  * permit) when the call may start now, a rejection when it is refused, or a
  * promise of either when it waits in the queue. A rejected call holds
- * nothing.
+ * nothing, and a call of a closed connection is always refused.
  * @param {any} user
  * @param {object} ws
  * @param {RpcRoute} route
@@ -342,6 +345,7 @@ export function _admitRpc(user, ws, route, arrived) {
 		if (_ticker === null) _startTicker();
 		return conn;
 	}
+	if (conn.closed) return _CLOSED_WAITING;
 	const scope = /** @type {'connection' | 'route' | 'global'} */ (_blocked(conn, route));
 	if (_config.maxQueue === 0) return _LIMITED[scope];
 	if (conn.queued >= _connQueueCap) return _CONNECTION_QUEUE_FULL;
@@ -440,8 +444,10 @@ function _dropQueued(index, rejection) {
 }
 
 /**
- * The connection closed: fire the signals its running calls read and drop its
- * queued calls. Running calls keep their permits until their handlers settle.
+ * The connection closed: refuse its later calls, fire the signals its running
+ * calls read and drop its queued calls. Running calls keep their permits until
+ * their handlers settle. A socket that never called still gets a closed
+ * record, so a call that resolves its path after the close cannot open one.
  * @param {any} user - the socket's user data
  * @param {object} ws
  */
@@ -449,6 +455,7 @@ export function _closeRpcConnection(user, ws) {
 	const conn = _connOf(user, ws);
 	if (conn.closed) return;
 	conn.closed = true;
+	conn.active += _CLOSED_OFFSET;
 	for (let i = _queue.length - 1; i >= 0; i--) {
 		if (_queue[i].conn === conn) _dropQueued(i, _CLOSED_WAITING);
 	}

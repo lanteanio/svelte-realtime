@@ -320,6 +320,39 @@ describe('release on every exit', () => {
 	});
 });
 
+describe('a closed connection', () => {
+	it('refuses a call that reaches admission after its connection closed', async () => {
+		api.configureRpc({ perRouteConcurrent: 1 });
+		const { handler, open } = gated();
+		api.__register('closed/busy', handler);
+		const platform = mockPlatform();
+		// Saturate the route so a late call would otherwise queue.
+		api.handleRpc(mockWs({ id: 'holder' }), text('closed/busy', 'h'), platform);
+		await settle();
+		const ws = mockWs({ id: 'gone' });
+		api.close(ws, { platform });
+		api.handleRpc(ws, text('closed/busy', 'late'), platform);
+		await settle();
+		expect(replies(platform).get('late')).toMatchObject({ ok: false, code: 'CONNECTION_CLOSED' });
+		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ queued: 0, active: 1 });
+		open();
+		await settle();
+	});
+
+	it('refuses a late call of a closed connection on an idle worker too', async () => {
+		api.__register('closed/idle', api.live(async () => 'ran'));
+		const platform = mockPlatform();
+		const ws = mockWs({ id: 'gone' });
+		api.handleRpc(ws, text('closed/idle', 'first'), platform);
+		await settle();
+		api.close(ws, { platform });
+		api.handleRpc(ws, text('closed/idle', 'late'), platform);
+		await settle();
+		expect(replies(platform).get('late')).toMatchObject({ ok: false, code: 'CONNECTION_CLOSED' });
+		expect(admission._rpcAdmissionSnapshot().active).toBe(0);
+	});
+});
+
 describe('ctx as LiveCallContext', () => {
 	it('keeps the admission state out of copies and keys', async () => {
 		let seen;
@@ -343,5 +376,17 @@ describe('ctx as LiveCallContext', () => {
 		expect(replies(platform).get('l')).toMatchObject({ ok: true });
 		expect(seen).toBeInstanceOf(AbortSignal);
 		expect(seen.aborted).toBe(false);
+	});
+});
+
+describe('createTestContext', () => {
+	it('gives handlers under test an abortSignal', async () => {
+		const { createTestContext } = await import('../src/testing.js');
+		const ctx = createTestContext();
+		expect(() => ctx.abortSignal.throwIfAborted()).not.toThrow();
+		const controller = new AbortController();
+		const cancelled = createTestContext({ abortSignal: controller.signal });
+		controller.abort(new Error('stop'));
+		expect(() => cancelled.abortSignal.throwIfAborted()).toThrow('stop');
 	});
 });
