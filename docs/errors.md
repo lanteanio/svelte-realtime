@@ -253,7 +253,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 ### `FORGET_CANCELLED`
 
 - Cause: `abandonForgetJob(id)` gave up an erasure job while a run of `live.forget` or `resumeForgetJobs()` was working on it, on this process or another one.
-- Consequence: The run starts no further step, its pending store calls are abandoned (the durable `purgeUser` sees its `signal` fire), and it rejects with a FORGET_CANCELLED LiveError carrying the job reference in its non-enumerable `job` property. The job ends `abandoned`, and the process that abandoned it drops the in-memory steps it owed for it. Steps that finished stay erased. A run that had already finished every step completes instead.
+- Consequence: The run starts no further step, its pending store calls are abandoned (the durable `purgeUser` sees its `signal` fire), and it rejects with a FORGET_CANCELLED LiveError carrying the job reference in its non-enumerable `job` property. The job ends `abandoned`, and the process that abandoned it drops the in-memory steps it owed for it. Steps that finished stay erased. A run that had already finished every step completes instead, unless the store had already marked the job abandoned (a resume swept it while the run stalled, or its failure landed on the cancelled job): then the run ends with FORGET_CANCELLED although it finished every step, and `onForget` does not run. Calling `live.forget` again is optional and harmless.
 - Automatic recovery: None. An abandoned job never runs again.
 - Next action: Nothing, if giving the erasure up was intended. To erase the user after all, call `live.forget` again; it records a new job.
 - Message patterns: <code>live.forget: the erasure job was abandoned while it ran; the erasure is incomplete</code>
