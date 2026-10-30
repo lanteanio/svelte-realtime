@@ -189,7 +189,7 @@ export function _purgeCrdtDocs(names) {
 		for (const name of names) {
 			// A document joined again after erasure starts from what the
 			// durable store holds then, with no merge left over from before.
-			rec.mergePending.delete(name);
+			if (rec.mergePending) rec.mergePending.delete(name);
 			try { if (rec.authority.drop(name)) count++; }
 			catch { failed = true; }
 		}
