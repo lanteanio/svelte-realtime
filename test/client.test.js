@@ -3704,6 +3704,34 @@ describe('__stream() reconnect cursor time-check', () => {
 		unsub();
 	});
 
+	it('applies a replay whose sequence is ahead of its last event', async () => {
+		// An older server reads the sequence after the events: one published in
+		// between is not in the answer and reaches the client live.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('ahead/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 11, event: 'created', data: { id: 2 } }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 12, replay: true });
+		simulateTopicMessage('ahead-topic', { event: 'created', data: { id: 3 }, seq: 12 });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
 	it('keeps the replay cursor for a brief bounce within resumeMaxCursorAgeMs', async () => {
 		// An ordinary socket bounce still gap-fills from the retained seq - the
 		// default 60s bound comfortably covers it.

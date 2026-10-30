@@ -1,12 +1,13 @@
 // A stream that resumes from its cursor gets a replay only when the buffer
 // still holds every frame after that cursor. A buffer trimmed past it, or one
-// that lost its history, answers from the loader, and the view is replaced
-// rather than built on the rows the client held. Live frames of a stream
-// published through the buffer carry its sequence, so a repeated frame, or
-// one overtaken by a newer frame for the same row or value, is not applied.
-// Runs the real client, the installed adapter client and the adapter's test
-// server with the adapter's in-memory replay buffer, behind a socket that can
-// repeat and hold frames.
+// that lost its history, answers from `delta.fromSeq` or the loader, and the
+// view is replaced rather than built on the rows the client held. Live frames
+// of a stream published through the buffer carry its sequence: one overtaken
+// by a newer frame for the same row or value is not applied, and a sequence
+// seen again (a repeat, or a counter the buffer restarted while the socket
+// stayed up) makes the stream re-snapshot. Runs the real client, the
+// installed adapter client and the adapter's test server with the adapter's
+// in-memory replay buffer, behind a socket that can repeat and hold frames.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
@@ -18,6 +19,7 @@ const { connect } = await import('svelte-adapter-uws/client');
 const { createReplay } = await import('svelte-adapter-uws/plugins/replay');
 const { live, realtime, __register, _prepareHmr, _resetLifecycle } = await import('../src/server.js');
 const { __stream, simulateOffline, resumeOnline } = await import('../src/client.js');
+const { setRuntimeEnv, resetRuntimeEnv } = await import('../src/client-runtime.js');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(check, what) {
@@ -38,6 +40,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+	resetRuntimeEnv();
 	lossy.link.inbound = null;
 	resumeOnline();
 });
@@ -137,17 +140,29 @@ describe('stream resume against a replay buffer that cannot fill the gap', () =>
 	});
 });
 
-/** A stream of `merge` over `initial`, published through a replay buffer. */
-async function mounted(merge, initial) {
+/**
+ * A stream of `merge` over `initial`, published through a replay buffer.
+ * `publish` changes what the loader reads and publishes the change.
+ */
+async function mounted(merge, initial, replayOptions = { size: 50 }) {
 	const topic = 'ordered-' + ++n;
 	const path = 'ordered' + n + '/feed';
-	__register(path, live.public(live.stream(topic, async () => initial, merge === 'crud' ? { merge, key: 'id', replay: true } : { merge, replay: true })));
-	server.platform.replay = createReplay({ size: 50 });
+	let state = initial;
+	const read = () => (Array.isArray(state) ? state.slice() : state);
+	let loads = 0;
+	__register(path, live.public(live.stream(topic, async () => { loads++; return read(); }, merge === 'crud' ? { merge, key: 'id', replay: true } : { merge, replay: true })));
+	server.platform.replay = createReplay(replayOptions);
 	const store = __stream(path, merge === 'crud' ? { merge, key: 'id' } : { merge });
 	const off = store.subscribe(() => {});
 	await until(() => get(store) !== undefined, 'the snapshot');
-	const publish = (event, data) => server.platform.replay.publish(server.platform, topic, event, data);
-	return { topic, store, off, publish };
+	const publish = (event, data) => {
+		if (merge === 'set') state = data;
+		else if (merge === 'latest') state = [...state, data];
+		else if (event === 'deleted') state = state.filter((r) => r.id !== data.id);
+		else state = [...state.filter((r) => r.id !== data.id), data];
+		server.platform.replay.publish(server.platform, topic, event, data);
+	};
+	return { topic, store, off, publish, loads: () => loads };
 }
 
 /** Repeat every frame on `topic`. */
@@ -219,14 +234,82 @@ describe('live frames repeated or overtaken on the way to a sequenced stream', (
 		off();
 	});
 
-	it('a latest stream appends a repeated frame once', async () => {
-		const { topic, store, off, publish } = await mounted('latest', []);
+	it('a latest stream does not list a repeated frame twice', async () => {
+		setRuntimeEnv({ rng: { float: () => 0 } });
+		const { topic, store, off, publish, loads } = await mounted('latest', []);
 		repeatFrames(topic);
 		publish('push', { id: 1 });
 		publish('push', { id: 2 });
-		await until(() => get(store).some((r) => r.id === 2), 'both frames');
+		await until(() => loads() > 1 && get(store).length === 2, 'the re-snapshot');
 		await sleep(20);
 		expect(get(store)).toEqual([{ id: 1 }, { id: 2 }]);
+		off();
+	});
+});
+
+describe('a sequence the buffer restarts while the client stays connected', () => {
+	/** Evict the stream's topic from a one-topic buffer, which restarts its counter. */
+	const evict = () => server.platform.replay.publish(server.platform, 'evictor-' + n, 'noop', null);
+
+	it.each([
+		['set', { owner: 'ann' }, [['set', { owner: 'bob' }], ['set', { owner: 'cat' }]], ['set', { owner: 'dan' }], ['set', { owner: 'eve' }], { owner: 'eve' }],
+		['crud', [], [['created', { id: 1 }], ['created', { id: 2 }]], ['deleted', { id: 1 }], ['created', { id: 3 }], [{ id: 2 }, { id: 3 }]],
+		['latest', [], [['push', { id: 1 }], ['push', { id: 2 }]], ['push', { id: 3 }], ['push', { id: 4 }], [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]]
+	])('a %s stream re-snapshots on the restarted sequence and applies the frames after it', async (merge, initial, before, first, next, expected) => {
+		setRuntimeEnv({ rng: { float: () => 0 } });
+		const { store, off, publish, loads } = await mounted(merge, initial, { size: 50, maxTopics: 1 });
+		for (const [event, data] of before) publish(event, data);
+		await sleep(30);
+		expect(loads()).toBe(1);
+		evict();
+		publish(...first);
+		await until(() => loads() === 2, 'the re-snapshot');
+		await sleep(30);
+		publish(...next);
+		await sleep(30);
+		const value = get(store);
+		expect(merge === 'crud' ? [...value].sort((a, b) => a.id - b.id) : value).toEqual(expected);
+		expect(loads()).toBe(2);
+		off();
+	});
+});
+
+describe('a resume answered by delta.fromSeq', () => {
+	it('applies the application events without the buffer continuity check', async () => {
+		const topic = 'bridged-' + ++n;
+		const path = 'bridged' + n + '/feed';
+		let rows = [{ id: 1 }];
+		let loads = 0;
+		__register(path, live.public(live.stream(topic, async () => { loads++; return rows.slice(); }, {
+			merge: 'crud', key: 'id', replay: true,
+			// Sequences from a table shared by many topics: not the buffer's
+			// numbering, and with gaps.
+			delta: { fromSeq: async () => [
+				{ seq: 120, event: 'created', data: { id: 2 } },
+				{ seq: 245, event: 'deleted', data: { id: 1 } }
+			] }
+		})));
+		server.platform.replay = createReplay({ size: 2 });
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const off = store.subscribe(() => {});
+		await until(() => Array.isArray(get(store)), 'the snapshot');
+		const publish = (event, data) => server.platform.replay.publish(server.platform, topic, event, data);
+		publish('updated', { id: 1, v: 1 });
+		await until(() => get(store)[0]?.v === 1, 'the live frame');
+		simulateOffline();
+		await sleep(20);
+		rows = [{ id: 2 }];
+		publish('created', { id: 2 });
+		publish('deleted', { id: 1 });
+		publish('updated', { id: 2 });
+		resumeOnline();
+		await until(() => !get(store).some((r) => r.id === 1), 'the resume');
+		await sleep(30);
+		expect(get(store)).toEqual([{ id: 2 }]);
+		expect(loads).toBe(1);
+		// Live frames after it still apply.
+		publish('created', { id: 3 });
+		await until(() => get(store).some((r) => r.id === 3), 'the next live frame');
 		off();
 	});
 });

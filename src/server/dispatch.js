@@ -1331,7 +1331,9 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 					id, ok: true, data: events, topic,
 					merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion,
 					prepend: streamOpts.prepend, max: streamOpts.max,
-					replay: true
+					// The application numbers these events, not the replay buffer:
+					// the client takes them without checking their continuity.
+					replay: true, fromSeq: true
 				};
 				if (respSeq !== undefined) deltaResp.seq = respSeq;
 				armReloads();
