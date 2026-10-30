@@ -13,6 +13,7 @@ import { _bindAlarmCtx } from '../src/server/alarm.js';
 import { createTestEnv } from '../src/testing.js';
 import { state, registry as liveRegistry, _webhookOutById } from '../src/server/state.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
+import { _resetBackgroundMetrics } from '../src/server/background-metrics.js';
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import { mockPlatform } from './helpers/mock-platform.js';
 
@@ -74,6 +75,7 @@ afterEach(async () => {
 		if (withResult) expect(BACKGROUND_METRICS.results).toContain(labels.result);
 	}
 	state.metricsInstruments = null;
+	_resetBackgroundMetrics();
 });
 
 const total = (kind, result) => metrics.count(BACKGROUND_METRICS.total.name, { kind, result });
@@ -396,6 +398,18 @@ describe('outbound webhook and dead-letter queue', () => {
 		await replayDeadLetter({ dryRun: true });
 		expect(total('dlq', 'skipped')).toBe(1);
 		_webhookOutById.delete(path);
+
+		// A store that is not the built-in one owns the dlq depth and age, so the
+		// built-in store's last values are cleared once and then left alone.
+		getDeadLetter().add({ webhookId: 'hooks/gone', topic: 't', event: 'e', data: {}, attempts: 1, error: 'x' });
+		configureWebhooks({ deadLetter: true });
+		expect(gauge(QUEUED, 'dlq')).toBeGreaterThan(0);
+		configureWebhooks({ deadLetter: { add() { return 'x'; }, get() { return null; }, remove() { return false; }, list() { return []; }, count() { return 0; }, summary() { return { total: 0, byTopic: {}, oldest: null, newest: null }; } } });
+		expect(gauge(QUEUED, 'dlq')).toBe(0);
+		expect(gauge(AGE, 'dlq')).toBe(0);
+		const writes = metrics.sets.length;
+		configureWebhooks({ deadLetter: false });
+		expect(metrics.labelSets.slice(-(metrics.sets.length - writes)).filter(([, l]) => l.kind === 'dlq')).toEqual([]);
 	}, 10000);
 });
 

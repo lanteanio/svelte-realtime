@@ -10,6 +10,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { live, onError, configureWebhooks, getDeadLetter, createDeadLetterStore, __registerWebhookOut, __registerFlag, _prepareHmr, setOperationalEventSink } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 import { state } from '../src/server/state.js';
+import { _resetBackgroundMetrics } from '../src/server/background-metrics.js';
 
 const flush = async (n = 12) => {
 	for (let i = 0; i < n; i++) await Promise.resolve();
@@ -25,6 +26,7 @@ afterEach(async () => {
 	setOperationalEventSink(null);
 	configureWebhooks({ deadLetter: false });
 	state.metricsInstruments = null;
+	_resetBackgroundMetrics();
 	if (server) await server.close();
 	server = null;
 });

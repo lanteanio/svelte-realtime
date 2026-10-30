@@ -19,9 +19,13 @@ The duration histogram uses the bucket bounds 0.001, 0.005, 0.025, 0.1, 0.25, 1,
 
 The gauges are written with `set`, so the registry's gauge needs a `set(labels, value)` method (the extensions `createMetrics()` gauge has one). `inflight` and `queued` are written once per microtask in which they change. `oldest_age_seconds` is refreshed every second while anything waits and reads 0 when nothing does.
 
+## Across processes
+
+Every gauge describes the process that writes it. Add `inflight` and `queued` across processes (`sum by (kind)`) and take the largest `oldest_age_seconds` (`max by (kind)`). A queue held in shared storage, such as a durable job or task table or a durable dead-letter store, has one depth for the whole cluster, so only one process (the leader) writes its `queued` and `oldest_age_seconds`, and the same sum and maximum stay correct.
+
 ## `kind`
 
-Each kind has exactly one producer. A producer registers the whole schema but writes only its own kinds, so two producers never overwrite each other's gauges.
+Each series of a kind has exactly one producer. A producer registers the whole schema but writes only its own series, so two producers never overwrite each other's gauges. Every kind has one producer for all of its series except `dlq`, whose depth and age come from whichever dead-letter store is configured.
 
 | Kind | Producer | Item | Queue |
 |---|---|---|---|
@@ -35,7 +39,7 @@ Each kind has exactly one producer. A producer registers the whole schema but wr
 | `job` | svelte-adapter-uws-extensions | One durable job run | the job table |
 | `task` | svelte-adapter-uws-extensions | One durable task attempt | the task table |
 
-`queued` and `oldest_age_seconds` exist only for kinds with a queue. For `dlq`, svelte-realtime samples them from its built-in in-memory store; a durable dead-letter store from svelte-adapter-uws-extensions reports them itself, and svelte-realtime then writes no `dlq` depth or age.
+`queued` and `oldest_age_seconds` exist only for kinds with a queue. For `dlq`, svelte-realtime writes the count, the duration and `inflight` of replays, and samples `queued` and `oldest_age_seconds` from its built-in in-memory store; a durable dead-letter store from svelte-adapter-uws-extensions writes those two itself, and svelte-realtime then writes no `dlq` depth or age (it sets them to 0 once when its built-in store stops being the configured one).
 
 ## `result`
 
@@ -56,7 +60,7 @@ Each kind has exactly one producer. A producer registers the whole schema but wr
 
 ## Registering the schema in another package
 
-A second producer registers the same six descriptors, every field identical (`name`, `help`, `labelNames`, and `buckets` for the histogram). The extensions `createMetrics()` registry hands back the existing instrument for a repeated name only when every field matches, and throws when one differs, so a drifted descriptor fails at startup rather than splitting the series. The descriptors are plain data:
+A second producer registers the same six descriptors, every field identical (`name`, `help`, `labelNames`, and `buckets` for the histogram), and passes nothing else, so `maxSeries`, `allowNegative` and `maxBuckets` keep the registry's defaults; svelte-realtime registers them the same way. The extensions `createMetrics()` registry hands back the existing instrument for a repeated name only when all of these fields match, and throws when one differs, so a drifted descriptor fails at startup rather than splitting the series. The histogram declares 13 buckets, within that registry's default `maxBuckets` of 32. The descriptors are plain data:
 
 ```js
 import { BACKGROUND_METRICS } from 'svelte-realtime/server';

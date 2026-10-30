@@ -188,6 +188,8 @@ const _waiting = new Set();
 let _sampler = null;
 /** When `live.metrics` installed the current instruments (monotonic ms). */
 let _installedAt = 0;
+/** Whether the `dlq` depth and age last written came from the built-in store. */
+let _dlqWritten = false;
 
 /** The queue time to record for a waiting item: 0 while metrics are off. */
 export function _bgQueuedAt() {
@@ -241,18 +243,40 @@ function _sample() {
 	// The built-in dead-letter store is sampled here; a durable store reports
 	// its own depth and age.
 	const dlq = mi ? _deadLetterStats(state.webhookDeadLetter) : null;
+	// When the built-in store stops being the configured one, its last depth
+	// and age are cleared once; after that the configured store owns them.
+	const writeDlq = !!dlq || _dlqWritten;
+	_dlqWritten = !!dlq;
 	const ageGauge = mi?.backgroundOldestAge;
 	if (ageGauge && typeof ageGauge.set === 'function') {
 		ageGauge.set(_kindLabels.effect, effectAge);
 		ageGauge.set(_kindLabels.webhook, webhookAge);
-		if (dlq) ageGauge.set(_kindLabels.dlq, dlq.depth ? Math.max(0, now() - dlq.oldestAt) / 1000 : 0);
+		if (writeDlq) ageGauge.set(_kindLabels.dlq, dlq && dlq.depth ? Math.max(0, now() - dlq.oldestAt) / 1000 : 0);
 	}
 	const queued = mi?.backgroundQueued;
-	if (dlq && queued && typeof queued.set === 'function') queued.set(_kindLabels.dlq, dlq.depth);
+	if (writeDlq && queued && typeof queued.set === 'function') queued.set(_kindLabels.dlq, dlq ? dlq.depth : 0);
 	if (_sampler && (!mi || (_waiting.size === 0 && !(dlq && dlq.depth)))) {
 		clearIntervalTimer(_sampler);
 		_sampler = null;
 	}
+}
+
+/**
+ * Forget every count, waiting queue and timer, for a test that starts from a
+ * clean process state. Work still running when it is called must not settle
+ * afterwards.
+ */
+export function _resetBackgroundMetrics() {
+	for (const kind in _totals) {
+		_totals[/** @type {OwnKind} */ (kind)].inflight = 0;
+		_totals[/** @type {OwnKind} */ (kind)].queued = 0;
+	}
+	_waiting.clear();
+	if (_sampler) clearIntervalTimer(_sampler);
+	_sampler = null;
+	_flushPending = false;
+	_installedAt = 0;
+	_dlqWritten = false;
 }
 
 /** Write every gauge this package owns when `live.metrics()` installs them. */

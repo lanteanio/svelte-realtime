@@ -1272,6 +1272,15 @@ export interface MetricsRegistry {
 	gauge(opts: { name: string; help: string; labelNames?: string[] }): {
 		inc(): void;
 		dec(): void;
+		/**
+		 * Write a value, labelled or not. The background work gauges, the lock
+		 * waiter gauge and the performance budget gauge are written this way;
+		 * a gauge without it leaves them empty.
+		 */
+		set?: {
+			(value: number): void;
+			(labels: Record<string, string | number>, value: number): void;
+		};
 	};
 }
 
