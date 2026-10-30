@@ -1,19 +1,21 @@
-// Dead-letter capture keys and receipts: a keyed add is a single write no
-// matter how often it is retried, the record id is the receipt every retry
-// gets back, a key reused for different content is a typed conflict, and a key
-// is held only as long as its record.
+// Dead-letter capture keys and receipts: the capture key is the failed
+// delivery's idempotency key, a keyed add is a single write per webhook no
+// matter how often it is retried, the record id is the receipt every retry gets
+// back, and a key is held only as long as its record.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
 import { createDeadLetterStore, configureWebhooks, getDeadLetter, setOperationalEventSink } from '../src/server.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
 import { _webhookOutById } from '../src/server/state.js';
 
 const rec = (over = {}) => ({ webhookId: 'w', topic: 'orders', event: 'created', data: { id: 1, author: 'u1' }, attempts: 3, error: 'x', failedAt: 1, ...over });
 const failingEntry = { id: 'test/wh', config: { url: 'http://127.0.0.1:9/blocked' } }; // loopback -> SSRF-blocked
+const adapterKey = (topic, event, body) => createHash('sha256').update(topic + '\0' + event + '\0' + body).digest('hex');
 
 function reset() {
-	configureWebhooks({ deadLetter: false });
+	configureWebhooks({ deadLetter: false, breaker: false });
 	_webhookOutById.clear();
 }
 
@@ -35,21 +37,19 @@ describe('keyed dead-letter add', () => {
 		expect(s.count()).toBe(1);
 	});
 
-	it('treats objects with reordered keys as the same content', () => {
+	it('scopes a key to its webhook', () => {
 		const s = createDeadLetterStore();
-		const a = s.add(rec({ key: 'k', data: { b: 2, a: { y: 1, x: [1, { q: 1, p: 2 }] } } }));
-		const b = s.add(rec({ key: 'k', data: { a: { x: [1, { p: 2, q: 1 }], y: 1 }, b: 2 } }));
-		expect(b).toBe(a);
+		const a = s.add(rec({ key: 'k' }));
+		const b = s.add(rec({ key: 'k', webhookId: 'w2' }));
+		expect(b).not.toBe(a);
+		expect(s.count()).toBe(2);
 	});
 
-	it('rejects the same key with different content as a typed conflict and keeps the original', () => {
+	it('does not hash or encode the content of a keyed add', () => {
 		const s = createDeadLetterStore();
-		const id = s.add(rec({ key: 'k' }));
-		for (const change of [{ data: { id: 2, author: 'u1' } }, { event: 'updated' }, { topic: 'other' }, { webhookId: 'w2' }]) {
-			expect(() => s.add(rec({ key: 'k', ...change }))).toThrow(expect.objectContaining({ code: 'DEAD_LETTER_KEY_CONFLICT' }));
-		}
-		expect(s.count()).toBe(1);
-		expect(s.get(id).data).toEqual({ id: 1, author: 'u1' });
+		const id = s.add(rec({ key: 'k', data: { n: 1n } }));
+		expect(s.add(rec({ key: 'k', data: { n: 2n } }))).toBe(id);
+		expect(s.get(id).data).toEqual({ n: 1n });
 	});
 
 	it('rejects a malformed key', () => {
@@ -77,7 +77,7 @@ describe('keyed dead-letter add', () => {
 		expect(b).not.toBe(a);
 		s.add(rec({ key: 'other', data: 2 })); // evicts b
 		expect(s.get(b)).toBeNull();
-		const c = s.add(rec({ key: 'k', data: { changed: true } })); // no conflict once released
+		const c = s.add(rec({ key: 'k', data: { changed: true } }));
 		expect(s.get(c).data).toEqual({ changed: true });
 	});
 
@@ -98,19 +98,84 @@ describe('dead-letter capture key', () => {
 	beforeEach(reset);
 	afterEach(() => { setOperationalEventSink(null); reset(); });
 
-	it('derives the key from the delivery identity as sha256 over canonical JSON', async () => {
+	it('is the idempotency key the adapter derives for the delivery', async () => {
+		configureWebhooks({ deadLetter: true });
+		const data = { b: [2, { d: null, c: 3 }], a: 1 };
+		await _fireWebhookOut(failingEntry, '@t/acme/orders', 'created', data, null);
+		const body = JSON.stringify({ event: 'created', data });
+		expect(getDeadLetter().list()[0].key).toBe(adapterKey('@t/acme/orders', 'created', body));
+	});
+
+	it('is the HMAC key with a secret and the configured key with an idempotencyKey callback', async () => {
+		configureWebhooks({ deadLetter: true });
+		const secret = 's'.repeat(32);
+		await _fireWebhookOut({ id: 'test/signed', config: { ...failingEntry.config, secret } }, 'orders', 'created', { id: 1 }, null);
+		const material = 'orders\0created\0' + JSON.stringify({ event: 'created', data: { id: 1 } });
+		expect(getDeadLetter().list().find((r) => r.webhookId === 'test/signed').key)
+			.toBe(createHmac('sha256', secret).update('idem\0' + material).digest('hex'));
+		await _fireWebhookOut({ id: 'test/custom', config: { ...failingEntry.config, idempotencyKey: (_e, d) => 'order-' + d.id } }, 'orders', 'created', { id: 7 }, null);
+		expect(getDeadLetter().list().find((r) => r.webhookId === 'test/custom').key).toBe('order-7');
+	});
+
+	it('follows the transformed body, so events a receiver sees as one delivery are one record', async () => {
+		configureWebhooks({ deadLetter: true });
+		const entry = { id: 'test/tx', config: { ...failingEntry.config, transform: (event, d) => ({ event, id: d.id }) } };
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1, seenAt: 1 }, null);
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1, seenAt: 2 }, null);
+		expect(getDeadLetter().count()).toBe(1);
+		expect(getDeadLetter().list()[0].key).toBe(adapterKey('orders', 'created', JSON.stringify({ event: 'created', id: 1 })));
+	});
+
+	it('keeps payloads apart that differ only in an own __proto__ key or a boxed primitive', async () => {
+		configureWebhooks({ deadLetter: true });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', JSON.parse('{"__proto__":{"admin":true}}'), null);
+		await _fireWebhookOut(failingEntry, 'orders', 'created', {}, null);
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { n: new Number(1) }, null);
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { n: new Number(2) }, null);
+		expect(getDeadLetter().count()).toBe(4);
+	});
+
+	it('equals the idempotency-key header the receiver got', async () => {
 		const seen = [];
-		const s = createDeadLetterStore();
-		const add = s.add.bind(s);
-		s.add = (r) => { seen.push(r); return add(r); };
-		configureWebhooks({ deadLetter: s });
-		await _fireWebhookOut(failingEntry, '@t/acme/orders', 'created', { b: [2, { d: null, c: 3 }], a: 1 }, null);
-		const expected = createHash('sha256')
-			.update('["test/wh","@t/acme/orders","created",{"a":1,"b":[2,{"c":3,"d":null}]}]')
-			.digest('hex');
-		expect(seen).toHaveLength(1);
-		expect(seen[0].key).toBe(expected);
-		expect(s.list()[0].key).toBe(expected);
+		const server = createServer((req, res) => {
+			seen.push(req.headers['idempotency-key']);
+			req.resume();
+			req.on('end', () => { res.writeHead(500); res.end(); });
+		});
+		const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+		try {
+			configureWebhooks({ deadLetter: true });
+			const url = `http://127.0.0.1:${port}/hook`;
+			const retry = { attempts: 1, initialDelayMs: 1, maxDelayMs: 1 };
+			const configs = [
+				{ url, urlMode: 'off', retry },
+				{ url, urlMode: 'off', retry, secret: 'x'.repeat(32), transform: (event, d) => ({ kind: event, d }) },
+				{ url, urlMode: 'off', retry, idempotencyKey: async (_e, d) => 'evt-' + d.id }
+			];
+			for (const [i, config] of configs.entries()) {
+				await _fireWebhookOut({ id: 'test/live' + i, config }, 'orders', 'created', { id: i }, null);
+			}
+			const keys = configs.map((_, i) => getDeadLetter().list().find((r) => r.webhookId === 'test/live' + i).key);
+			expect(seen).toHaveLength(3);
+			expect(keys).toEqual(seen);
+			expect(keys[2]).toBe('evt-2');
+		} finally {
+			await new Promise((r) => server.close(r));
+		}
+	});
+
+	it('derives the key when the delivery failed before the adapter asked for it', async () => {
+		configureWebhooks({ deadLetter: true, breaker: { guard() { throw new Error('ejected'); }, success() {}, failure() {} } });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 3 }, null);
+		expect(getDeadLetter().list()[0]).toMatchObject({ attempts: 0, key: adapterKey('orders', 'created', JSON.stringify({ event: 'created', data: { id: 3 } })) });
+	});
+
+	it('captures unkeyed when the delivery has no usable key', async () => {
+		configureWebhooks({ deadLetter: true });
+		const entry = { id: 'test/none', config: { ...failingEntry.config, idempotencyKey: () => null } };
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
+		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
+		expect(getDeadLetter().list().map((r) => r.key)).toEqual([null, null]);
 	});
 
 	it('retries a lost reply with the same key without duplicating the record', async () => {
@@ -133,17 +198,6 @@ describe('dead-letter capture key', () => {
 		expect(calls[1].key).toBe(calls[0].key);
 		expect(inner.count()).toBe(1);
 		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(0);
-	});
-
-	it('does not retry a key conflict', async () => {
-		const events = [];
-		setOperationalEventSink((e) => events.push(e));
-		let calls = 0;
-		const s = createDeadLetterStore();
-		configureWebhooks({ deadLetter: { ...s, add: () => { calls++; throw Object.assign(new Error('conflict'), { code: 'DEAD_LETTER_KEY_CONFLICT' }); } } });
-		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null);
-		expect(calls).toBe(1);
-		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(1);
 	});
 
 	it('keeps one record for the same failed delivery captured twice', async () => {

@@ -5259,10 +5259,10 @@ export interface DeadLetterRecord {
 	traceContext?: OperationTraceContext | null;
 	/**
 	 * The capture key the record was added under, or null for an unkeyed add.
-	 * The webhook capture keys every record with its content fingerprint: the
-	 * lowercase hex SHA-256 of the JSON array `[webhookId, topic, event, data]`
-	 * with object keys sorted. A key is held only while its record is retained.
-	 * The built-in store always sets it; a store that predates keys omits it.
+	 * The webhook capture uses the failed delivery's `idempotency-key` header
+	 * value, so the queue keeps one record per delivery a receiver would accept
+	 * once. A key is held only while its record is retained. The built-in store
+	 * always sets it; a store that predates keys omits it.
 	 */
 	key?: string | null;
 }
@@ -5270,10 +5270,11 @@ export interface DeadLetterRecord {
 /** What a dead-letter capture hands to `DeadLetterStore.add`. */
 export type DeadLetterCapture = Omit<DeadLetterRecord, 'id' | 'key'> & {
 	/**
-	 * Capture key, 1 to 256 characters. While a record with this key is
-	 * retained, an add with the same content returns that record's id without
-	 * writing, and an add with different content throws an error whose `code`
-	 * is `'DEAD_LETTER_KEY_CONFLICT'`. Omit or pass null for an unkeyed add.
+	 * Capture key, 1 to 256 characters, scoped to `webhookId`. While a record
+	 * with this webhook and key is retained, an add returns that record's id
+	 * without writing anything; the content of the repeat is not compared.
+	 * Passed only to a store that declares `keyedAdd`. Omit or pass null for an
+	 * unkeyed add.
 	 */
 	key?: string | null;
 	/** Monotonic delivery start, read by the erasure tombstone and never stored. */

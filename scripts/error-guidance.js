@@ -27,12 +27,6 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. Nothing reconnects after the connection closes for good, and `configure({ url, auth })` is ignored from then on.',
 		nextAction: 'Show the user that the connection is offline. Find out why it closed (auth, close code, retry budget), fix that, then call the adapter `connect()` explicitly to open a new connection.'
 	}),
-	DEAD_LETTER_KEY_CONFLICT: Object.freeze({
-		cause: 'A dead-letter store `add` brings a `key` that a retained record already holds, but the held record has a different webhook id, topic, event or data than the new capture.',
-		consequence: '`add` throws and nothing is written; the retained record is unchanged. The webhook capture does not repeat the write and reports `webhook.dead-letter.persist-failed`.',
-		automaticRecovery: 'None. A conflicting key is never retried.',
-		nextAction: 'Derive keys from the content they stand for. The built-in capture uses the content fingerprint, so a conflict there means a custom store or caller reused a key for different content.'
-	}),
 	DISCONNECTED: Object.freeze({
 		cause: 'The socket dropped or was replaced while a request was in flight, or a request outlived its timeout by a margin that points to device sleep. On the server, the client socket closed during an upload.',
 		consequence: 'Sent RPCs and uploads reject with RpcError DISCONNECTED. A stream shows the error. On the server, the upload handler\'s iterator and signal abort with a DISCONNECTED LiveError, and no reply is sent.',
