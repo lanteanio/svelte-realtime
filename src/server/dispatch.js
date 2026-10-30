@@ -1271,17 +1271,15 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		} catch {}
 	}
 
-	// Replay (bounded recent buffer). `bufferSeq` is the buffer's sequence
-	// read before anything else answers the resume; the cursor a resuming
-	// client gets stays in that numbering.
-	/** @type {number | undefined} */
-	let bufferSeq;
-	if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
+	// Replay (bounded recent buffer). A stream with a buffer resumes from it
+	// or from its loader: a gap the buffer cannot cover goes to the loader,
+	// never to `delta.fromSeq`, whose events are numbered by the application.
+	const resumesFromBuffer = !!(replayOpts && typeof clientSeq === 'number' && platform.replay);
+	if (resumesFromBuffer) {
 		try {
 			// The current sequence is read first: everything published up to it
 			// has to come back from the buffer for the replay to fill the gap.
 			const currentSeq = await platform.replay.seq(topic);
-			if (typeof currentSeq === 'number') bufferSeq = currentSeq;
 			const missed = await platform.replay.since(topic, clientSeq);
 			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq);
 			if (filledTo !== null) {
@@ -1314,7 +1312,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	}
 
 	// Seq-delta (user-provided bridge for older-than-buffer reconnects)
-	if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
+	if (!resumesFromBuffer && deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
 		try {
 			let events = await deltaOpts.fromSeq(clientSeq);
 			if (Array.isArray(events)) {
@@ -1324,18 +1322,23 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 				// matched by the sensitive-key set).
 				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
 				if (_redact) events = _redact(events);
+				let respSeq;
+				if (events.length > 0) {
+					const last = events[events.length - 1];
+					if (last && typeof last.seq === 'number') respSeq = last.seq;
+				}
+				if (respSeq === undefined && platform.replay) {
+					try { respSeq = await platform.replay.seq(topic); } catch {}
+				}
 				const deltaResp = {
 					id, ok: true, data: events, topic,
 					merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion,
 					prepend: streamOpts.prepend, max: streamOpts.max,
-					// The application supplies these events, not the replay buffer:
-					// the client applies them without checking their continuity and
-					// takes its cursor from `seq`, the buffer's sequence read before
-					// the bridge ran. What was published after that read reaches the
-					// client live.
+					// The application numbers these events, not a replay buffer:
+					// the client applies them without checking their continuity.
 					replay: true, fromSeq: true
 				};
-				if (bufferSeq !== undefined) deltaResp.seq = bufferSeq;
+				if (respSeq !== undefined) deltaResp.seq = respSeq;
 				armReloads();
 				return deltaResp;
 			}

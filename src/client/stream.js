@@ -2070,12 +2070,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						}
 					}
 				} else if (response.replay === true && Array.isArray(response.data)) {
-					// The cursor follows the buffer's numbering. A `delta.fromSeq`
-					// answer brings its cursor in `seq`; whatever its events carry
-					// is the application's and must not move it.
-					const bridged = response.fromSeq === true;
 					for (const evt of response.data) {
-						_applyMerge(bridged && evt != null && evt.seq !== undefined ? { event: evt.event, data: evt.data } : evt);
+						_applyMerge(evt);
 					}
 				} else if (response.channel && currentValue !== undefined) {
 					// Channels have no loader and answer with an empty placeholder,

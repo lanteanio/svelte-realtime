@@ -1,11 +1,10 @@
 // A stream that resumes from its cursor gets a replay only when the buffer
 // still holds every frame after that cursor. A buffer trimmed past it, or one
-// whose sequence restarted behind it, answers from `delta.fromSeq` or the
-// loader, and the view is replaced rather than built on the rows the client
-// held. A `delta.fromSeq` answer is applied as given, and the client's cursor
-// stays in the buffer's numbering. Runs the real client, the installed
-// adapter client and the adapter's test server with the adapter's in-memory
-// replay buffer.
+// whose sequence restarted behind it, answers from the loader - never from
+// `delta.fromSeq`, whose events the application numbers - and the view is
+// replaced rather than built on the rows the client held. Runs the real
+// client, the installed adapter client and the adapter's test server with the
+// adapter's in-memory replay buffer.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
@@ -46,19 +45,25 @@ afterAll(async () => {
 /**
  * A crud stream over `rows`, published through a replay buffer of `size`.
  * `write` changes the rows and publishes the change the way the app would.
+ * Its `delta.fromSeq` would answer with a row that does not exist; `bridged`
+ * counts the calls.
  */
 function declare(size) {
 	const topic = 'resume-items-' + ++n;
 	const path = 'resume' + n + '/items';
 	const rows = new Map();
-	__register(path, live.public(live.stream(topic, async () => [...rows.values()], { merge: 'crud', key: 'id', replay: true })));
+	const d = { topic, path, rows, bridged: 0, write: null };
+	__register(path, live.public(live.stream(topic, async () => [...rows.values()], {
+		merge: 'crud', key: 'id', replay: true,
+		delta: { fromSeq: async () => { d.bridged++; return [{ seq: 99, event: 'created', data: { id: 99 } }]; } }
+	})));
 	server.platform.replay = createReplay({ size });
-	const write = (event, row) => {
+	d.write = (event, row) => {
 		if (event === 'deleted') rows.delete(row.id);
 		else rows.set(row.id, row);
 		server.platform.replay.publish(server.platform, topic, event, row);
 	};
-	return { topic, path, rows, write };
+	return d;
 }
 
 /** Mount the stream, publish `frames` changes to row 1 live, and take the client offline. */
@@ -91,6 +96,7 @@ describe('stream resume against a replay buffer that cannot fill the gap', () =>
 		await until(() => !get(store).some((r) => r.id === 1), 'the resume');
 		await sleep(30);
 		expect(ids(get(store))).toEqual(['2', '3:1', '4']);
+		expect(d.bridged).toBe(0);
 		// Live frames apply on the new base.
 		d.write('updated', { id: 2, v: 1 });
 		await until(() => get(store).some((r) => r.v === 1 && r.id === 2), 'the next live frame');
@@ -110,6 +116,7 @@ describe('stream resume against a replay buffer that cannot fill the gap', () =>
 		await until(() => !get(store).some((r) => r.id === 1), 'the resume');
 		await sleep(30);
 		expect(ids(get(store))).toEqual(['2', '3']);
+		expect(d.bridged).toBe(0);
 		d.write('created', { id: 5 });
 		await until(() => get(store).some((r) => r.id === 5), 'the next live frame');
 		expect(ids(get(store))).toEqual(['2', '3', '5']);
@@ -127,67 +134,6 @@ describe('stream resume against a replay buffer that cannot fill the gap', () =>
 		await until(() => !get(store).some((r) => r.id === 1), 'the resume');
 		expect(ids(get(store))).toEqual(['2']);
 		expect(loads).toBe(0);
-		off();
-	});
-});
-
-describe('a resume answered by delta.fromSeq', () => {
-	it('keeps the cursor in the buffer numbering, so the next resume replays what came after', async () => {
-		const topic = 'bridged-' + ++n;
-		const path = 'bridged' + n + '/feed';
-		const rows = new Map([[1, { id: 1 }]]);
-		// The application's log: each event with the buffer sequence it was
-		// published under, and the application's own id for it in `seq`,
-		// numbered from a table shared by many topics.
-		const log = [];
-		let loads = 0;
-		const sinceCalls = [];
-		__register(path, live.public(live.stream(topic, async () => { loads++; return [...rows.values()]; }, {
-			merge: 'crud', key: 'id', replay: true,
-			delta: { fromSeq: async (since) => {
-				sinceCalls.push(since);
-				return log.filter((e) => e.bufferSeq > since).map((e) => ({ seq: 1000 + e.bufferSeq * 7, event: e.event, data: e.data }));
-			} }
-		})));
-		server.platform.replay = createReplay({ size: 2 });
-		const publish = (event, data) => {
-			if (event === 'deleted') rows.delete(data.id);
-			else rows.set(data.id, data);
-			server.platform.replay.publish(server.platform, topic, event, data);
-			log.push({ bufferSeq: server.platform.replay.seq(topic), event, data });
-		};
-		const store = __stream(path, { merge: 'crud', key: 'id' });
-		const off = store.subscribe(() => {});
-		await until(() => Array.isArray(get(store)), 'the snapshot');
-		publish('updated', { id: 1, v: 1 });
-		await until(() => get(store)[0]?.v === 1, 'the live frame');
-
-		// Offline past the buffer: seq 2..4 published, the buffer keeps 3..4.
-		simulateOffline();
-		await sleep(20);
-		publish('created', { id: 2 });
-		publish('deleted', { id: 1 });
-		publish('created', { id: 3 });
-		resumeOnline();
-		await until(() => get(store).some((r) => r.id === 3), 'the bridged resume');
-		await sleep(30);
-		expect(sinceCalls).toEqual([1]);
-		expect(ids(get(store))).toEqual(['2', '3']);
-
-		// A live frame, then offline again within the buffer: the cursor is the
-		// buffer's 5, so the buffer replays 6..7 and the bridge is not asked.
-		publish('created', { id: 4 });
-		await until(() => get(store).some((r) => r.id === 4), 'the next live frame');
-		simulateOffline();
-		await sleep(20);
-		publish('created', { id: 5 });
-		publish('updated', { id: 2, v: 1 });
-		resumeOnline();
-		await until(() => get(store).some((r) => r.id === 5), 'the replayed resume');
-		await sleep(30);
-		expect(ids(get(store))).toEqual(['2:1', '3', '4', '5']);
-		expect(sinceCalls).toEqual([1]);
-		expect(loads).toBe(1);
 		off();
 	});
 });

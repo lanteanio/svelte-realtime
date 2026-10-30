@@ -12311,49 +12311,71 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		expect(fromSeqCalls).toEqual([]);
 	});
 
-	it('tier 2: replay returns null (truncated) -> delta.fromSeq fills the gap', async () => {
+	it.each([
+		['returns a later suffix', 10, async () => [{ seq: 8, event: 'created', data: { id: 8 } }, { seq: 9, event: 'created', data: { id: 9 } }, { seq: 10, event: 'created', data: { id: 10 } }]],
+		['returns no array', 10, async () => null],
+		['restarted behind the cursor', 2, async () => []],
+		['fails', 10, async () => { throw new Error('replay store down'); }]
+	])('a replay buffer that %s answers from the loader and never calls fromSeq', async (_, current, since) => {
 		const ws = mockWs();
 		const platform = mockPlatform();
-		platform.replay = {
-			seq: async () => 100,
-			since: async () => null   // truncated
-		};
+		platform.replay = { seq: async () => current, since };
+		const fromSeqCalls = [];
+		const stream = live.stream('tt/buffer-refused', async () => [{ id: 1, name: 'fresh' }], {
+			merge: 'crud', key: 'id', replay: true,
+			delta: { fromSeq: async (s) => { fromSeqCalls.push(s); return [{ event: 'created', data: { id: 99 }, seq: 50 }]; } }
+		});
+		__register('tt/buffer-refused', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/buffer-refused', id: 't2', args: [], stream: true, seq: 5 }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0].data;
+		expect(fromSeqCalls).toEqual([]);
+		expect(response.replay).toBe(false);
+		expect(response.data).toEqual([{ id: 1, name: 'fresh' }]);
+		expect(response.seq).toBe(current);
+	});
+
+	it('tier 2: without a replay buffer, delta.fromSeq fills the gap', async () => {
+		const ws = mockWs();
+		const platform = mockPlatform();
 		const dbEvents = [
 			{ event: 'created', data: { id: 5 }, seq: 50 },
 			{ event: 'updated', data: { id: 5, name: 'X' }, seq: 60 }
 		];
 		const fromSeqCalls = [];
 		const stream = live.stream('tt/seq-delta', async () => [{ id: 1 }], {
-			merge: 'crud', key: 'id', replay: true,
+			merge: 'crud', key: 'id',
 			delta: { fromSeq: async (s) => { fromSeqCalls.push(s); return dbEvents; } }
 		});
 		__register('tt/seq-delta', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/seq-delta', id: 't2', args: [], stream: true, seq: 3 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/seq-delta', id: 't3', args: [], stream: true, seq: 3 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
+		expect(response.fromSeq).toBe(true);
 		expect(response.data).toBe(dbEvents);
-		// The cursor stays in the buffer's numbering, read before the bridge ran.
-		expect(response.seq).toBe(100);
+		expect(response.seq).toBe(60);   // last event's seq wins
 		expect(fromSeqCalls).toEqual([3]);
 	});
 
-	it('tier 2: response.seq falls back to platform.replay.seq when events lack seq fields', async () => {
+	it('tier 2: a stream without replay takes response.seq from platform.replay.seq when events lack seq fields', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 		platform.replay = {
 			seq: async () => 99,
-			since: async () => null
+			since: async () => { throw new Error('a stream without replay never reads the buffer'); }
 		};
 		const stream = live.stream('tt/no-event-seq', async () => [{ id: 1 }], {
-			merge: 'crud', key: 'id', replay: true,
+			merge: 'crud', key: 'id',
 			delta: { fromSeq: async () => [{ event: 'created', data: { id: 7 } }] }
 		});
 		__register('tt/no-event-seq', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/no-event-seq', id: 't3', args: [], stream: true, seq: 3 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/no-event-seq', id: 't4', args: [], stream: true, seq: 3 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
@@ -12364,39 +12386,30 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	it('tier 2: empty array means "nothing missed" (no-op for client)', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
-		platform.replay = {
-			seq: async () => 10,
-			since: async () => null
-		};
 		const stream = live.stream('tt/empty-delta', async () => [{ id: 1 }], {
-			merge: 'crud', key: 'id', replay: true,
+			merge: 'crud', key: 'id',
 			delta: { fromSeq: async () => [] }
 		});
 		__register('tt/empty-delta', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/empty-delta', id: 't4', args: [], stream: true, seq: 3 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/empty-delta', id: 't5', args: [], stream: true, seq: 3 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
 		expect(response.data).toEqual([]);
-		expect(response.seq).toBe(10);
 	});
 
 	it('tier 3: delta.fromSeq returns null -> falls through to full rehydrate', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
-		platform.replay = {
-			seq: async () => 100,
-			since: async () => null
-		};
 		const stream = live.stream('tt/null-delta', async () => [{ id: 1, name: 'fresh' }], {
-			merge: 'crud', key: 'id', replay: true,
+			merge: 'crud', key: 'id',
 			delta: { fromSeq: async () => null }
 		});
 		__register('tt/null-delta', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/null-delta', id: 't5', args: [], stream: true, seq: 3 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/null-delta', id: 't6', args: [], stream: true, seq: 3 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
@@ -12407,17 +12420,13 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	it('tier 3: delta.fromSeq throws -> falls through to full rehydrate', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
-		platform.replay = {
-			seq: async () => 100,
-			since: async () => null
-		};
 		const stream = live.stream('tt/throws-delta', async () => [{ id: 1 }], {
-			merge: 'crud', key: 'id', replay: true,
+			merge: 'crud', key: 'id',
 			delta: { fromSeq: async () => { throw new Error('db down'); } }
 		});
 		__register('tt/throws-delta', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/throws-delta', id: 't6', args: [], stream: true, seq: 3 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/throws-delta', id: 't7', args: [], stream: true, seq: 3 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
@@ -12436,7 +12445,7 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		__register('tt/cold', stream);
 
 		// No `seq` in envelope -> first-time subscribe, full rehydrate
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/cold', id: 't7', args: [], stream: true }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/cold', id: 't8', args: [], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
@@ -12455,14 +12464,13 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		});
 		__register('tt/no-replay', stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/no-replay', id: 't8', args: [], stream: true, seq: 0 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/no-replay', id: 't9', args: [], stream: true, seq: 0 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
 		expect(response.data).toBe(dbEvents);
-		// No buffer, so no cursor: the events' own numbers do not become one.
-		expect(response.seq).toBeUndefined();
+		expect(response.seq).toBe(12);
 	});
 
 	it('legacy version-delta (unchanged + diff) still composes alongside fromSeq', async () => {
