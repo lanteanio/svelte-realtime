@@ -77,15 +77,17 @@ let _forgetJobs = null;
 
 const _JOB_METHODS = ['begin', 'claim', 'complete', 'fail', 'list', 'due'];
 
-const _DEFAULT_TIMEOUT_MS = 30_000;
 const _MAX_TIMEOUT_MS = 600_000;
+const _UNBOUNDED_LEASE_MS = 5 * 60_000;
 
 /**
  * The longest an erasure waits on any one store call (the job record, each
- * surface, the durable store, the outcome) before treating it as failed. Set
- * via `configureForget({ timeoutMs })`.
+ * surface, the durable store, the outcome) before treating it as failed, or
+ * null (the default) to wait as long as the store takes. Set via
+ * `configureForget({ timeoutMs })`.
+ * @type {number | null}
  */
-let _forgetTimeoutMs = _DEFAULT_TIMEOUT_MS;
+let _forgetTimeoutMs = null;
 
 const _RETRY_BASE_MS = 1000;
 const _RETRY_MAX_MS = 60 * 60_000;
@@ -112,24 +114,37 @@ function _readHashKey(key) {
  * only a run whose process died lets its job fall due.
  */
 function _leaseMs() {
-	return (_descriptors.length + 4) * _forgetTimeoutMs;
+	return _forgetTimeoutMs === null ? _UNBOUNDED_LEASE_MS : (_descriptors.length + 4) * _forgetTimeoutMs;
 }
 
 /**
- * Wait for a store call, at most `_forgetTimeoutMs`. A plain value passes
- * through; a call that does not settle in time rejects, while the call itself
- * keeps running, so every erasure surface is idempotent under a late finish.
+ * Wait for a store call, at most `_forgetTimeoutMs` when one is configured. A
+ * plain value passes through; a call that does not settle in time rejects,
+ * while the call itself keeps running, so every erasure surface is idempotent
+ * under a late finish. `late` receives the outcome of a call that settles
+ * after its timeout, for side effects the caller must not lose.
  * @template T
  * @param {T | Promise<T>} value
+ * @param {{ resolved?: (v: T) => void, rejected?: (e: unknown) => void }} [late]
  * @returns {T | Promise<T>}
  */
-function _bounded(value) {
-	if (value === null || (typeof value !== 'object' && typeof value !== 'function') || typeof (/** @type {any} */ (value)).then !== 'function') return value;
+function _bounded(value, late) {
+	const ms = _forgetTimeoutMs;
+	if (ms === null || value === null || (typeof value !== 'object' && typeof value !== 'function') || typeof (/** @type {any} */ (value)).then !== 'function') return value;
 	return new Promise((resolve, reject) => {
-		const timer = setTimer(() => reject(new Error('store call timed out')), _forgetTimeoutMs);
+		let timedOut = false;
+		const timer = setTimer(() => { timedOut = true; reject(new Error('store call timed out')); }, ms);
 		/** @type {Promise<T>} */ (value).then(
-			(v) => { clearTimer(timer); resolve(v); },
-			(e) => { clearTimer(timer); reject(e); }
+			(v) => {
+				clearTimer(timer);
+				if (!timedOut) resolve(v);
+				else if (late?.resolved) { try { late.resolved(v); } catch { /* late side effects are best-effort */ } }
+			},
+			(e) => {
+				clearTimer(timer);
+				if (!timedOut) reject(e);
+				else if (late?.rejected) { try { late.rejected(e); } catch { /* late side effects are best-effort */ } }
+			}
 		);
 	});
 }
@@ -152,8 +167,8 @@ export function configureForget(config) {
 	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined && timeoutMs === undefined) {
 		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey, jobs or timeoutMs');
 	}
-	if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > _MAX_TIMEOUT_MS)) {
-		throw new Error('[svelte-realtime] configureForget: timeoutMs must be an integer from 1 to ' + _MAX_TIMEOUT_MS);
+	if (timeoutMs !== undefined && timeoutMs !== null && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > _MAX_TIMEOUT_MS)) {
+		throw new Error('[svelte-realtime] configureForget: timeoutMs must be an integer from 1 to ' + _MAX_TIMEOUT_MS + ', or null');
 	}
 	if (jobs !== undefined && jobs !== null && typeof jobs !== 'boolean' &&
 		(typeof jobs !== 'object' || _JOB_METHODS.some((m) => typeof (/** @type {any} */ (jobs))[m] !== 'function'))) {
@@ -562,7 +577,17 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	if (_forgetStore && !skip.has('durable')) {
 		let successions = null;
 		try {
-			const durable = await _bounded(_forgetStore.purgeUser(tenantId, userId, cascade));
+			// A purge that commits after its timeout still announces the owner
+			// changes it made: a retry finds those rooms already handed over and
+			// reports nothing for them, so this is their only announcement.
+			const durable = await _bounded(_forgetStore.purgeUser(tenantId, userId, cascade), {
+				resolved: (v) => {
+					if (v && typeof v === 'object' && Array.isArray(/** @type {any} */ (v).ownerSuccessions)) _publishOwnerSuccessions(tenantId, /** @type {any} */ (v).ownerSuccessions);
+				},
+				rejected: (e) => {
+					if (e && Array.isArray(/** @type {any} */ (e).ownerSuccessions)) _publishOwnerSuccessions(tenantId, /** @type {any} */ (e).ownerSuccessions);
+				}
+			});
 			// The store may return a total (number), a per-store count
 			// breakdown (object), or the owner-succession envelope
 			// `{ rowsAffected?, ownerSuccessions? }` - detected by an
@@ -651,7 +676,7 @@ export function _resetForget() {
 	_forgetPlatform = null;
 	_forgetHashKey = null;
 	_forgetJobs = null;
-	_forgetTimeoutMs = _DEFAULT_TIMEOUT_MS;
+	_forgetTimeoutMs = null;
 }
 
 /** @param {string} message */

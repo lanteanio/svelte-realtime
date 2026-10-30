@@ -261,7 +261,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-forget-job-failed"></a>
 ### `FORGET_JOB_FAILED`
 
-- Cause: The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. A call that does not answer within `configureForget({ timeoutMs })` counts as failed. The in-memory store also refuses a new job while it holds its `max` jobs and none of them is completed.
+- Cause: The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. A call that does not answer within the optional `configureForget({ timeoutMs })` counts as failed. The in-memory store also refuses a new job while it holds its `max` jobs and none of them is completed.
 - Consequence: From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.
 - Automatic recovery: None. The erasure does not start without its job record.
 - Next action: Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish its unfinished jobs with `resumeForgetJobs()`, then call `live.forget` again.
@@ -271,7 +271,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-forget-store-failed"></a>
 ### `FORGET_STORE_FAILED`
 
-- Cause: The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`, or did not answer within `configureForget({ timeoutMs })` (default 30 seconds).
+- Cause: The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`, or did not answer within the optional `configureForget({ timeoutMs })`.
 - Consequence: `live.forget` rejects with a FORGET_STORE_FAILED LiveError and the erasure is incomplete. Owner successions the store already committed are still announced, and a `forget.incomplete` event names the durable surface.
 - Automatic recovery: None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.
 - Next action: Fix the store (connectivity, permissions, schema), then call `live.forget` again, or `resumeForgetJobs()` with a job store. A repeat call only reprocesses the rooms that failed.
@@ -753,7 +753,7 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Severity: error
 - Delivered to: operational event sink
 - Message patterns: <code>Erasure could not be confirmed for every configured surface; resolve the failed cleanup and retry.</code>
-- Cause: `live.forget` attempted every erasure surface and at least one in-memory surface, named document or the durable store failed or did not answer within `configureForget({ timeoutMs })`. The surfaces are listed in `failedSurfaces`.
+- Cause: `live.forget` attempted every erasure surface and at least one in-memory surface, named document or the durable store failed or did not answer within the optional `configureForget({ timeoutMs })`. The surfaces are listed in `failedSurfaces`.
 - Consequence: The user's data may still exist on the listed surfaces. The call rejects with FORGET_INCOMPLETE, or FORGET_STORE_FAILED when the durable store failed. `onForget` does not run.
 - Automatic recovery: None. The erasure is not retried automatically, although owner changes the store already committed are still announced. With a job store the `job` attribute names the job recorded as failed.
 - Next action: Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant, or `resumeForgetJobs()` with a job store.

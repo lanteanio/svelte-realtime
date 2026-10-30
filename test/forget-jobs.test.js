@@ -11,6 +11,7 @@ import {
 } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
 import { _crdtDecls } from '../src/server/crdt.js';
+import { _resetReplayRouting } from '../src/server/replay-routing.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 const KEY = 'k'.repeat(32);
@@ -420,6 +421,36 @@ describe('erasure input and store bounds', () => {
 		expect((await resumeForgetJobs({ id: job.id })).results).toEqual([{ id: job.id, status: 'failed', code: 'VALIDATION' }]);
 		expect((await listForgetJobs())[0]).toMatchObject({ status: 'failed', attempts: 2, error: { code: 'VALIDATION' } });
 		expect(rows.get('alice')).toBe(2);
+	});
+
+	it('waits for a slow durable store without a configured timeout', async () => {
+		// Timers of 1 s or more fire after 10 ms, so a default bound would trip.
+		setRuntimeEnv({ timers: { set: (cb, ms, ...a) => setTimeout(cb, ms >= 1000 ? 10 : ms, ...a) } });
+		configureForget({ store: { purgeUser: () => new Promise((r) => setTimeout(() => r(2), 60)) } });
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ rowsAffected: 2 });
+	});
+
+	it('announces the owner changes of a durable purge that commits after its timeout', async () => {
+		_resetReplayRouting();
+		const published = [];
+		const platform = { publish: (t, e, d) => published.push({ t, e, d }) };
+		const late = { rowsAffected: 1, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] };
+		configureForget({ platform, timeoutMs: 20, store: { purgeUser: () => new Promise((r) => setTimeout(() => r(late), 60)) } });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		expect(published).toEqual([]);
+		await vi.waitFor(() => expect(published).toContainEqual({ t: 'board/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } }));
+		_resetReplayRouting();
+	});
+
+	it('announces the committed owner changes of a durable purge that fails after its timeout', async () => {
+		_resetReplayRouting();
+		const published = [];
+		const platform = { publish: (t, e, d) => published.push({ t, e, d }) };
+		const err = Object.assign(new Error('partial'), { ownerSuccessions: [{ topic: 'board/2', owner: null, reason: 'vacated' }] });
+		configureForget({ platform, timeoutMs: 20, store: { purgeUser: () => new Promise((_r, j) => setTimeout(() => j(err), 60)) } });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		await vi.waitFor(() => expect(published).toContainEqual({ t: 'board/2:owner', e: 'set', d: { key: null, reason: 'vacated' } }));
+		_resetReplayRouting();
 	});
 
 	it('bounds a durable store that never answers', async () => {

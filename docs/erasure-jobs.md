@@ -21,7 +21,7 @@ A resumed run leaves out the surfaces an earlier run of the job already finished
 
 ## Time bounds
 
-Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - is bounded by `configureForget({ timeoutMs })` (default 30 seconds), with or without a job store. A call that does not answer in time fails its surface, so a hung store cannot hold `live.forget` forever and does not keep the other surfaces from running. The call itself keeps running in the store, so every surface must tolerate a late finish; a timed-out `begin` may still create the job, which then falls due when its lease ends.
+Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - can be bounded with `configureForget({ timeoutMs })`, with or without a job store; without it (the default) an erasure waits as long as the store takes. A call that does not answer in time fails its surface, so a hung store cannot hold `live.forget` forever and does not keep the other surfaces from running. A durable purge that commits after its timeout still announces the owner changes it reports. The call itself keeps running in the store, so every surface must tolerate a late finish; a timed-out `begin` may still create the job, which then falls due when its lease ends.
 
 A lease lasts the number of bounded waits in one run plus one, times `timeoutMs`. A live run therefore records its outcome while it still holds the lease, and only a run whose process died lets its job fall due.
 
