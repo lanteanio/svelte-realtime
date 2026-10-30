@@ -1116,7 +1116,7 @@ function _effectTimedOut(lane, released) {
 		severity: 'warn',
 		dataClass: 'operational',
 		message: 'Reactive effect calls did not settle within their deadline; their slots were released.',
-		attributes: { effect: lane.id, timeoutMs: lane.timeoutMs, released }
+		attributes: { effect: lane.id, timeoutMs: lane.timeoutMs, released, abandoned: lane.abandoned }
 	});
 }
 

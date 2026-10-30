@@ -838,9 +838,9 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Severity: warn
 - Delivered to: operational event sink
 - Message patterns: <code>Reactive effect calls did not settle within their deadline; their slots were released.</code>
-- Cause: Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration and `released` counts the calls.
-- Consequence: Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped and its late result is ignored. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.
-- Automatic recovery: The released slots run the next waiting calls at once.
+- Cause: Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration, `released` counts the calls and `abandoned` counts every released call still running.
+- Consequence: Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped, its late result is ignored, and the next call runs alongside it, so `maxConcurrent: 1` no longer serializes those calls. While `maxConcurrent` released calls are still running, the effect starts no new call and its queue fills. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.
+- Automatic recovery: The released slots run the next waiting calls at once, up to the cap; each released call that finally settles lets another waiting call start.
 - Next action: Find the awaited work in the handler that never settles (a remote call or query without a timeout of its own) and give it a deadline. Raise `timeoutMs` only for work that is legitimately slower.
 - Owning sources: [src/server/reactive.js](../src/server/reactive.js)
 

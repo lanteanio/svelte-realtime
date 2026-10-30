@@ -66,6 +66,19 @@ function captureErrors() {
 	return { errors, events };
 }
 
+function fakeRegistry() {
+	const gauges = new Map();
+	const counters = new Map();
+	const defs = [];
+	const key = (name, labels) => name + JSON.stringify(labels || {});
+	return {
+		gauges, counters, defs,
+		counter(def) { defs.push(def); return { inc(labels) { const k = key(def.name, labels); counters.set(k, (counters.get(k) || 0) + 1); } }; },
+		histogram(def) { defs.push(def); return { observe() {} }; },
+		gauge(def) { defs.push(def); return { inc() {}, dec() {}, set(labels, v) { gauges.set(key(def.name, labels), v); } }; }
+	};
+}
+
 describe('live.effect concurrency and queue limits', () => {
 	it.each([1000, 5000, 20000])('a stalled effect holds at most the default limits for %i publishes', async (count) => {
 		const { errors } = captureErrors();
@@ -256,26 +269,42 @@ describe('live.effect concurrency and queue limits', () => {
 		const timeouts = errors.filter((e) => e.err?.code === 'TIMEOUT');
 		expect(timeouts).toHaveLength(1);
 		expect(timeouts[0]).toMatchObject({ path: 'effect' });
-		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 400, released: 1 }]);
+		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 400, released: 1, abandoned: 1 }]);
 	}
 
-	it('hung calls cannot block the effect for good', async () => {
+	it('caps the calls released at their deadline at maxConcurrent', async () => {
 		vi.useFakeTimers();
 		try {
-			const { errors } = captureErrors();
-			const fx = setupEffect({ maxConcurrent: 2, maxQueued: 2, timeoutMs: 400 });
+			const { errors, events } = captureErrors();
+			const registry = fakeRegistry();
+			live.metrics(registry);
+			const inflight = () => registry.gauges.get('svelte_realtime_background_inflight{"kind":"effect"}');
+			const fx = setupEffect({ maxConcurrent: 2, maxQueued: 4, timeoutMs: 400 });
 			for (let i = 1; i <= 6; i++) fx.publish(i);
 			await flush();
 			expect(fx.started).toEqual([1, 2]);
-			// Every call hangs; deadlines keep the effect moving through its queue.
+			// Calls 1 and 2 hang past their deadline: their slots go to 3 and 4,
+			// and all four handlers are still running.
 			await vi.advanceTimersByTimeAsync(500);
 			expect(fx.started).toEqual([1, 2, 3, 4]);
-			for (let i = 7; i <= 8; i++) fx.publish(i);
+			expect(inflight()).toBe(4);
+			// Calls 3 and 4 hang too. Two abandoned calls is the cap for
+			// maxConcurrent 2, so 5 and 6 wait instead of piling up more.
 			await vi.advanceTimersByTimeAsync(500);
-			expect(fx.started).toEqual([1, 2, 3, 4, 7, 8]);
-			expect(errors.filter((e) => e.err?.code === 'OVERLOADED')).toHaveLength(1);
+			expect(fx.started).toEqual([1, 2, 3, 4]);
+			expect(inflight()).toBe(4);
+			expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes.abandoned)).toEqual([2, 4]);
+			// Each abandoned call that finally settles lets one waiting call start.
+			fx.waiting.shift()();
+			await flush();
+			expect(fx.started).toEqual([1, 2, 3, 4, 5]);
+			fx.waiting.shift()();
+			await flush();
+			expect(fx.started).toEqual([1, 2, 3, 4, 5, 6]);
+			expect(inflight()).toBe(4);
 			expect(errors.filter((e) => e.err?.code === 'TIMEOUT')).toHaveLength(2);
 			await fx.drain();
+			expect(inflight()).toBe(0);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -323,9 +352,10 @@ describe('live.effect concurrency and queue limits', () => {
 
 	it('validates the limit options at declaration', () => {
 		const fn = () => {};
-		for (const timeoutMs of [0, 1.5, '1000', 2147483648, -1]) {
-			expect(() => live.effect(['a'], fn, { timeoutMs })).toThrow(/timeoutMs must be an integer from 1 to 2147483647/);
+		for (const timeoutMs of [0, 99, 100.5, '1000', 2147483648, -1]) {
+			expect(() => live.effect(['a'], fn, { timeoutMs })).toThrow(/timeoutMs must be an integer from 100 to 2147483647/);
 		}
+		expect(() => live.effect(['a'], fn, { timeoutMs: 100 })).not.toThrow();
 		expect(() => live.effect(['a'], fn, { maxConcurrent: 0 })).toThrow(/maxConcurrent must be an integer >= 1/);
 		expect(() => live.effect(['a'], fn, { maxConcurrent: 1.5 })).toThrow(/maxConcurrent/);
 		expect(() => live.effect(['a'], fn, { maxQueued: -1 })).toThrow(/maxQueued must be an integer >= 0/);
@@ -336,19 +366,6 @@ describe('live.effect concurrency and queue limits', () => {
 });
 
 describe('reactive work metrics', () => {
-	function fakeRegistry() {
-		const gauges = new Map();
-		const counters = new Map();
-		const defs = [];
-		const key = (name, labels) => name + JSON.stringify(labels || {});
-		return {
-			gauges, counters, defs,
-			counter(def) { defs.push(def); return { inc(labels) { const k = key(def.name, labels); counters.set(k, (counters.get(k) || 0) + 1); } }; },
-			histogram(def) { defs.push(def); return { observe() {} }; },
-			gauge(def) { defs.push(def); return { inc() {}, dec() {}, set(labels, v) { gauges.set(key(def.name, labels), v); } }; }
-		};
-	}
-
 	it('reports in-flight, queued and overflow counts with closed labels', async () => {
 		const registry = fakeRegistry();
 		live.metrics(registry);

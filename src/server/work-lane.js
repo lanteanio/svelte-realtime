@@ -21,8 +21,13 @@ import { _bgDone, _bgCount, _bgTotals, _bgChanged, _bgQueuedAt, _bgQueueWaiting,
 // timeout; each job remembers the tick it started in, and a tick releases the
 // slots of every job that started five or more ticks earlier. A job is so
 // released between `timeoutMs` and 1.25 x `timeoutMs` after it started, and
-// starting one costs a counter, not a timer. A released job that settles later
-// changes nothing.
+// starting one costs a counter, not a timer.
+//
+// A released job keeps running: nothing can stop a handler. Such abandoned
+// jobs are capped at `maxConcurrent`; while that many are still running, the
+// lane starts nothing new, so a lane never has more than twice
+// `maxConcurrent` handler calls alive. An abandoned job that settles frees its
+// place in the cap and changes nothing else.
 
 /** Default limits for `live.effect`: high enough that a small app never meets them. */
 export const EFFECT_MAX_CONCURRENT = 32;
@@ -54,6 +59,8 @@ const _EXPIRE_AFTER_TICKS = _TICKS_PER_TIMEOUT + 1;
 const _TICK_RING = 8;
 /** The largest delay a timer accepts. */
 const _MAX_TIMEOUT_MS = 2147483647;
+/** The shortest deadline: its ticks stay well above a timer's granularity. */
+const _MIN_TIMEOUT_MS = 100;
 
 /**
  * @typedef {object} WorkLane
@@ -70,7 +77,9 @@ const _MAX_TIMEOUT_MS = 2147483647;
  * @property {(lane: WorkLane, rejected: number) => void} [onOverflowEnded]
  * @property {(lane: WorkLane, released: number) => void} [onTimeout]
  * @property {number} timeoutMs - how long a pending job may hold its slot; Infinity for no limit
- * @property {number} active
+ * @property {number} active - jobs holding a slot
+ * @property {number} abandoned - jobs released at their deadline that are still running
+ * @property {number} limit - how many slots may be held now: maxConcurrent, less any abandoned jobs past the cap
  * @property {Array<(go: boolean) => void>} queue - waiting jobs, as the resolvers of their waits
  * @property {number[]} since - when each waiting job was queued (monotonic ms, 0 while metrics are off), aligned with `queue`
  * @property {number} head
@@ -111,6 +120,8 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		onTimeout: hooks.onTimeout,
 		timeoutMs: limits.timeoutMs ?? Infinity,
 		active: 0,
+		abandoned: 0,
+		limit: limits.maxConcurrent,
 		queue: [],
 		since: [],
 		head: 0,
@@ -140,15 +151,15 @@ export function _validateLaneLimit(where, name, value, min) {
 }
 
 /**
- * Validate a lane deadline option: a positive integer of milliseconds a timer
- * can hold, or `Infinity` for no deadline.
+ * Validate a lane deadline option: an integer of milliseconds from
+ * `_MIN_TIMEOUT_MS` to what a timer can hold, or `Infinity` for no deadline.
  * @param {string} where
  * @param {unknown} value
  */
 export function _validateLaneTimeout(where, value) {
 	if (value === undefined || value === Infinity) return;
-	if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > _MAX_TIMEOUT_MS) {
-		throw new Error('[svelte-realtime] ' + where + ': timeoutMs must be an integer from 1 to ' + _MAX_TIMEOUT_MS + ' (or Infinity)');
+	if (typeof value !== 'number' || !Number.isInteger(value) || value < _MIN_TIMEOUT_MS || value > _MAX_TIMEOUT_MS) {
+		throw new Error('[svelte-realtime] ' + where + ': timeoutMs must be an integer from ' + _MIN_TIMEOUT_MS + ' to ' + _MAX_TIMEOUT_MS + ' (or Infinity)');
 	}
 }
 
@@ -180,7 +191,7 @@ const _resolved = Promise.resolve();
  */
 function _admit(lane, a, b, c, d) {
 	const depth = lane.queue.length - lane.head;
-	if (depth === 0 && lane.active < lane.maxConcurrent) {
+	if (depth === 0 && lane.active < lane.limit) {
 		lane.active++;
 		lane.totals.inflight++;
 		if (lane.metered) _bgChanged();
@@ -275,10 +286,14 @@ function _start(lane, a, b, c, d) {
 function _handlers(lane, tick, startedAt) {
 	return {
 		tick,
-		ok: (v) => { if (tick < 0 || _releasePending(lane, tick)) _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok'); },
+		ok: (v) => {
+			if (tick < 0 || _releasePending(lane, tick)) _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok');
+			else _abandonedSettled(lane);
+		},
 		err: (e) => {
 			_reportRejection(lane, e);
 			if (tick < 0 || _releasePending(lane, tick)) _settle(lane, startedAt, 'error');
+			else _abandonedSettled(lane);
 		}
 	};
 }
@@ -359,31 +374,68 @@ function _deadlineTick(lane) {
  */
 function _settle(lane, startedAt, result) {
 	if (lane.metered && state.metricsInstruments) _bgDone(lane.kind, startedAt, result);
-	if (lane.head < lane.queue.length) {
-		const next = lane.queue[lane.head];
-		lane.queue[lane.head] = undefined;
-		lane.since[lane.head++] = undefined;
-		if (lane.head === lane.queue.length) {
-			lane.queue.length = 0;
-			lane.since.length = 0;
-			lane.head = 0;
-			if (lane.metered) _bgQueueIdle(lane);
-		} else if (lane.head >= _COMPACT_AT && lane.head * 2 >= lane.queue.length) {
-			lane.queue.splice(0, lane.head);
-			lane.since.splice(0, lane.head);
-			lane.head = 0;
-		}
-		lane.totals.queued--;
-		if (lane.metered) _bgChanged();
-		if (lane.rejected && lane.queue.length - lane.head <= lane.resumeDepth) _overflowEnded(lane);
+	if (result === 'timeout') {
+		// The handler runs on without its slot, so it stays in the running count.
+		lane.abandoned++;
+		_updateLimit(lane);
+		lane.totals.inflight++;
+	}
+	if (lane.head < lane.queue.length && lane.active <= lane.limit) {
 		// The slot passes straight to the next job.
-		next(true);
+		_dequeue(lane)(true);
 		return;
 	}
 	lane.active--;
 	lane.totals.inflight--;
 	if (lane.metered) _bgChanged();
 	if (lane.rejected) _overflowEnded(lane);
+}
+
+/**
+ * An abandoned job settled: its place in the cap is free, and waiting jobs
+ * may take the slots that frees.
+ * @param {WorkLane} lane
+ */
+function _abandonedSettled(lane) {
+	lane.abandoned--;
+	_updateLimit(lane);
+	lane.totals.inflight--;
+	if (lane.metered) _bgChanged();
+	while (lane.head < lane.queue.length && lane.active < lane.limit) {
+		lane.active++;
+		lane.totals.inflight++;
+		_dequeue(lane)(true);
+	}
+}
+
+/** @param {WorkLane} lane */
+function _updateLimit(lane) {
+	lane.limit = Math.max(0, Math.min(lane.maxConcurrent, 2 * lane.maxConcurrent - lane.abandoned));
+}
+
+/**
+ * Take the job at the head of the queue.
+ * @param {WorkLane} lane
+ * @returns {(go: boolean) => void} its wait's resolver
+ */
+function _dequeue(lane) {
+	const next = /** @type {(go: boolean) => void} */ (lane.queue[lane.head]);
+	lane.queue[lane.head] = /** @type {any} */ (undefined);
+	lane.since[lane.head++] = /** @type {any} */ (undefined);
+	if (lane.head === lane.queue.length) {
+		lane.queue.length = 0;
+		lane.since.length = 0;
+		lane.head = 0;
+		if (lane.metered) _bgQueueIdle(lane);
+	} else if (lane.head >= _COMPACT_AT && lane.head * 2 >= lane.queue.length) {
+		lane.queue.splice(0, lane.head);
+		lane.since.splice(0, lane.head);
+		lane.head = 0;
+	}
+	lane.totals.queued--;
+	if (lane.metered) _bgChanged();
+	if (lane.rejected && lane.queue.length - lane.head <= lane.resumeDepth) _overflowEnded(lane);
+	return next;
 }
 
 /**

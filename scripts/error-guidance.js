@@ -374,9 +374,9 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Find why the effect handler is slow or stalled (a hung query or remote call). Raise `maxConcurrent` or `maxQueued` only if the work can keep up, or use the `coalesce` overflow when only the latest event matters.'
 	}),
 	'reactive.effect.timeout': Object.freeze({
-		cause: 'Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration and `released` counts the calls.',
-		consequence: 'Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped and its late result is ignored. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.',
-		automaticRecovery: 'The released slots run the next waiting calls at once.',
+		cause: 'Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration, `released` counts the calls and `abandoned` counts every released call still running.',
+		consequence: 'Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped, its late result is ignored, and the next call runs alongside it, so `maxConcurrent: 1` no longer serializes those calls. While `maxConcurrent` released calls are still running, the effect starts no new call and its queue fills. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.',
+		automaticRecovery: 'The released slots run the next waiting calls at once, up to the cap; each released call that finally settles lets another waiting call start.',
 		nextAction: 'Find the awaited work in the handler that never settles (a remote call or query without a timeout of its own) and give it a deadline. Raise `timeoutMs` only for work that is legitimately slower.'
 	}),
 	'reactive.effect.failed': Object.freeze({

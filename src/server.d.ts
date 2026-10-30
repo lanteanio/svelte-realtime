@@ -4067,11 +4067,17 @@ export interface EffectOptions {
 	 * handler that never settles cannot hold the effect's slots for good. The
 	 * slot is released between `timeoutMs` and 1.25 x `timeoutMs` after the
 	 * call started; the handler is not stopped and its late result is ignored.
+	 * The next call then runs alongside the released one, so past its deadline
+	 * `maxConcurrent: 1` is no longer a mutex: use `Infinity` for an effect
+	 * whose calls must never overlap. At most `maxConcurrent` released calls
+	 * may still be running; while that many are, the effect starts no new
+	 * call, so it never has more than twice `maxConcurrent` calls alive.
 	 * Released calls count in
-	 * `svelte_realtime_background_total{kind="effect",result="timeout"}`, and
-	 * every deadline check that releases calls reaches `onError('effect', err)`
-	 * as a `LiveError` with code `TIMEOUT` and emits `reactive.effect.timeout`
-	 * with their count. An integer from 1 to 2147483647, or `Infinity`.
+	 * `svelte_realtime_background_total{kind="effect",result="timeout"}` and
+	 * stay in `svelte_realtime_background_inflight` until they settle; every
+	 * deadline check that releases calls reaches `onError('effect', err)` as a
+	 * `LiveError` with code `TIMEOUT` and emits `reactive.effect.timeout` with
+	 * their count. An integer from 100 to 2147483647, or `Infinity`.
 	 * @default 30000
 	 */
 	timeoutMs?: number;

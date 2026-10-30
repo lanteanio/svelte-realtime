@@ -29,7 +29,7 @@ Each kind has exactly one producer. A producer registers the whole schema but wr
 | `alarm` | svelte-realtime | One `live.alarm` firing, timer or recovery poll | none |
 | `poll` | svelte-realtime | One `live.poll` callback | none |
 | `derived` | svelte-realtime | One `live.derived` recompute | none |
-| `effect` | svelte-realtime | One `live.effect` call | the effect's in-process queue |
+| `effect` | svelte-realtime | One `live.effect` call; a call released at its deadline stays in `inflight` until its handler settles | the effect's in-process queue |
 | `webhook` | svelte-realtime | One outbound webhook delivery, all of its retries included | the webhook's in-process queue |
 | `dlq` | svelte-realtime | One dead-lettered event replayed by `replayDeadLetter` or the admin route | the dead-letter store |
 | `job` | svelte-adapter-uws-extensions | One durable job run | the job table |
