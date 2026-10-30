@@ -294,6 +294,33 @@ let _subscribeBatch = null;
 const _ORDER_MARKS_MAX = 4;
 
 /**
+ * Does a replay answer from the buffer continue a resume from `cursor`? Its
+ * entries must run on from the cursor without a hole, and its sequence must
+ * not be behind the cursor. A buffer trimmed past the cursor answers with a
+ * later suffix, and one whose sequence restarted behind it with nothing;
+ * applying either would leave the view on a stale base. Each event of a `set`
+ * stream replaces the whole value, so there the entries only have to come
+ * after the cursor and in order: the last one is the value. The answer's
+ * sequence may be ahead of its last entry: an older server reads it after the
+ * entries, and what was published in between reaches the client live.
+ * @param {any} response
+ * @param {unknown} cursor the `seq` the subscribe resumed from
+ * @param {string} merge
+ */
+function _replayContinues(response, cursor, merge) {
+	if (typeof cursor !== 'number') return true;
+	if (!Array.isArray(response.data)) return false;
+	const whole = merge === 'set';
+	let last = cursor;
+	for (const evt of response.data) {
+		if (evt == null || evt.seq == null) continue;
+		if (whole ? !(evt.seq > last) : evt.seq !== last + 1) return false;
+		last = evt.seq;
+	}
+	return typeof response.seq !== 'number' || response.seq >= cursor;
+}
+
+/**
  * Does a cursor / presence-field frame carry an ordering token? `_p` names the
  * publishing connection and `_n` counts that connection's publishes.
  * @param {any} data
@@ -1954,10 +1981,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		pending.set(id, {
 			stream: true,
 			/**
-			 * Early attach: the server named the wire topic before subscribing the
-			 * socket. Bind it and install the live listener now, while
-			 * `initialLoaded` is still false, so every frame the subscription
-			 * delivers ahead of the snapshot lands in `buffer` instead of being
+			 * Early attach: the server named the wire topic after subscribing the
+			 * socket and before running the loader. Bind it and install the live
+			 * listener now, while `initialLoaded` is still false, so every frame
+			 * the snapshot read cannot see lands in `buffer` instead of being
 			 * dropped for want of a store. The response then replays the buffer
 			 * over the snapshot as it always has.
 			 * @param {string | null | undefined} attachTopic
@@ -1979,6 +2006,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Bound and settled before any store update runs app code.
 				_bindTopic(response.topic || null);
 				_subscribeDone(ticket);
+				// A buffer replay that cannot fill the gap is not applied: the
+				// stream subscribes again without a cursor and takes the full
+				// snapshot. A `delta.fromSeq` answer carries the application's own
+				// numbering and is applied as given.
+				if (response.replay === true && response.fromSeq !== true && !_replayContinues(response, ticket.request.seq, response.merge || merge)) {
+					if (topicUnsub) { topicUnsub(); topicUnsub = null; }
+					_jitter.clear();
+					_dropResumeCursors();
+					fetchAndSubscribe();
+					return;
+				}
 				// The answer is the cursor's new baseline: an outage before it no
 				// longer ages the cursor. Over a socket the listener counts as down
 				// (an answer landing in a hidden tab) staleness runs from here.
@@ -2039,10 +2077,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					for (const evt of response.data) {
 						_applyMerge(evt);
 					}
-				} else if ((response.channel || response.derived) && currentValue !== undefined) {
-					// Keep the existing value so the store never flashes to empty.
-					// Channels return an empty placeholder; derived streams may
-					// return stale data before their sources populate.
+				} else if (response.channel && currentValue !== undefined) {
+					// Channels have no loader and answer with an empty placeholder,
+					// so keep the existing value instead of flashing to empty.
+					// Derived streams are deliberately not covered: their response
+					// is a fresh compute that runs after the topic subscribe, and a
+					// recompute published before that subscribe (between SSR and
+					// hydration, or during a disconnect) reaches this client only
+					// through this response.
 				} else {
 					if (_optimisticQueue.length > 0) {
 						_serverValue = _prepareRows(response.data);
@@ -2068,8 +2110,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
-				// Attach topic listener BEFORE flipping initialLoaded, so events
-				// arriving between ws.subscribe(topic) (server-side) and now are buffered.
+				// Usually a no-op: the attach frame installed the listener before
+				// the loader ran, and `buffer` holds what arrived since. Only a
+				// response without an attach frame installs it here, and the
+				// adapter client dropped any frame for this topic that came
+				// before it. Either way it goes in before initialLoaded flips.
 				_subscribeLive();
 
 				initialLoaded = true;
@@ -2080,16 +2125,26 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Replay buffered messages in batch. Only explicit replay members
 				// prove inclusion: response.seq is read after the snapshot/replay
 				// read, so using it as a cutoff would discard intervening live data.
+				// A `delta.fromSeq` answer is numbered by the application, so its
+				// sequences say nothing about the live frames. A `set` replay may
+				// skip a hole: its newest entry replaced the whole value, so a
+				// numbered live frame at or below it is older and does not apply.
 				if (buffer.length > 0) {
 					let included = null;
-					if ((merge === 'latest' || merge === 'set') && response.replay === true && Array.isArray(response.data)) {
+					let replacedTo = -1;
+					if ((merge === 'latest' || merge === 'set') && response.replay === true && response.fromSeq !== true && Array.isArray(response.data)) {
 						included = new Set();
 						for (const evt of response.data) {
-							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) included.add(evt.seq);
+							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) {
+								included.add(evt.seq);
+								if (merge === 'set' && evt.seq > replacedTo) replacedTo = evt.seq;
+							}
 						}
 					}
 					for (const evt of buffer) {
-						if (!included?.has(evt.seq)) _applyMerge(evt);
+						if (included?.has(evt.seq)) continue;
+						if (replacedTo >= 0 && Number.isSafeInteger(evt.seq) && evt.seq <= replacedTo) continue;
+						_applyMerge(evt);
 					}
 					if (_optimisticQueue.length > 0) _recomputeDisplay();
 					else {
@@ -2976,7 +3031,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					);
 				}
 			}
-			currentValue = _prepareRows(initialData);
+			if (_optimisticQueue.length > 0) {
+				// Hydrated rows are server state: the queue drain promotes
+				// `_serverValue`, so writing only the display would lose them.
+				_serverValue = _prepareRows(initialData);
+				_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
+				currentValue = _replayQueue().value;
+			} else {
+				currentValue = _prepareRows(initialData);
+			}
 			_rebuildIndex();
 			store.set(currentValue);
 			return this;

@@ -5,7 +5,10 @@ import { _IS_DEV } from './env.js';
 import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _aggregateByTopic, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
-import { _fireWebhookOut } from './webhook-out.js';
+import { _submitWebhookOut } from './webhook-out.js';
+import { _createLane, _laneSubmit, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
+import { _bgClock, _bgDone, _bgInflight } from './background-metrics.js';
+import { LiveError } from './live-error.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish, UNSEQUENCED } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
@@ -449,7 +452,8 @@ function _wrapPlatformPublish(platform) {
 			}
 		}
 
-		// Fire matching effects
+		// Fire matching effects. Each call goes through the effect's lane, which
+		// starts it off the publish path and bounds how many run and wait.
 		const effectEntries = _effectBySource.get(topic);
 		if (effectEntries) {
 			for (const entry of effectEntries) {
@@ -457,11 +461,10 @@ function _wrapPlatformPublish(platform) {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.timer = setTimer(() => {
 						entry.timer = null;
-						_fireEffect(entry, event, data, platform);
+						_submitEffect(entry, event, data, platform);
 					}, entry.debounce);
 				} else {
-					// Fire-and-forget: don't block the publish path
-					Promise.resolve().then(() => _fireEffect(entry, event, data, platform));
+					_submitEffect(entry, event, data, platform);
 				}
 			}
 		}
@@ -483,9 +486,7 @@ function _wrapPlatformPublish(platform) {
 				try { _isLeader = !!_cl(); } catch { _isLeader = false; }
 			}
 			if (_isLeader) {
-				for (const entry of webhookOutEntries) {
-					Promise.resolve().then(() => _fireWebhookOut(entry, topic, event, data, platform));
-				}
+				for (const entry of webhookOutEntries) _submitWebhookOut(entry, topic, event, data, platform);
 			}
 		}
 
@@ -766,6 +767,10 @@ async function _recomputeDerived(entry, platform) {
 	if (entry.running || !entry.active) return;
 	entry.running = true;
 	entry.pending = false;
+	_bgInflight('derived', 1);
+	const startedAt = _bgClock();
+	/** @type {'ok' | 'error'} */
+	let outcome = 'ok';
 	let generation = entry.generation;
 	try {
 		let result;
@@ -812,6 +817,7 @@ async function _recomputeDerived(entry, platform) {
 		const wire = _redactOrDrop(entry.topic, result);
 		if (wire !== REDACT_DROP) _platformPublish(platform, entry.topic, 'set', wire, UNSEQUENCED);
 	} catch (err) {
+		outcome = 'error';
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}
 		}
@@ -826,6 +832,8 @@ async function _recomputeDerived(entry, platform) {
 		});
 	} finally {
 		entry.running = false;
+		_bgInflight('derived', -1);
+		_bgDone('derived', startedAt, outcome);
 		if (entry.active && entry.pending && !entry.timer) _recomputeDerived(entry, platform);
 	}
 }
@@ -1035,27 +1043,108 @@ export function _deactivateDynamicDerived(fn, resolvedTopic, ctx) {
 }
 
 /**
- * Fire an effect handler. Errors are caught and routed to the error handler.
- * @param {{ fn: Function }} entry
+ * The effect's work lane, created on first use from the limits declared on
+ * `live.effect` (framework watchers bring their own).
+ * @param {any} entry
+ */
+function _effectLane(entry) {
+	const limits = entry.limits || { maxConcurrent: EFFECT_MAX_CONCURRENT, maxQueued: EFFECT_MAX_QUEUED, timeoutMs: EFFECT_TIMEOUT_MS };
+	// The lane calls the handler directly and reports a throw or a rejection
+	// through onError, so an effect call costs no wrapper and no extra promise.
+	const lane = _createLane('effect', limits, (event, data, platform) => entry.fn(event, data, platform), {
+		onError: _reportEffectFailure,
+		onReject: _effectRejected,
+		onOverflowEnded: _effectOverflowEnded,
+		onTimeout: _effectTimedOut
+	});
+	lane.id = entry.id || 'unknown';
+	return entry.lane = lane;
+}
+
+/**
+ * Hand one source event to an effect.
+ * @param {any} entry
  * @param {string} event
  * @param {any} data
- * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {any} platform
  */
-async function _fireEffect(entry, event, data, platform) {
-	try {
-		await entry.fn(event, data, platform);
-	} catch (err) {
-		if (state.serverErrorHandler) {
-			try { state.serverErrorHandler('effect', err); } catch {}
-		}
-		emitOperationalEvent({
-			source: 'svelte-realtime',
-			component: 'server.reactive',
-			event: 'reactive.effect.failed',
-			severity: 'error',
-			dataClass: 'application',
-			message: 'A reactive effect handler failed.',
-			attributes: { error: diagnosticErrorMessage(err) }
-		});
+function _submitEffect(entry, event, data, platform) {
+	_laneSubmit(entry.lane || _effectLane(entry), event, data, platform);
+}
+
+/**
+ * Report a rejected effect call. The lane counts every rejection; the first
+ * of an overflow episode is reported, the rest stay quiet until the episode
+ * ends.
+ * @param {any} lane
+ */
+function _effectRejected(lane) {
+	if (lane.rejected !== 1) return;
+	const err = new LiveError('OVERLOADED',
+		"live.effect '" + lane.id + "' is at its limit (maxConcurrent " + lane.maxConcurrent + ', maxQueued ' + lane.maxQueued +
+		'); calls for new publishes are skipped until its queue has room.');
+	if (state.serverErrorHandler) {
+		try { state.serverErrorHandler('effect', err); } catch {}
 	}
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.reactive',
+		event: 'reactive.effect.overflow',
+		severity: 'warn',
+		dataClass: 'operational',
+		message: 'A reactive effect is at its concurrency and queue limits; calls for new publishes are skipped.',
+		attributes: { effect: lane.id, maxConcurrent: lane.maxConcurrent, maxQueued: lane.maxQueued }
+	});
+}
+
+/**
+ * Report effect calls whose slots were released at their deadline. The
+ * handlers keep running; only the slots are given back.
+ * @param {any} lane
+ * @param {number} released
+ */
+function _effectTimedOut(lane, released) {
+	const err = new LiveError('TIMEOUT',
+		"live.effect '" + lane.id + "' calls did not settle within timeoutMs " + lane.timeoutMs + '; their slots were released.');
+	if (state.serverErrorHandler) {
+		try { state.serverErrorHandler('effect', err); } catch {}
+	}
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.reactive',
+		event: 'reactive.effect.timeout',
+		severity: 'warn',
+		dataClass: 'operational',
+		message: 'Reactive effect calls did not settle within their deadline; their slots were released.',
+		attributes: { effect: lane.id, timeoutMs: lane.timeoutMs, released, abandoned: lane.abandoned }
+	});
+}
+
+/** @param {any} lane @param {number} rejected */
+function _effectOverflowEnded(lane, rejected) {
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.reactive',
+		event: 'reactive.effect.overflow.ended',
+		severity: 'info',
+		dataClass: 'operational',
+		message: 'A reactive effect queue is back to half its limit after skipping calls.',
+		attributes: { effect: lane.id, rejected }
+	});
+}
+
+/** @param {unknown} err */
+function _reportEffectFailure(err) {
+	if (state.serverErrorHandler) {
+		try { state.serverErrorHandler('effect', err); } catch {}
+	}
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.reactive',
+		event: 'reactive.effect.failed',
+		severity: 'error',
+		dataClass: 'application',
+		message: 'A reactive effect handler failed.',
+		attributes: { error: diagnosticErrorMessage(err) }
+	});
 }

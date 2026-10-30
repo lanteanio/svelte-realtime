@@ -7,6 +7,8 @@ import { createDeadLetterStore } from './dead-letter.js';
 import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 import { LiveError } from './live-error.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
+import { _validateLaneLimit } from './work-lane.js';
+import { _bgClock, _bgCount, _bgDone, _bgInflight, _bgDeadLetterChanged } from './background-metrics.js';
 
 async function _handleInboundWebhook(req, config, topic) {
 	let event;
@@ -105,6 +107,8 @@ export const _webhooksOutboundRegister = function outbound(sources, config) {
 			throw new Error('[svelte-realtime] live.webhooks.outbound: previousSecret requires secret (the current key) to be set');
 		}
 	}
+	_validateLaneLimit('live.webhooks.outbound', 'maxConcurrent', config.maxConcurrent, 1);
+	_validateLaneLimit('live.webhooks.outbound', 'maxQueued', config.maxQueued, 0);
 	// Fail fast on a static url: the always-on scheme gate plus, in
 	// strict/allowlist mode, the literal range floor are checked at definition
 	// time so a misconfigured endpoint is caught at boot, not on the first
@@ -161,6 +165,7 @@ export function configureWebhooks(config = {}) {
 		} else {
 			state.webhookDeadLetter = null;
 		}
+		_bgDeadLetterChanged();
 	}
 	if (config.budget !== undefined) {
 		if (config.budget === true) {
@@ -274,6 +279,7 @@ export async function replayDeadLetter(opts = {}) {
 		if (!entry) {
 			// The webhook was unregistered (e.g. removed from code) since the
 			// event was dead-lettered; it cannot be replayed.
+			if (!dryRun) _bgCount('dlq', 'skipped');
 			results.push({ id: rec.id, ok: false, status: 'webhook-unregistered' });
 			continue;
 		}
@@ -282,6 +288,8 @@ export async function replayDeadLetter(opts = {}) {
 			continue;
 		}
 		let outcome;
+		_bgInflight('dlq', 1);
+		const startedAt = _bgClock();
 		try {
 			outcome = await _replayWebhookOut(
 				entry,
@@ -294,6 +302,8 @@ export async function replayDeadLetter(opts = {}) {
 		} catch (err) {
 			outcome = { ok: false, error: String((err && err.message) || err) };
 		}
+		_bgInflight('dlq', -1);
+		_bgDone('dlq', startedAt, outcome.ok ? 'ok' : 'error');
 		if (outcome.ok) {
 			replayed++;
 			if (await store.remove(rec.id)) removed++;
@@ -302,6 +312,7 @@ export async function replayDeadLetter(opts = {}) {
 			results.push({ id: rec.id, ok: false, status: 'failed', error: outcome.error });
 		}
 	}
+	if (removed) _bgDeadLetterChanged();
 	try {
 		emitOperationalEvent({
 			source: 'svelte-realtime', component: 'server.webhook', event: 'webhook.dead-letter.replayed',

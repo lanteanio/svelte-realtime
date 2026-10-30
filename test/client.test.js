@@ -1456,6 +1456,120 @@ describe('__stream() mutate queue-replay correctness', () => {
 		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
 		ctx.unsub();
 	});
+
+	// - subscribe answers that land while a mutate is in flight ----------
+	//
+	// In queue mode the server state lives apart from the display, and the
+	// drain promotes it. A snapshot that arrives meanwhile has to become that
+	// server state, or the drain puts the pre-snapshot baseline back.
+
+	it('hydrate during a pending mutate keeps the hydrated rows after it settles', async () => {
+		const ctx = await setupCrudStream('qr/rehydrate', 't-rehydrate', [{ id: 1, name: 'A' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+		// A load re-run (an invalidation) hands the page fresh rows.
+		ctx.store.hydrate([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		simulateTopicMessage('t-rehydrate', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		// The key index follows the hydrated rows.
+		simulateTopicMessage('t-rehydrate', { event: 'updated', data: { id: 3, name: 'Cee' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'Cee' }, { id: 'n', name: 'N' }]);
+		ctx.unsub();
+	});
+
+	it('mutate before the first load keeps the loaded rows after it settles', async () => {
+		const store = __stream('qr/early-click', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+		expect(values[values.length - 1]).toEqual([{ id: 'n', name: 'N' }]);
+
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }], topic: 't-early', merge: 'crud', key: 'id'
+		});
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		simulateTopicMessage('t-early', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		// The key index follows the loaded rows, so an update edits in place.
+		simulateTopicMessage('t-early', { event: 'updated', data: { id: 2, name: 'Bea' } });
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'Bea' }, { id: 'n', name: 'N' }]);
+		unsub();
+	});
+
+	it('mutate before the first load keeps the loaded rows when no confirming event arrives', async () => {
+		const store = __stream('qr/early-click-quiet', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, { event: 'created', data: { id: 'n' } });
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 't-early-quiet', merge: 'crud', key: 'id' });
+
+		d.resolve();
+		await m;
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 'n' }]);
+		unsub();
+	});
+
+	it('a reconnect snapshot that lands during a pending mutate survives the drain', async () => {
+		const ctx = await setupCrudStream('qr/reconnect-pending', 't-rp', [{ id: 1, name: 'A' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const resub = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(resub.rpc).toBe('qr/reconnect-pending');
+
+		// B was created and A renamed while the socket was down.
+		simulateRpcResponse(resub.id, {
+			ok: true, data: [{ id: 1, name: 'A2' }, { id: 2, name: 'B' }], topic: 't-rp', merge: 'crud', key: 'id'
+		});
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+
+		simulateTopicMessage('t-rp', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 2, name: 'B' }, { id: 'n', name: 'N' }]);
+		ctx.unsub();
+	});
+
+	it('a set-merge snapshot that lands during a pending mutate survives the drain', async () => {
+		const store = __stream('qr/set-pending', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const first = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(first.id, { ok: true, data: { n: 1 }, topic: 't-sp', merge: 'set' });
+
+		const d = deferred();
+		const m = store.mutate(() => d.promise, (v) => ({ ...v, draft: true }));
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const resub = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(resub.id, { ok: true, data: { n: 5 }, topic: 't-sp', merge: 'set' });
+		expect(values[values.length - 1]).toEqual({ n: 5, draft: true });
+
+		d.reject(new Error('refused'));
+		await expect(m).rejects.toThrow('refused');
+		expect(values[values.length - 1]).toEqual({ n: 5 });
+		unsub();
+	});
 });
 
 // - __stream() mutate queue-replay property tests (fast-check) ---------------
@@ -3128,10 +3242,15 @@ describe('__stream() hydrate reconnect', () => {
 
 // - __stream() hydrate derived -----------------------------------------------
 
+// A derived subscribe response is a compute the server runs after it has
+// subscribed the socket to the output topic. A recompute published before
+// that subscribe reaches the client only through this response, so the
+// client applies it even when the store already holds a value.
+
 describe('__stream() hydrate derived', () => {
-	it('keeps hydrated data when server returns stale derived result', async () => {
+	it('takes a subscribe snapshot that differs from the hydrated value', async () => {
 		const store = __stream('hydrate/derived-stats', { merge: 'set' });
-		store.hydrate({ members: 42, audits: 566, emails: 57 });
+		store.hydrate({ state: 1 });
 
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -3141,18 +3260,64 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: { members: 0, audits: 0, emails: 0 },
+			data: { state: 2 },
 			topic: 'derived-stats',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ members: 42, audits: 566, emails: 57 });
+		expect(values[values.length - 1]).toEqual({ state: 2 });
 
 		unsub();
 	});
 
-	it('accepts live updates after initial hydration protection', async () => {
+	it('takes a zeroed snapshot instead of guessing it is stale', async () => {
+		const store = __stream('hydrate/derived-zero', { merge: 'set' });
+		store.hydrate({ members: 42, audits: 566 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { members: 0, audits: 0 },
+			topic: 'derived-zero',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ members: 0, audits: 0 });
+
+		unsub();
+	});
+
+	it('takes a null snapshot, since null is a value a derived compute can return', async () => {
+		const store = __stream('hydrate/derived-null', { merge: 'set' });
+		store.hydrate({ incident: 'db-latency' });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: null,
+			topic: 'derived-null',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toBeNull();
+
+		unsub();
+	});
+
+	it('applies live updates on top of the subscribe snapshot', async () => {
 		const store = __stream('hydrate/derived-live', { merge: 'set' });
 		store.hydrate({ count: 100 });
 
@@ -3164,13 +3329,13 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: { count: 0 },
+			data: { count: 101 },
 			topic: 'derived-live',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ count: 100 });
+		expect(values[values.length - 1]).toEqual({ count: 101 });
 
 		simulateTopicMessage('derived-live', { event: 'set', data: { count: 120 } });
 
@@ -3179,7 +3344,7 @@ describe('__stream() hydrate derived', () => {
 		unsub();
 	});
 
-	it('keeps hydrated data on reconnect too since server marks derived responses', async () => {
+	it('takes the resync snapshot after a reconnect', async () => {
 		const store = __stream('hydrate/derived-reconn', { merge: 'set' });
 		store.hydrate({ total: 50 });
 
@@ -3191,41 +3356,69 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent1.id, {
 			ok: true,
-			data: { total: 0 },
+			data: { total: 50 },
 			topic: 'derived-reconn',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ total: 50 });
-
-		// Live update brings real data
 		simulateTopicMessage('derived-reconn', { event: 'set', data: { total: 75 } });
-
 		expect(values[values.length - 1]).toEqual({ total: 75 });
 
-		// Reconnect
 		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
 		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.id).not.toBe(sent1.id);
 
-		// Reconnect response also has derived: true, keeps current value (75)
+		// The sources changed while the socket was down; the recompute was
+		// published to nobody, and derived streams have no replay.
 		simulateRpcResponse(sent2.id, {
 			ok: true,
-			data: { total: 0 },
+			data: { total: 90 },
 			topic: 'derived-reconn',
 			merge: 'set',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual({ total: 75 });
+		expect(values[values.length - 1]).toEqual({ total: 90 });
 
 		unsub();
 	});
 
-	it('crud-merge derived keeps hydrated array', async () => {
+	it('takes the snapshot when a subscriber resumes inside the grace window', async () => {
+		const store = __stream('resume/derived', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: { total: 1 }, topic: 'resume-derived', merge: 'set', derived: true
+		});
+		expect(values[values.length - 1]).toEqual({ total: 1 });
+
+		unsub();
+		await flush();
+
+		sendQueuedFn.mockClear();
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		// Resumed, not cold-started: the retained value is emitted first.
+		expect(values2[0]).toEqual({ total: 1 });
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(second.id, {
+			ok: true, data: { total: 2 }, topic: 'resume-derived', merge: 'set', derived: true
+		});
+
+		expect(values2[values2.length - 1]).toEqual({ total: 2 });
+
+		unsub2();
+	});
+
+	it('crud-merge derived replaces the hydrated array with the snapshot', async () => {
 		const store = __stream('hydrate/derived-crud', { merge: 'crud', key: 'id' });
 		store.hydrate([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
 
@@ -3237,14 +3430,19 @@ describe('__stream() hydrate derived', () => {
 
 		simulateRpcResponse(sent.id, {
 			ok: true,
-			data: [],
+			data: [{ id: 2, name: 'Bob' }],
 			topic: 'derived-crud',
 			merge: 'crud',
 			key: 'id',
 			derived: true
 		});
 
-		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
+		expect(values[values.length - 1]).toEqual([{ id: 2, name: 'Bob' }]);
+
+		// The key index follows the snapshot: Bob moved from position 1 to 0,
+		// so an update edits him in place instead of writing past the end.
+		simulateTopicMessage('derived-crud', { event: 'updated', data: { id: 2, name: 'Robert' } });
+		expect(values[values.length - 1]).toEqual([{ id: 2, name: 'Robert' }]);
 
 		unsub();
 	});
@@ -3266,7 +3464,7 @@ describe('__stream() hydrate derived', () => {
 			derived: true
 		});
 
-		// No hydration, so currentValue is undefined - derived protection does not apply
+		// No hydration: the first response sets the value
 		expect(values[values.length - 1]).toEqual({ count: 42 });
 
 		unsub();
@@ -3433,6 +3631,220 @@ describe('__stream() reconnect cursor time-check', () => {
 		// The displayed data survived the reconnect - no blank flash before the
 		// rehydrate lands (the cursor drop keeps currentValue).
 		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		// The rehydrate replaces the view: row 2 was deleted while the socket
+		// was down and is gone, not kept from the stale base.
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 1 }, { id: 3 }], topic: 'stale-topic', merge: 'crud', key: 'id', seq: 40 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3 }]);
+		simulateTopicMessage('stale-topic', { event: 'updated', data: { id: 3, v: 1 }, seq: 41 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3, v: 1 }]);
+
+		unsub();
+	});
+
+	it('replaces the view when the server cannot fill the gap and answers a full snapshot', async () => {
+		// The cursor is in range, but the server's replay buffer no longer
+		// reaches back to it, so it answers with the loader's snapshot instead
+		// of a replay. The client must not merge that onto the stale rows.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('evicted/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 2, v: 1 }, { id: 4 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 90, replay: false });
+		expect(values[values.length - 1]).toEqual([{ id: 2, v: 1 }, { id: 4 }]);
+
+		unsub();
+	});
+
+	it.each([
+		['starts past the cursor', [{ seq: 13, event: 'deleted', data: { id: 1 } }], 13],
+		['is empty while the sequence went back', [], 2]
+	])('discards a replay that %s and subscribes again for a full snapshot', async (_, replayed, seq) => {
+		// An older server answers whatever its buffer holds after the cursor:
+		// a later suffix, or nothing once the buffer restarted. Applying that
+		// would keep the rows the client held.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('suffix/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: replayed, topic: 'suffix-topic', merge: 'crud', key: 'id', seq, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		simulateRpcResponse(sent3.id, { ok: true, data: [{ id: 2 }, { id: 3 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq });
+		expect(values[values.length - 1]).toEqual([{ id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
+	it('applies a replay whose sequence is ahead of its last event', async () => {
+		// An older server reads the sequence after the events: one published in
+		// between is not in the answer and reaches the client live.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('ahead/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 11, event: 'created', data: { id: 2 } }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 12, replay: true });
+		simulateTopicMessage('ahead-topic', { event: 'created', data: { id: 3 }, seq: 12 });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
+	it('applies a replay with an event that carries no sequence between numbered ones', async () => {
+		// A buffer entry with `seq: null` was published without a number; it
+		// is not a hole in the numbered run. Only an older server sends such a
+		// reply: a current one answers from the loader when an entry has no
+		// number.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('nullseq/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, {
+			ok: true, topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 12, replay: true,
+			data: [{ seq: 11, event: 'created', data: { id: 2 } }, { seq: null, event: 'created', data: { id: 3 } }, { seq: 12, event: 'created', data: { id: 4 } }]
+		});
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+
+		unsub();
+	});
+
+	it('applies a set replay whose newest value follows a hole', async () => {
+		// Each event of a set stream replaces the whole value, so the sets the
+		// buffer no longer holds do not show.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('sethole/state', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: 'a', topic: 'sethole-topic', merge: 'set', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'set', data: 'd' }], topic: 'sethole-topic', merge: 'set', seq: 13, replay: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toBe('d');
+
+		unsub();
+	});
+
+	it('discards a latest replay with a hole even when it reaches the answer sequence', async () => {
+		// Only a set stream skips a hole; a latest stream would lose the
+		// events in it.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('latesthole/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'push', data: { n: 4 } }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 13, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ n: 1 }]);
+
+		unsub();
+	});
+
+	it('keeps a live frame that arrived during a delta.fromSeq answer whatever the answer numbers its events', async () => {
+		// The application numbers the bridged events; a live frame with the
+		// same number is a different event and stays.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('bridged/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { attach: true, topic: 'bridged-topic' });
+		simulateTopicMessage('bridged-topic', { event: 'push', data: { n: 3 }, seq: 12 });
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 12, event: 'push', data: { n: 2 } }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 12, replay: true, fromSeq: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
 
 		unsub();
 	});

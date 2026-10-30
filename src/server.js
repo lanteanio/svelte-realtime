@@ -70,6 +70,7 @@ import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeRe
 import { _recordRpcMetrics, _rpcClosedSockets, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
 export { PRESSURE_REASONS } from './server/admission.js';
+export { BACKGROUND_METRICS } from './server/background-metrics.js';
 import { _getIdentityKey, _getAuthenticatedId, _isIdentityValue, _resetUnusableIdWarning } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
 import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';
@@ -483,6 +484,9 @@ const _redactPatternWarned = new Set();
 
 /** One-shot dedup for the "piiRedact factory has no cluster-transient coverage" warning (keyed by factory source). */
 const _redactUncompilableWarned = new Set();
+
+/** One-shot dedup for the "replay and delta.fromSeq both declared" warning (keyed by topic source). */
+const _replayFromSeqWarned = new Set();
 
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
@@ -1639,6 +1643,22 @@ live.stream = function stream(topic, initFn, options) {
 		if (delta.fromSeq !== undefined && typeof delta.fromSeq !== 'function') {
 			throw new Error('[svelte-realtime] live.stream delta.fromSeq must be a function (sinceSeq) => events[]');
 		}
+		// With a replay buffer installed, a resume the buffer cannot cover
+		// reloads through the loader: `fromSeq` then never runs, which is easy
+		// to miss when both are declared. Once per topic, so HMR stays quiet.
+		if (_IS_DEV && replay && typeof delta.fromSeq === 'function') {
+			const _key = String(topic);
+			if (!_replayFromSeqWarned.has(_key)) {
+				_replayFromSeqWarned.add(_key);
+				const _label = typeof topic === 'string' ? topic : 'topic factory';
+				console.warn(
+					'[svelte-realtime] live.stream "' + _label + '"' +
+					' declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer ' +
+					'cannot cover reloads through the loader and delta.fromSeq is not called. Drop replay to resume ' +
+					'gaps through delta.fromSeq, or drop delta.fromSeq.'
+				);
+			}
+		}
 	}
 	// `key` only applies to `crud`. `set` and `latest` ignore it; `presence`
 	// and `cursor` use a fixed `'key'` field on the data shape. Stamping a
@@ -2476,7 +2496,7 @@ export function __registerEffect(path, fn) {
 	const sources = /** @type {any} */ (fn).__effectSources;
 	const debounce = /** @type {any} */ (fn).__effectDebounce || 0;
 	if (!sources) return;
-	effectRegistry.set(path, { sources, fn, debounce, timer: null });
+	effectRegistry.set(path, { id: path, sources, fn, debounce, timer: null, limits: /** @type {any} */ (fn).__effectLimits });
 	for (const src of sources) {
 		let set = _effectBySource.get(src);
 		if (!set) { set = new Set(); _effectBySource.set(src, set); }
@@ -2576,7 +2596,10 @@ function _installFlagWatcher(topic) {
 		sources: [topic],
 		fn: function flagWatcher(event, data) { if (event === 'set') cell.value = data; },
 		debounce: 0,
-		timer: null
+		timer: null,
+		// The cell only needs the newest value: a burst of sets coalesces into
+		// one waiting update, and the watcher stays out of the effect metrics.
+		limits: { maxConcurrent: 1, maxQueued: 1, overflow: 'coalesce', metered: false }
 	};
 	_flagWatchers.set(topic, watcher);
 	let watcherSet = _effectBySource.get(topic);

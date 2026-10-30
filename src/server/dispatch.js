@@ -882,6 +882,34 @@ function _settleClaimBarriers(ws, topic, fn) {
 }
 
 /**
+ * The sequence a replay read brings a resuming stream up to, or null when it
+ * cannot fill the gap. The entries must run on from the client's cursor with
+ * no hole and reach at least the sequence read before them. A buffer trimmed
+ * past the cursor returns a later suffix; a buffer that lost its history (a
+ * restart, an eviction) returns nothing while its sequence is behind the
+ * cursor. Both answer with the loader instead, which replaces the view. Each
+ * event of a `set` stream replaces the whole value, so there a hole does not
+ * matter: entries after the cursor, in order, whose last one reaches the
+ * current sequence carry the value (a `live.flag` buffer keeps one entry).
+ * @param {unknown} missed
+ * @param {number} clientSeq
+ * @param {unknown} currentSeq
+ * @param {string | undefined} merge
+ * @returns {number | null}
+ */
+function _replayFilledTo(missed, clientSeq, currentSeq, merge) {
+	if (!Array.isArray(missed) || typeof currentSeq !== 'number' || !Number.isSafeInteger(clientSeq) || currentSeq < clientSeq) return null;
+	const whole = merge === 'set';
+	let last = clientSeq;
+	for (const entry of missed) {
+		if (entry === null || typeof entry !== 'object' || !Number.isSafeInteger(entry.seq)) return null;
+		if (whole ? entry.seq <= last : entry.seq !== last + 1) return null;
+		last = entry.seq;
+	}
+	return last >= currentSeq ? last : null;
+}
+
+/**
  * Stream branch of `_executeSingleRpc`: validate args, gate, resolve topic,
  * subscribe, run optional channel/delta/replay/seq-delta short-circuits, run
  * the loader, apply transform/migration, build the response envelope.
@@ -1248,14 +1276,20 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		} catch {}
 	}
 
-	// Replay (bounded recent buffer)
-	if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
+	// Replay (bounded recent buffer). A stream with a buffer resumes from it
+	// or from its loader: a gap the buffer cannot cover goes to the loader,
+	// never to `delta.fromSeq`, whose events are numbered by the application.
+	const resumesFromBuffer = !!(replayOpts && typeof clientSeq === 'number' && platform.replay);
+	if (resumesFromBuffer) {
 		try {
+			// The current sequence is read first: everything published up to it
+			// has to come back from the buffer for the replay to fill the gap.
+			const currentSeq = await platform.replay.seq(topic);
 			const missed = await platform.replay.since(topic, clientSeq);
-			if (missed) {
-				const currentSeq = await platform.replay.seq(topic);
+			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq, streamOpts.merge);
+			if (filledTo !== null) {
 				armReloads();
-				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: filledTo, replay: true };
 			}
 		} catch {}
 	}
@@ -1283,7 +1317,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	}
 
 	// Seq-delta (user-provided bridge for older-than-buffer reconnects)
-	if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
+	if (!resumesFromBuffer && deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
 		try {
 			let events = await deltaOpts.fromSeq(clientSeq);
 			if (Array.isArray(events)) {
@@ -1305,7 +1339,9 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 					id, ok: true, data: events, topic,
 					merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion,
 					prepend: streamOpts.prepend, max: streamOpts.max,
-					replay: true
+					// The application numbers these events, not a replay buffer:
+					// the client applies them without checking their continuity.
+					replay: true, fromSeq: true
 				};
 				if (respSeq !== undefined) deltaResp.seq = respSeq;
 				armReloads();
@@ -1372,8 +1408,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		id, ok: true, data: resultData, topic, merge: streamOpts.merge,
 		key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max,
 		hasMore: undefined, cursor: undefined, seq: undefined,
-		version: undefined, schemaVersion: undefined, replay: undefined,
-		derived: /** @type {any} */ (fn).__isDerived || undefined
+		version: undefined, schemaVersion: undefined, replay: undefined
 	};
 
 	if (isPaginated) {

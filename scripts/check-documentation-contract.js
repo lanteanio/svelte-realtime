@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// Generate and validate the README entry routes and compatibility commands.
+// Generate and validate the README entry routes, topic index and size. The
+// generated compatibility blocks and the facts they restate belong to
+// scripts/check-compatibility.js; this contract only keeps native version
+// facts inside the compatibility block.
 import { isScriptEntry } from './script-entry.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { anchorsOf, headingsOf } from './check-links.js';
 import { readReadmeBaselines, resizeReadmeManifest, validateGrowthRecords, validateReadmeGrowth } from './readme-ratchet.js';
-import { SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC, SCAFFOLD_EXTENSIONS_SPEC, SCAFFOLD_UWS_SPEC } from '../src/cli-utils.js';
+import { MANIFEST_PATH } from './check-compatibility.js';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PATHS_START = '<!-- documentation-paths:start -->';
 export const PATHS_END = '<!-- documentation-paths:end -->';
@@ -55,7 +58,7 @@ export function validateManifest(manifest, pkg) {
 	if (!fields(manifest, ['schemaVersion', 'owner', 'compatibilitySource', 'entryBudgetLines', 'readmeMaxLines', 'paths', ...(Object.hasOwn(manifest ?? {}, 'readmeGrowth') ? ['readmeGrowth'] : [])])) return ['manifest fields differ from schema'];
 	failures.push(...validateGrowthRecords(manifest));
 	if (manifest.schemaVersion !== 1 || manifest.owner !== pkg.name) failures.push('manifest version or package owner is invalid');
-	if (manifest.compatibilitySource !== 'src/cli-utils.js') failures.push('compatibility must use the CLI-owned tuple');
+	if (manifest.compatibilitySource !== MANIFEST_PATH) failures.push('compatibility must use the packaged adapter manifest');
 	if (!Number.isInteger(manifest.entryBudgetLines) || manifest.entryBudgetLines < 30 || manifest.entryBudgetLines > 120) failures.push('entryBudgetLines must be between 30 and 120');
 	if (!Number.isInteger(manifest.readmeMaxLines) || manifest.readmeMaxLines < 1) failures.push('readmeMaxLines must be positive');
 	if (!Array.isArray(manifest.paths) || manifest.paths.length !== keys.length) return [...failures, 'exactly eight ordered paths are required'];
@@ -82,19 +85,6 @@ export function validateManifest(manifest, pkg) {
 export function renderPaths(manifest) {
 	return [PATHS_START, '**Choose a documentation path:**', '', '| Need | Type | Start here | Owner |', '| --- | --- | --- | --- |', ...manifest.paths.map((path) => `| ${path.need} | ${path.type} | [${path.label}](${path.destination}) | ${path.owner} |`), PATHS_END].join('\n');
 }
-export function renderCompatibility() {
-	const version = (spec) => spec.slice(spec.lastIndexOf('@') + 1);
-	return [COMPAT_START,
-		'| `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |',
-		'| --- | --- | --- | --- |',
-		'| `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |',
-		'| `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |',
-		`| \`${version(SCAFFOLD_ADAPTER_SPEC)}\` | \`${version(SCAFFOLD_REALTIME_SPEC)}\` | \`${version(SCAFFOLD_EXTENSIONS_SPEC)}\` | Coordinated candidate; publish the tuple together before these registry commands are used. |`,
-		'', 'Install the CLI-owned candidate tuple and run its native preflight:', '', '```bash',
-		`npm install ${SCAFFOLD_ADAPTER_SPEC} ${SCAFFOLD_REALTIME_SPEC}`,
-		`npm install ${SCAFFOLD_UWS_SPEC}`,
-		'npm install -D ws', 'npm exec -- svelte-adapter-uws-preflight', '```', COMPAT_END].join('\n');
-}
 function bounds(source, startMarker, endMarker) {
 	if (source.split(startMarker).length !== 2 || source.split(endMarker).length !== 2) throw new Error(`Expected exactly one ${startMarker} block`);
 	const start = source.indexOf(startMarker);
@@ -116,7 +106,6 @@ export function validateReadme(readme, manifest, baseline) {
 	let compatibility;
 	try { paths = bounds(readme, PATHS_START, PATHS_END); compatibility = bounds(readme, COMPAT_START, COMPAT_END); } catch (error) { return [error.message]; }
 	if (readme.slice(paths.start, paths.end) !== renderPaths(manifest)) failures.push('routing block differs from the manifest; run npm run generate:documentation');
-	if (readme.slice(compatibility.start, compatibility.end) !== renderCompatibility()) failures.push('compatibility block differs from CLI tuple; run npm run generate:documentation');
 	try {
 		const topics = bounds(readme, TOPICS_START, TOPICS_END);
 		if (readme.slice(topics.start, topics.end) !== renderTopics(readme)) failures.push('topic index differs from README headings; run npm run generate:documentation');
@@ -141,7 +130,6 @@ export function main({ directory = root, write = false, acceptReadmeGrowth = fal
 	let readme = readFileSync(resolve(directory, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
 	if (write) {
 		readme = replaceBlock(readme, PATHS_START, PATHS_END, renderPaths(manifest));
-		readme = replaceBlock(readme, COMPAT_START, COMPAT_END, renderCompatibility());
 		readme = replaceBlock(readme, TOPICS_START, TOPICS_END, renderTopics(readme));
 		manifest = resizeReadmeManifest(manifest, baseline || manifest, readme.split('\n').length, acceptReadmeGrowth);
 	}

@@ -187,6 +187,9 @@ export function _purgeCrdtDocs(names) {
 			continue;
 		}
 		for (const name of names) {
+			// A document joined again after erasure starts from what the
+			// durable store holds then, with no merge left over from before.
+			if (rec.mergePending) rec.mergePending.delete(name);
 			try { if (rec.authority.drop(name)) count++; }
 			catch { failed = true; }
 		}
@@ -285,17 +288,29 @@ function _ensureCrdtCluster(crdt) {
 			if (!rec || !rec.authority || !rec.authority.has(topic)) return;
 			// A reply answers the state vector sent at cold load, so it often
 			// repeats what relayed updates or an earlier reply already brought.
-			// Fan out only what it added; an encoding since the prior state
-			// vector that did not change means the reply was a no-op.
-			const sv = rec.authority.stateVector(topic);
-			const before = rec.authority.diff(topic, sv);
-			if (!rec.authority.applyUpdate(topic, bytes)) return;
-			const after = rec.authority.diff(topic, sv);
-			if (after === null || (before !== null && _sameBytes(before, after))) return;
-			_publishUpdate(rec, topic, after, undefined);
+			_mergeAndFanOut(rec, topic, bytes);
 		}
 	});
 }
+
+/**
+ * Merge state that may overlap the replica and fan out only what it added to
+ * the local subscribers; an encoding since the prior state vector that did not
+ * change means the merge was a no-op.
+ * @param {any} rec @param {string} topic @param {Uint8Array | number[]} bytes
+ * @returns {Uint8Array | null} the added update, or null when nothing was added
+ */
+function _mergeAndFanOut(rec, topic, bytes) {
+	const sv = rec.authority.stateVector(topic);
+	const before = rec.authority.diff(topic, sv);
+	if (!rec.authority.applyUpdate(topic, bytes)) return null;
+	const after = rec.authority.diff(topic, sv);
+	if (after === null || (before !== null && _sameBytes(before, after))) return null;
+	_publishUpdate(rec, topic, after, undefined);
+	return after;
+}
+
+const NEVER_ABORTED = new AbortController().signal;
 
 export function _crdtRegister(kind, config) {
 	const label = 'live.' + kind + '()';
@@ -368,46 +383,84 @@ export function _crdtRegister(kind, config) {
 				prefix: rt.CRDT_TOPIC_PREFIX,
 				platform: null,
 				current: cfg,
-				accessByWs: new WeakMap()
+				accessByWs: new WeakMap(),
+				// Topics whose persist lease this instance newly took and whose
+				// stored snapshot it has not merged into a successful write yet.
+				mergePending: new Set()
 			};
 			// The authority reads its hooks and knobs through `rec.current`,
 			// so an HMR re-attach updates behavior without rebuilding the
 			// replicas (which hold edits that exist nowhere else yet).
 			rec.authority = rt.createCrdtAuthority({
 				persist: {
-					load: (topic) => {
+					load: (topic, info) => {
 						const p = rec.current.persist;
-						return p && typeof p.load === 'function' ? p.load(topic) : null;
+						return p && typeof p.load === 'function' ? p.load(topic, info) : null;
 					},
 					store: async (topic, bytes, options) => {
 						const p = rec.current.persist;
 						if (!p || typeof p.store !== 'function') return;
 						// Clustered: gate the write behind a per-topic persist
 						// lease so exactly one instance writes a topic's
-						// snapshot - no divergent-snapshot clobber. acquirePersist
+						// snapshot - no divergent-snapshot clobber. Acquiring
 						// throws on a Redis error (the authority then retries) and
-						// returns false when another instance is the writer (skip;
+						// declines when another instance is the writer (skip;
 						// that instance persists the converged state). Single
 						// instance (no platform.crdt): always write.
 						const crdt = rec.platform && rec.platform.crdt;
-						if (crdt && typeof crdt.acquirePersist === 'function') {
-							const mayWrite = await crdt.acquirePersist(topic);
+						const detailed = crdt && typeof crdt.acquirePersistDetailed === 'function';
+						if (crdt && (detailed || typeof crdt.acquirePersist === 'function')) {
+							let mayWrite;
+							if (detailed) {
+								const lease = await crdt.acquirePersistDetailed(topic);
+								mayWrite = !!(lease && lease.acquired);
+								// The coordinator reports a new lease as fresh
+								// once; the flag stays here until a write lands.
+								if (mayWrite && lease.fresh) rec.mergePending.add(topic);
+							} else {
+								mayWrite = await crdt.acquirePersist(topic);
+							}
 							// Decline (not fail): the lease holder writes the
 							// converged state. Returning false keeps the topic
 							// dirty so this instance re-probes the lease and
 							// takes over if the holder dies, without pinning the
 							// replica or surfacing a spurious error.
 							if (!mayWrite) return false;
+							const signal = options && options.signal ? options.signal : NEVER_ABORTED;
 							// The bytes were captured before the lease round
 							// trip. An erasure or teardown in the meantime
 							// aborted this write: never persist what it erased.
-							if (options && options.signal && options.signal.aborted) return false;
+							if (signal.aborted) return false;
+							if (rec.mergePending.has(topic) && typeof p.load === 'function') {
+								// The previous writer may have stored an edit this
+								// replica never received (its relay was lost).
+								// Merge the stored snapshot before replacing it,
+								// and pass what it adds to local subscribers and
+								// peers so every replica converges on it.
+								// A failed read blocks the write rather than skipping
+								// the merge: writing unmerged would replace the very
+								// edit the merge exists to keep. The authority retries
+								// the store; the error names the read that failed.
+								let stored;
+								try {
+									stored = await p.load(topic, { signal });
+								} catch (err) {
+									throw new Error('Could not load the stored snapshot of "' + topic + '" to merge it before the first write of a new persist lease', { cause: err });
+								}
+								if (signal.aborted) return false;
+								if (stored && stored.length > 0 && rec.authority.has(topic)) {
+									const added = _mergeAndFanOut(rec, topic, stored);
+									if (added && typeof crdt.relayUpdate === 'function') crdt.relayUpdate(rec.key, topic, Array.from(added));
+								}
+							}
 							// Edits and peer state merged while waiting are part
 							// of the replica now, so the write takes its current
 							// full state rather than the older capture.
 							const current = rec.authority.diff(topic, null);
 							if (current === null) return false;
-							return p.store(topic, current);
+							const result = await p.store(topic, current);
+							if (result !== false) rec.mergePending.delete(topic);
+							return result;
 						}
 						return p.store(topic, bytes);
 					}

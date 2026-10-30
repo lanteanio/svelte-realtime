@@ -55,6 +55,23 @@ function _topicScope(topic) {
  */
 
 /**
+ * Depth and oldest record of each built-in store, for the background metrics.
+ * @type {WeakMap<object, () => { depth: number, oldestAt: number }>}
+ */
+const _builtinStats = new WeakMap();
+
+/**
+ * The depth and the oldest record's `failedAt` of a store made by
+ * `createDeadLetterStore`, or null for any other store.
+ * @param {unknown} store
+ * @returns {{ depth: number, oldestAt: number } | null}
+ */
+export function _deadLetterStats(store) {
+	const stats = store && typeof store === 'object' ? _builtinStats.get(store) : undefined;
+	return stats ? stats() : null;
+}
+
+/**
  * Create an in-memory dead-letter store: a bounded, insertion-ordered ring with
  * an optional TTL. The default store. A cluster deployment substitutes a durable
  * store exposing the same methods.
@@ -117,7 +134,7 @@ export function createDeadLetterStore(options = {}) {
 		}
 	}
 
-	return {
+	const store = {
 		/**
 		 * Retain an undeliverable event. Returns the new record id, or `null` when a
 		 * forget tombstone drops the record (its delivery was in flight when
@@ -292,4 +309,11 @@ export function createDeadLetterStore(options = {}) {
 			purgedAt.clear();
 		}
 	};
+	// Records are kept in insertion order, so the first one failed first.
+	_builtinStats.set(store, () => {
+		_expire();
+		const first = records.values().next().value;
+		return { depth: records.size, oldestAt: first ? first.failedAt : 0 };
+	});
+	return store;
 }

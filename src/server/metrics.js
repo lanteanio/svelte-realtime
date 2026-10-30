@@ -4,6 +4,7 @@ import { wireAssertionMetrics } from '../shared/assert.js';
 import { state, registry } from './state.js';
 import { _validPathRe } from './validate.js';
 import { _IS_DEV } from './env.js';
+import { _publishBackgroundGauges, _registerBackgroundMetrics, _bgClock, _bgDone, _bgInflight } from './background-metrics.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 /**
@@ -154,15 +155,16 @@ export const DURATION_BUCKETS_SECONDS = Object.freeze([
 
 /**
  * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
- * subscriptions, and cron executions. Disabled until called. RPC reply
- * delivery has its own bounded path/outcome counter, without cohort labels.
+ * subscriptions, and background work (`BACKGROUND_METRICS`). Disabled until
+ * called. RPC reply delivery has its own bounded path/outcome counter, without
+ * cohort labels.
  *
  * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
  *
  * The registry is any object exposing:
  *   counter({ name, help, labelNames }) -> { inc(labels?) }
  *   histogram({ name, help, labelNames, buckets }) -> { observe(labels, valueSeconds) }
- *   gauge({ name, help }) -> { inc(), dec() }
+ *   gauge({ name, help, labelNames }) -> { inc(), dec(), set?(labels, value) }
  * Durations are seconds; `buckets` carries the fractional-second bounds the
  * registry must honour (a registry adapter that drops them measures nothing).
  *
@@ -209,9 +211,11 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		idempotencyCapacity: registry.counter({ name: 'svelte_realtime_idempotency_capacity_total', help: 'In-process idempotency admissions at a capacity limit, replaced or rejected', labelNames: ['outcome'] }),
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
 		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] }),
-		deadLetterFailures: registry.counter({ name: 'svelte_realtime_webhook_dead_letter_failures_total', help: 'Failed webhook deliveries the dead-letter store could not persist' })
+		deadLetterFailures: registry.counter({ name: 'svelte_realtime_webhook_dead_letter_failures_total', help: 'Failed webhook deliveries the dead-letter store could not persist' }),
+		..._registerBackgroundMetrics(registry)
 	};
 	state.metricsInstruments.lockWaiters.set?.(state.lockWaiterCount);
+	_publishBackgroundGauges();
 	wireAssertionMetrics((category) => state.metricsInstruments.assertions.inc({ category }));
 
 	if (options.lifeline) {
@@ -332,10 +336,17 @@ const _livePoll = function poll(fn, intervalMs) {
 		);
 	}
 	const timer = setIntervalTimer(() => {
+		const startedAt = _bgClock();
+		_bgInflight('poll', 1);
 		try {
 			const out = fn();
-			if (out && typeof (/** @type {any} */ (out).catch) === 'function') {
-				/** @type {any} */ (out).catch((err) => {
+			if (out && typeof (/** @type {any} */ (out).then) === 'function') {
+				/** @type {any} */ (out).then(() => {
+					_bgInflight('poll', -1);
+					_bgDone('poll', startedAt, 'ok');
+				}, (err) => {
+					_bgInflight('poll', -1);
+					_bgDone('poll', startedAt, 'error');
 					emitOperationalEvent({
 						source: 'svelte-realtime',
 						component: 'server.poll',
@@ -346,8 +357,13 @@ const _livePoll = function poll(fn, intervalMs) {
 						attributes: { error: diagnosticErrorMessage(err) }
 					});
 				});
+			} else {
+				_bgInflight('poll', -1);
+				_bgDone('poll', startedAt, 'ok');
 			}
 		} catch (err) {
+			_bgInflight('poll', -1);
+			_bgDone('poll', startedAt, 'error');
 			emitOperationalEvent({
 				source: 'svelte-realtime',
 				component: 'server.poll',

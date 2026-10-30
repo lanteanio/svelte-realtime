@@ -1,5 +1,6 @@
 // @ts-check
 import { SOURCE_GAP_EVENT } from '../shared/source-gap.js';
+import { _platformPublish } from './publish-helpers.js';
 
 /**
  * Tell mounted streams that an external change source lost delivery.
@@ -19,5 +20,5 @@ export function sourceGap(platform, topic, options) {
 	if (options.reason !== undefined) data.reason = options.reason;
 	const publishOptions = { seq: false };
 	if (options.jitterMs !== undefined) publishOptions.jitterMs = options.jitterMs;
-	return platform.publish(topic, SOURCE_GAP_EVENT, data, publishOptions);
+	return _platformPublish(platform, topic, SOURCE_GAP_EVENT, data, publishOptions);
 }

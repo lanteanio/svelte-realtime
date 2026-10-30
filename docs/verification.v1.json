@@ -3,6 +3,7 @@
   "scripts": {
     "check": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -75,7 +76,9 @@
       "node scripts/check-verification-inventory.js --write"
     ],
     "prepublishOnly": [
+      "node scripts/check-compatibility.js --release",
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -99,6 +102,7 @@
     ],
     "pretest": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -128,6 +132,7 @@
     ],
     "test": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -198,6 +203,7 @@
     "verify:docs": [
       "node scripts/check-formatting.js",
       "node scripts/generate-error-reference.js --check",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
@@ -208,6 +214,7 @@
     ],
     "verify:fast": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -231,6 +238,7 @@
     ],
     "verify:full": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -261,6 +269,7 @@
     ],
     "verify:pr": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -289,6 +298,7 @@
     ],
     "verify:release": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -329,6 +339,7 @@
     ],
     "verify:unit": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -572,6 +583,7 @@
       "step": "Run the complete release verification contract",
       "commands": [
         "node scripts/check-lockfiles.js",
+        "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
@@ -610,7 +622,9 @@
       "job": "verify",
       "step": "Run the publication lifecycle gate",
       "commands": [
+        "node scripts/check-compatibility.js --release",
         "node scripts/check-lockfiles.js",
+        "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
@@ -725,6 +739,7 @@
       "step": "5",
       "commands": [
         "node scripts/check-lockfiles.js",
+        "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
