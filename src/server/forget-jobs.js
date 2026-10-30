@@ -197,14 +197,20 @@ export function createForgetJobStore(options = {}) {
 		/**
 		 * Mark the job failed, drop the steps the run finished, release the
 		 * lease and make it due again `retryAfterMs` from now - or, with
-		 * `exhausted`, mark it exhausted and never due by itself again. Returns
-		 * false, changing nothing, unless `runId` holds the lease.
+		 * `exhausted`, mark it exhausted and never due by itself again. A job
+		 * whose cancellation was asked for is abandoned instead, so it drops
+		 * the user id at once. Returns false, changing nothing, unless `runId`
+		 * holds the lease.
 		 * @param {{ id: string, runId: string, code: string, failedSurfaces: string[], sharedDone: string[], rowsAffected: number, retryAfterMs: number, exhausted: boolean }} outcome
 		 */
 		fail(outcome) {
 			const j = _held(outcome.id, outcome.runId);
 			if (j === undefined) return false;
 			const now = wallEpoch();
+			if (j.cancelRequested) {
+				_abandon(j, now);
+				return true;
+			}
 			const done = new Set(_names(outcome.sharedDone));
 			const exhausted = outcome.exhausted === true;
 			Object.assign(j, {
@@ -220,9 +226,10 @@ export function createForgetJobStore(options = {}) {
 		},
 
 		/**
-		 * Give up an open job. When no unexpired lease holds it, or `runId`
-		 * does, mark it abandoned, drop everything user-derived and return
-		 * true. When another run holds it, record a cancellation and return
+		 * Give up an open job. When no run holds its lease, or `runId` does,
+		 * mark it abandoned, drop everything user-derived and return true.
+		 * When another run holds the lease, expired or not (a stalled run keeps
+		 * it until another run claims the job), record a cancellation and return
 		 * `'cancelled'`: that run's next renewal answers `'cancelled'`, it stops,
 		 * and it abandons the job (or completes it, had it finished every step).
 		 * Returns false for an unknown or finished job.
@@ -233,7 +240,7 @@ export function createForgetJobStore(options = {}) {
 			const j = jobs.get(req.id);
 			const now = wallEpoch();
 			if (j === undefined || _FINISHED.has(j.status)) return false;
-			if (_leased(j, now) && j.leaseRunId !== req.runId) {
+			if (j.leaseRunId !== null && j.leaseRunId !== req.runId) {
 				// A run holds it: ask that run to stop. Its next renewal answers
 				// that it was cancelled, and it abandons the job when it stops.
 				j.cancelRequested = true;

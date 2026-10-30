@@ -4740,7 +4740,9 @@ export interface ForgetJobStore {
 	 * true) and no unexpired lease holds it: give the lease to `runId` for
 	 * `leaseMs`, set `pending`, increment `attempts`, set `updatedAt` and
 	 * resolve the run's input. Otherwise resolve null and change nothing. A
-	 * failed job is claimable before its `retryAt`.
+	 * failed job is claimable before its `retryAt`. A job whose cancellation
+	 * was asked for and that no unexpired lease holds is abandoned and
+	 * resolves null.
 	 */
 	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null | Promise<ForgetJobClaim | null>;
 	/**
@@ -4756,14 +4758,16 @@ export interface ForgetJobStore {
 	 * `updatedAt`, release the lease, keep `userId` and `cascade`, and resolve
 	 * true. The job becomes `failed`, due again `retryAfterMs` from now - or,
 	 * with `exhausted`, `exhausted`: never due again, still claimable on
-	 * request. Otherwise resolve false.
+	 * request. A job whose cancellation was asked for is abandoned instead
+	 * (its user-derived fields deleted), still resolving true. Otherwise
+	 * resolve false.
 	 */
 	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean | Promise<boolean>;
 	/**
-	 * When the job is pending, failed or exhausted and no unexpired lease
-	 * holds it (or `runId` does): mark it `abandoned`, release the lease,
-	 * delete `userId`, `userIdHash`, `cascade` and the step list, and resolve
-	 * true. When another run's unexpired lease holds it: record a
+	 * When the job is pending, failed or exhausted and no run holds its lease
+	 * (it was released, or `runId` holds it): mark it `abandoned`, release the
+	 * lease, delete `userId`, `userIdHash`, `cascade` and the step list, and
+	 * resolve true. When another run holds the lease, expired or not: record a
 	 * cancellation and resolve `'cancelled'`; that run's next `renew` resolves
 	 * `'cancelled'`, the run stops and abandons the job, and a cancelled job
 	 * whose lease runs out is abandoned by the next `claim` or `due` instead
@@ -4818,8 +4822,10 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
  * another process is asked to stop through the store and stops at its next
  * lease renewal (within 20 seconds). A cancelled run rejects with
  * FORGET_CANCELLED and the job ends abandoned - or completed, had the run
- * already finished every step, whichever process asked. Resolves whether
- * anything was given up or cancelled. Rejects with INVALID_REQUEST on a bad
+ * already finished every step, whichever process asked. A job whose run died
+ * holding its lease ends abandoned, and drops its user id, at the next
+ * `resumeForgetJobs` on any process. Resolves whether anything was given up
+ * or cancelled. Rejects with INVALID_REQUEST on a bad
  * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;

@@ -1,6 +1,6 @@
 # Dead-letter stores
 
-`configureWebhooks({ deadLetter })` takes `true` for the built-in in-memory store (`createDeadLetterStore({ max, ttlMs, forgetUserId })`) or a store instance. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `add` returns a record ID or `null` when an erasure tombstone suppresses capture.
+`configureWebhooks({ deadLetter })` takes `true` for the built-in in-memory store (`createDeadLetterStore({ max, ttlMs, forgetUserId })`) or a store instance. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `purgeUser(tenantId, userId)` must tolerate concurrent calls for the same user: every worker's erasure runs it, possibly at the same time, and an erasure job may run it again after a lost reply. `add` returns a record ID or `null` when an erasure tombstone suppresses capture.
 
 ## Capture keys and receipts
 

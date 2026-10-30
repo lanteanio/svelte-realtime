@@ -264,7 +264,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 
 - Cause: `live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed. With a job store, a run also ends with it when another run took its job over after this process stalled past its lease; that run finishes the shared steps.
 - Consequence: `live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.
-- Automatic recovery: Without a job store, none. With one, this process keeps the failed in-memory steps under the reference in the `job` property of the error and retries them by itself, and a failed shared step is recorded on the job.
+- Automatic recovery: Without a job store, none. With one, this process keeps the failed in-memory steps under the reference in the `job` property of the error and retries them by itself, and a failed shared step is recorded on the job. After a takeover this run recorded nothing on the job: the run holding the lease finishes the shared steps and records the outcome, so calling again is optional.
 - Next action: Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.
 - Message patterns: <code>Erasure is incomplete; resolve failed cleanup surfaces and retry</code>; <code>live.forget: another run took over the erasure job and finishes its shared steps; this run stopped</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)

@@ -674,7 +674,12 @@ async function _runErasure(jobs, job, run, onForget) {
 			// completes instead, below, whichever process asked.
 			stopRenewing?.();
 			stopRenewing = null;
-			try { await _bounded(jobs.abandon({ id: job.id, runId: job.runId })); } catch { /* The store finishes the cancellation when the lease expires. */ }
+			try { await _bounded(jobs.abandon({ id: job.id, runId: job.runId })); } catch {
+				// The store may hold no cancellation (one asked for while the
+				// record was being written), so keep abandoning it like a refused
+				// job, which this process also never resumes.
+				_refuse(jobs, job.id, job.runId);
+			}
 			const reason = controller.signal.reason;
 			throw _withJob(reason instanceof LiveError ? reason : error, jobId);
 		}
