@@ -154,3 +154,30 @@ describe('dead-letter capture key', () => {
 		expect(getDeadLetter().count()).toBe(2);
 	});
 });
+
+describe('dead-letter stores without keyed adds', () => {
+	beforeEach(reset);
+	afterEach(() => { setOperationalEventSink(null); reset(); });
+
+	it('writes once and passes no key when the store does not declare keyed adds', async () => {
+		const events = [];
+		setOperationalEventSink((e) => events.push(e));
+		// A store that ignores keys: every add inserts, and this one commits
+		// before its reply is lost.
+		const rows = [];
+		const calls = [];
+		configureWebhooks({ deadLetter: {
+			add: async (r) => { calls.push(r); rows.push(r); throw new Error('connection reset'); },
+			get: () => null, remove: () => false, count: () => rows.length, list: () => [], summary: () => ({ total: rows.length, byTopic: {}, oldest: null, newest: null }), purgeUser: () => 0
+		} });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null);
+		expect(calls).toHaveLength(1);
+		expect(rows).toHaveLength(1);
+		expect(calls[0]).not.toHaveProperty('key');
+		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(1);
+	});
+
+	it('declares keyed adds on the built-in store', () => {
+		expect(createDeadLetterStore().keyedAdd).toBe(true);
+	});
+});

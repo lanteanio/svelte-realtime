@@ -5283,6 +5283,12 @@ export type DeadLetterCapture = Omit<DeadLetterRecord, 'id' | 'key'> & {
 /** Storage interface for dead-lettered outbound-webhook events. */
 export interface DeadLetterStore {
 	/**
+	 * True when `add` honors `key` as described on `DeadLetterCapture`. Only
+	 * then does a capture pass a key and repeat a write whose outcome is
+	 * unknown; any other store gets one unkeyed `add` per capture.
+	 */
+	readonly keyedAdd?: boolean;
+	/**
 	 * Retain an event. Resolves the record id, which is also the receipt for
 	 * every repeat of a keyed add while the record is retained, or null when an
 	 * erasure tombstone suppresses the capture.
@@ -5315,6 +5321,7 @@ export interface DeadLetterSummary {
 
 /** The built-in store performs every operation synchronously. */
 export interface MemoryDeadLetterStore extends DeadLetterStore {
+	readonly keyedAdd: true;
 	add(rec: DeadLetterCapture): string | null;
 	get(id: string): DeadLetterRecord | null;
 	remove(id: string): boolean;

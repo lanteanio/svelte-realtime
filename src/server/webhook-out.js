@@ -95,10 +95,13 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 		traceContext
 	};
 	// The key names this delivery, so a write whose reply was lost can be sent
-	// again without creating a second record. Content JSON cannot encode gets no
-	// key and a single attempt, which is all an unkeyed write can safely have.
-	let keyed = true;
-	try { rec.key = _deadLetterFingerprint(/** @type {any} */ (rec)); } catch { keyed = false; }
+	// again without creating a second record. Only a store that declares
+	// `keyedAdd` honors it; any other store, and content JSON cannot encode, gets
+	// no key and a single attempt, which is all an unkeyed write can safely have.
+	let keyed = store.keyedAdd === true;
+	if (keyed) {
+		try { rec.key = _deadLetterFingerprint(/** @type {any} */ (rec)); } catch { keyed = false; }
+	}
 	for (let attempt = 0; ; attempt++) {
 		try {
 			await store.add(rec);

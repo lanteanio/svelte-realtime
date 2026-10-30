@@ -168,6 +168,9 @@ export function createDeadLetterStore(options = {}) {
 	}
 
 	return {
+		/** `add` honors `key`, so a capture may repeat a write whose reply was lost. */
+		keyedAdd: true,
+
 		/**
 		 * Retain an undeliverable event. Returns the record id (the receipt), or
 		 * `null` when a forget tombstone drops the record (its delivery was in
