@@ -142,7 +142,7 @@ const EXPECTED_SCRIPTS = {
 	"check:verification": "node scripts/check-verification-inventory.js",
 	"generate:verification": "node scripts/check-verification-inventory.js --write",
 	"verify:fast": "npm run check",
-	"verify:docs": "npm run check:format && npm run check:errors && node scripts/generate-onboarding-reference.js && npm run check:links && npm run check:examples && npm run test:examples && npm run check:documentation && npm run check:release",
+	"verify:docs": "npm run check:format && npm run check:errors && node scripts/check-compatibility.js && node scripts/generate-onboarding-reference.js && npm run check:links && npm run check:examples && npm run test:examples && npm run check:documentation && npm run check:release",
 	"verify:unit": "npm test",
 	"verify:sim": "npm run sim:golden && npm run test:fuzz",
 	"verify:devtools": "npm run test:devtools",

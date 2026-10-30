@@ -342,14 +342,24 @@ asset changes so a remote update cannot silently change a released README.
 [docs/documentation.v1.json](docs/documentation.v1.json) owns the eight ordered
 reader paths: package identity, first success and compatibility stay in README;
 tutorial, how-to, reference, explanation and operations route to the owned site.
-`npm run generate:documentation` renders the routing table from the manifest.
+`npm run generate:documentation` renders the routing table from that manifest,
+the topic index from the README headings and `docs/package-exports.md` from the
+package exports, and resizes the README limit. It does not touch the
+compatibility blocks; `node scripts/check-compatibility.js` owns them.
+
 The Quick start command, version table and install commands are generated from
 the installed adapter's `docs/compatibility.v1.csv`; refresh them with
-`node scripts/check-compatibility.js --write`. That check also requires the
-scaffolder tuple in `src/cli-utils.js`, `docs/first-run.md`, the package floors,
-`engines.node` and the stated floors in `docs/0.6-upgrade.md` to match the
-manifest's current row.
-The generator automatically tightens the README size allowance when content shrinks.
+`node scripts/check-compatibility.js --write`. The table also names adapter
+releases that documented features need beyond the current tuple, found from
+`svelte-adapter-uws >= X` and `svelte-adapter-uws X or newer` statements in the
+README and `docs/*.md`. The check requires the scaffolder tuple in
+`src/cli-utils.js`, `docs/first-run.md`, the package floors, `engines.node`, the
+README's native Node floor and the stated floors in `docs/0.6-upgrade.md` to
+match the manifest's current row, and refuses ecosystem install commands, pins,
+dist-tags or uWebSockets.js sources in the README outside the generated blocks.
+With `--release` it also requires the package version to be the declared
+realtime release and no documented feature to need a newer adapter.
+The documentation generator automatically tightens the README size allowance when content shrinks.
 After changing generated commands, run `npm run generate:examples` to refresh their
 code-fence inventory.
 

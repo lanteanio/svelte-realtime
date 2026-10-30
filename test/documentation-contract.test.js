@@ -82,8 +82,7 @@ it('rejects credentialed, foreign and noncanonical site routes', () => {
 		expect(validateManifest(copy, pkg).join('\n')).toContain('clean HTTPS');
 	}
 });
-it('keeps compatibility commands generated and native versions in one block', () => {
-	expect(validateReadme(readme.replace('npm install -D ws', 'npm install -D missing'), manifest).join('\n')).toContain('compatibility block differs');
+it('keeps native versions in the compatibility block', () => {
 	expect(validateReadme(readme + '\nuWebSockets.js v20.69.0\n', { ...manifest, readmeMaxLines: manifest.readmeMaxLines + 2 }).join('\n')).toContain('native version facts');
 });
 

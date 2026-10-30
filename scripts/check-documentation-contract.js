@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// Generate and validate the README entry routes and compatibility commands.
+// Generate and validate the README entry routes, topic index and size. The
+// generated compatibility blocks and the facts they restate belong to
+// scripts/check-compatibility.js; this contract only keeps native version
+// facts inside the compatibility block.
 import { isScriptEntry } from './script-entry.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { anchorsOf, headingsOf } from './check-links.js';
 import { readReadmeBaselines, resizeReadmeManifest, validateGrowthRecords, validateReadmeGrowth } from './readme-ratchet.js';
-import { MANIFEST_PATH, loadManifest, renderCompatibility as renderCompatibilityBody, renderReadme } from './check-compatibility.js';
+import { MANIFEST_PATH } from './check-compatibility.js';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PATHS_START = '<!-- documentation-paths:start -->';
 export const PATHS_END = '<!-- documentation-paths:end -->';
@@ -82,9 +85,6 @@ export function validateManifest(manifest, pkg) {
 export function renderPaths(manifest) {
 	return [PATHS_START, '**Choose a documentation path:**', '', '| Need | Type | Start here | Owner |', '| --- | --- | --- | --- |', ...manifest.paths.map((path) => `| ${path.need} | ${path.type} | [${path.label}](${path.destination}) | ${path.owner} |`), PATHS_END].join('\n');
 }
-export function renderCompatibility(rows = loadManifest().rows) {
-	return COMPAT_START + '\n' + renderCompatibilityBody(rows) + COMPAT_END;
-}
 function bounds(source, startMarker, endMarker) {
 	if (source.split(startMarker).length !== 2 || source.split(endMarker).length !== 2) throw new Error(`Expected exactly one ${startMarker} block`);
 	const start = source.indexOf(startMarker);
@@ -99,14 +99,13 @@ export function replaceBlock(source, start, end, content) {
 	const limits = bounds(source, start, end);
 	return source.slice(0, limits.start) + content + source.slice(limits.end);
 }
-export function validateReadme(readme, manifest, baseline, rows = loadManifest().rows) {
+export function validateReadme(readme, manifest, baseline) {
 	readme = readme.replace(/\r\n/g, '\n');
 	const failures = validateReadmeGrowth(manifest, baseline);
 	let paths;
 	let compatibility;
 	try { paths = bounds(readme, PATHS_START, PATHS_END); compatibility = bounds(readme, COMPAT_START, COMPAT_END); } catch (error) { return [error.message]; }
 	if (readme.slice(paths.start, paths.end) !== renderPaths(manifest)) failures.push('routing block differs from the manifest; run npm run generate:documentation');
-	if (readme.slice(compatibility.start, compatibility.end) !== renderCompatibility(rows)) failures.push('compatibility block differs from the packaged adapter manifest; run node scripts/check-compatibility.js --write');
 	try {
 		const topics = bounds(readme, TOPICS_START, TOPICS_END);
 		if (readme.slice(topics.start, topics.end) !== renderTopics(readme)) failures.push('topic index differs from README headings; run npm run generate:documentation');
@@ -128,15 +127,13 @@ export function main({ directory = root, write = false, acceptReadmeGrowth = fal
 	const schemaErrors = validateManifest(manifest, pkg);
 	if (schemaErrors.length) throw new Error(schemaErrors.join('\n'));
 	const { baseline } = readReadmeBaselines(directory);
-	const { rows } = loadManifest(directory);
 	let readme = readFileSync(resolve(directory, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
 	if (write) {
-		readme = renderReadme(readme, rows);
 		readme = replaceBlock(readme, PATHS_START, PATHS_END, renderPaths(manifest));
 		readme = replaceBlock(readme, TOPICS_START, TOPICS_END, renderTopics(readme));
 		manifest = resizeReadmeManifest(manifest, baseline || manifest, readme.split('\n').length, acceptReadmeGrowth);
 	}
-	const failures = validateReadme(readme, manifest, baseline, rows);
+	const failures = validateReadme(readme, manifest, baseline);
 	if (!write && readFileSync(resolve(directory, 'docs/package-exports.md'), 'utf8').replace(/\r\n/g, '\n') !== renderExports(pkg)) failures.push('package exports index differs; run npm run generate:documentation');
 	if (failures.length) throw new Error(failures.join('\n'));
 	if (write) {

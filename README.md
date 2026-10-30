@@ -74,8 +74,10 @@ The three ecosystem packages move together. Bump them as a group:
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
 | --- | --- | --- | --- |
 | `0.4.x` | `0.4.x` | `0.4.x` | Legacy. |
-| `^0.5.11` | `0.5.x` | `0.5.x` | Stable. Node >=22.0.0 required. |
-| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Prerelease 0.6 candidate. Node >=22.0.0 required. Publish the tuple together before these registry commands are used. |
+| `^0.5.11` | `0.5.x` | `0.5.x` | Stable. Node `>=22.0.0` required. |
+| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Prerelease 0.6 candidate. Node `>=22.0.0` required. Publish the tuple together before these registry commands are used. |
+
+Some documented features need a newer `svelte-adapter-uws` than this tuple: `0.6.0-next.97` (this README, [docs/delivery-authorization.md](./docs/delivery-authorization.md)).
 
 Install the current prerelease tuple, the one the scaffolder installs, and run its native preflight:
 

@@ -203,6 +203,7 @@
     "verify:docs": [
       "node scripts/check-formatting.js",
       "node scripts/generate-error-reference.js --check",
+      "node scripts/check-compatibility.js",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",

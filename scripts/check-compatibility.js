@@ -2,18 +2,22 @@
 // Generate and validate the documented ecosystem tuple from the compatibility
 // manifest the installed svelte-adapter-uws ships. The README table, install
 // commands and quick start pin are bounded generated blocks; the package
-// floors, Node engine, scaffolder tuple, first-run transcript and upgrade
-// guide statements must agree with the manifest's current row.
+// floors, Node engine, scaffolder tuple, first-run transcript and the prose
+// that restates manifest facts must agree with the manifest's current row.
 //
-// --write rewrites only the bounded README blocks and the upgrade guide
-// statements. --release additionally requires this package's version to be
-// the realtime release the manifest declares; during development the version
-// may run ahead of the published adapter, so the normal check only requires
-// it to stay inside the declared series.
+// The manifest rules mirror the adapter's own scripts/check-compatibility.js,
+// so this check accepts exactly the manifests the adapter can publish.
+//
+// --write rewrites only the bounded README blocks and the restated facts.
+// --release additionally requires this package's version to be the realtime
+// release the manifest declares; during development the version may run
+// ahead of the published adapter, so the normal check only requires it to
+// stay inside the declared series.
 import { isScriptEntry } from './script-entry.js';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 import {
 	SCAFFOLD_ADAPTER_SPEC,
 	SCAFFOLD_EXTENSIONS_SPEC,
@@ -30,11 +34,15 @@ export const EXPECTED_HEADERS = [
 	'adapter', 'realtime', 'extensions', 'node', 'uwebsockets', 'train', 'realtime_version',
 	'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'
 ];
-const CHANNELS = ['legacy', 'stable', 'prerelease'];
-const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const TRAIN_FACT_FIELDS = ['realtime_version', 'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'];
+const CHANNEL_TAGS = new Map([['legacy', ''], ['stable', 'latest'], ['prerelease', 'next']]);
 const SERIES = /^\d+\.\d+\.(?:x|\d+(?:-[0-9A-Za-z.-]+)?)$/;
+const TRAIN = /^\d+\.\d+$/;
+const GIT_HEAD = /^[0-9a-f]{40}$/;
+const WIRE_PROTOCOL = /^[1-9]\d*$/;
+const PROCEDURE_ANCHOR = /^docs\/releasing\.md#[a-z0-9-]+$/;
 const UWS_SPEC = /^(?:https:\/\/github\.com\/uNetworking\/uWebSockets\.js\/archive\/refs\/tags\/v\d+\.\d+\.\d+\.tar\.gz|github:uNetworking\/uWebSockets\.js#v\d+\.\d+\.\d+)$/;
-const NODE_FLOOR = /^>=\s*(\d+)(?:\.\d+){0,2}$/;
+const UNPRINTABLE = new RegExp('[\\x00-\\x1f\\x7f' + String.fromCharCode(0x2028, 0x2029) + '`]');
 
 // The manifest records the series of each train, not the adapter release a
 // svelte-realtime train requires. svelte-realtime 0.5.x declares
@@ -43,71 +51,37 @@ const NODE_FLOOR = /^>=\s*(\d+)(?:\.\d+){0,2}$/;
 export const ADAPTER_FLOORS = new Map([['0.5', '0.5.11']]);
 
 export const UPGRADE_GUIDE = 'docs/0.6-upgrade.md';
+const NODE_PHRASE = '(Node \\d+(?:\\.\\d+){0,2} or newer|a Node version in `[^`]+`)';
 // Prose that restates manifest facts. Each pattern must match exactly once in
 // its file with the stated value in group 1, so a reworded or deleted
 // statement fails the check instead of silently escaping it.
 export const STATEMENTS = [
-	{ file: UPGRADE_GUIDE, pattern: /sibling packages\s+require Node (\d+) or newer/g, value: (current) => nodeMajor(current.node) },
-	{ file: UPGRADE_GUIDE, pattern: /`svelte-adapter-uws`\s+`\^([^`]+)` as a peer/g, value: (current) => current.adapter_version },
-	{ file: UPGRADE_GUIDE, pattern: /\| `0\.5\.x` \((\d+\.\d+\.\d+) or later\) \|/g, value: () => ADAPTER_FLOORS.get('0.5') },
-	{ file: UPGRADE_GUIDE, pattern: /\| matching `([^`]+)`, at least `[^`]+` \|/g, value: (current) => current.adapter },
-	{ file: UPGRADE_GUIDE, pattern: /\| matching `[^`]+`, at least `([^`]+)` \|/g, value: (current) => current.adapter_version },
-	{ file: 'README.md', pattern: /the pinned native server supports Node (\d+) or newer/g, value: (current) => nodeMajor(current.node) }
+	{ file: UPGRADE_GUIDE, pattern: new RegExp('sibling packages\\s+require ' + NODE_PHRASE), value: (current) => nodeRequirement(current.node) },
+	{ file: UPGRADE_GUIDE, pattern: /`svelte-adapter-uws`\s+`\^([^`]+)` as a peer/, value: (current) => current.adapter_version },
+	{ file: UPGRADE_GUIDE, pattern: /\| `0\.5\.x` \((\d+\.\d+\.\d+) or later\) \|/, value: () => ADAPTER_FLOORS.get('0.5') },
+	{ file: UPGRADE_GUIDE, pattern: /\| matching `([^`]+)`, at least `[^`]+` \|/, value: (current) => current.adapter },
+	{ file: UPGRADE_GUIDE, pattern: /\| matching `[^`]+`, at least `([^`]+)` \|/, value: (current) => current.adapter_version },
+	{ file: 'README.md', pattern: new RegExp('the pinned native server supports ' + NODE_PHRASE + ' with a matching'), value: (current) => nodeRequirement(current.node) }
 ];
 
-export function nodeMajor(range) {
-	const match = NODE_FLOOR.exec(range);
-	if (!match) throw new Error('Node prerequisite ' + JSON.stringify(range) + ' is not a plain >= floor the documented Node statements can express');
-	return match[1];
+/** The Node range as prose: a plain lower bound keeps its full precision. */
+export function nodeRequirement(range) {
+	const set = new semver.Range(range).set;
+	const bound = set.length === 1 && set[0].length === 1 && set[0][0].operator === '>=' ? set[0][0].semver : null;
+	if (!bound || bound.prerelease.length) return 'a Node version in `' + range + '`';
+	const version = bound.patch ? bound.version : bound.minor ? bound.major + '.' + bound.minor : String(bound.major);
+	return 'Node ' + version + ' or newer';
 }
 
-/**
- * Parse the manifest CSV (RFC 4180 quoting) and require the adapter's exact
- * v1 header, so a renamed, dropped or duplicated column fails here instead of
- * rendering a blank or `undefined` cell.
- */
+/** Split the manifest exactly as the adapter does: trimmed lines, plain commas. */
 export function parseManifest(text) {
-	if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-	const records = [];
-	let record = [];
-	let field = '';
-	let quoted = false;
-	let closed = false;
-	let line = 1;
-	let opened = 1;
-	for (let i = 0; i <= text.length; i++) {
-		const char = text[i];
-		if (quoted) {
-			if (char === undefined) throw new Error('Compatibility manifest has an unclosed quoted field starting on line ' + opened);
-			if (char === '"' && text[i + 1] === '"') { field += '"'; i++; }
-			else if (char === '"') { quoted = false; closed = true; }
-			else { if (char === '\n') line++; field += char; }
-			continue;
-		}
-		if (char === ',' || char === '\n' || char === '\r' || char === undefined) {
-			if (char === '\r' && text[i + 1] === '\n') i++;
-			record.push(field);
-			field = '';
-			closed = false;
-			if (char !== ',') {
-				if (record.length > 1 || record[0] !== '') records.push({ line, values: record });
-				record = [];
-				line++;
-			}
-		} else if (closed) {
-			throw new Error('Compatibility manifest has text after a closing quote on line ' + line);
-		} else if (char === '"') {
-			if (field !== '') throw new Error('Compatibility manifest has a quote inside an unquoted field on line ' + line);
-			quoted = true;
-			opened = line;
-		} else field += char;
-	}
-	if (!records.length) throw new Error('Compatibility manifest is empty');
-	const headers = records.shift().values;
-	const duplicates = headers.filter((header, index) => headers.indexOf(header) !== index);
-	const missing = EXPECTED_HEADERS.filter((header) => !headers.includes(header));
-	const unexpected = headers.filter((header) => !EXPECTED_HEADERS.includes(header));
-	if (duplicates.length || missing.length || unexpected.length || headers.some((header, index) => header !== EXPECTED_HEADERS[index])) {
+	if (text.trim() === '') throw new Error('Compatibility manifest is empty');
+	const lines = text.trim().split(/\r?\n/);
+	const headers = lines.shift()?.split(',') || [];
+	if (headers.length !== EXPECTED_HEADERS.length || headers.some((header, index) => header !== EXPECTED_HEADERS[index])) {
+		const duplicates = headers.filter((header, index) => headers.indexOf(header) !== index);
+		const missing = EXPECTED_HEADERS.filter((header) => !headers.includes(header));
+		const unexpected = headers.filter((header) => !EXPECTED_HEADERS.includes(header));
 		const detail = [
 			duplicates.length && 'duplicate ' + [...new Set(duplicates)].join(', '),
 			missing.length && 'missing ' + missing.join(', '),
@@ -115,56 +89,99 @@ export function parseManifest(text) {
 		].filter(Boolean).join('; ') || 'columns out of order';
 		throw new Error('Compatibility manifest header must be exactly ' + EXPECTED_HEADERS.join(',') + ' (' + detail + ')');
 	}
-	return records.map(({ line: at, values }) => {
-		if (values.length !== headers.length) throw new Error('Compatibility manifest line ' + at + ' has ' + values.length + ' fields; expected ' + headers.length);
-		return Object.fromEntries(headers.map((header, index) => [header, values[index]]));
+	return lines.map((line, index) => {
+		const values = line.split(',');
+		if (values.length !== headers.length) throw new Error('Compatibility manifest row ' + (index + 2) + ' has ' + values.length + ' fields; expected ' + headers.length);
+		return Object.fromEntries(headers.map((header, column) => [header, values[column]]));
 	});
 }
 
-/** Schema and row-shape failures, mirroring the adapter's own manifest gate. */
+function validNodeRange(value) {
+	return typeof value === 'string' && value === value.trim() && !UNPRINTABLE.test(value) && semver.validRange(value, { loose: false }) !== null;
+}
+
+function matchesSeries(version, series) {
+	if (series.endsWith('.x')) return version.startsWith(series.slice(0, -1));
+	return version === series || version.startsWith(series + '.');
+}
+
+/** The adapter's manifest rules that do not need the adapter repository's own files. */
 export function validateRows(rows) {
 	const errors = [];
-	if (rows.length !== CHANNELS.length || rows.some((row, index) => row.channel !== CHANNELS[index])) {
-		errors.push('Compatibility manifest channels must be exactly ' + CHANNELS.join(', ') + ' in that order');
-	}
-	for (const row of rows) {
-		const label = row.channel || 'unnamed row';
-		if (row.schema_version !== '1') errors.push(label + ': unsupported schema_version ' + JSON.stringify(row.schema_version));
+	const channels = [...CHANNEL_TAGS.keys()];
+	if (rows.length !== channels.length) errors.push('channels must be exactly legacy, stable, prerelease');
+	const currentRows = rows.filter((row) => row.current === 'true');
+	if (currentRows.length !== 1) errors.push('exactly one compatibility row must be current; found ' + currentRows.length);
+	const seen = new Set();
+	for (const [index, row] of rows.entries()) {
+		const label = row.channel || 'row ' + (index + 2);
+		for (const [field, value] of Object.entries(row)) {
+			if (typeof value !== 'string' || UNPRINTABLE.test(value)) errors.push(label + ': ' + field + ' must be a single printable line');
+		}
+		if (row.schema_version !== '1') errors.push(label + ': unsupported schema_version');
 		if (row.owner !== 'svelte-adapter-uws') errors.push(label + ': owner must be svelte-adapter-uws');
 		if (row.current !== 'true' && row.current !== 'false') errors.push(label + ': current must be true or false');
-		for (const [field, value] of Object.entries(row)) {
-			if (/[\u0000-\u001f\u007f\u2028\u2029`|<]/.test(value)) errors.push(label + ': ' + field + ' must be a single printable line without Markdown control characters');
-		}
+		if (row.channel !== channels[index]) errors.push('channels must be ordered legacy, stable, prerelease');
+		if (seen.has(row.channel)) errors.push(label + ': duplicate channel');
+		seen.add(row.channel);
+		if (!CHANNEL_TAGS.has(row.channel)) errors.push(label + ': unknown channel');
+		else if (row.dist_tag !== CHANNEL_TAGS.get(row.channel)) errors.push(label + ': invalid dist tag role');
 		for (const field of ['adapter', 'realtime', 'extensions']) if (!SERIES.test(row[field])) errors.push(label + ': invalid ' + field + ' series');
-		if (!/^\d+\.\d+$/.test(row.train)) errors.push(label + ': train must be a major.minor release train');
-	}
-	const current = rows.filter((row) => row.current === 'true');
-	if (current.length !== 1) errors.push('Compatibility manifest needs exactly one current row; found ' + current.length);
-	else {
-		const row = current[0];
-		for (const field of ['adapter_version', 'realtime_version', 'extensions_version']) {
-			if (!EXACT_VERSION.test(row[field])) errors.push('current row needs an exact ' + field);
+		if (!row.dist_tag) {
+			if (row.node || row.uwebsockets || row.adapter_version || row.provenance) errors.push(label + ': untagged legacy channel must not claim release or runtime facts');
+		} else {
+			if (!row.adapter_version || !matchesSeries(row.adapter_version, row.adapter)) errors.push(label + ': adapter release identity is outside its series');
+			if (!validNodeRange(row.node)) errors.push(label + ': node must be a canonical single-line npm semver range');
+			if (!UWS_SPEC.test(row.uwebsockets)) errors.push(label + ': uWebSockets.js must be an exact tagged GitHub source');
+			if (row.current === 'false' && row.provenance !== 'npm:svelte-adapter-uws@' + row.adapter_version) errors.push(label + ': published baseline provenance is not pinned');
 		}
-		if (!row.node) errors.push('current row needs a Node prerequisite');
-		if (!UWS_SPEC.test(row.uwebsockets)) errors.push('current row must name an exact tagged uWebSockets.js source');
+		if (!TRAIN.test(row.train)) errors.push(label + ': train must be a major.minor release train');
+		else if (!(row.adapter.startsWith(row.train + '.') || row.adapter === row.train + '.x')) errors.push(label + ': train ' + row.train + ' does not prefix the adapter series ' + row.adapter);
+		const present = TRAIN_FACT_FIELDS.filter((field) => row[field]);
+		if (present.length !== 0 && present.length !== TRAIN_FACT_FIELDS.length) errors.push(label + ': train release facts form one unit and must be all present or all empty');
+		if (row.current === 'true' && present.length !== TRAIN_FACT_FIELDS.length) errors.push(label + ': current row must record all six train release facts');
+		if (present.length === TRAIN_FACT_FIELDS.length) {
+			for (const [field, series] of [['realtime_version', row.realtime], ['extensions_version', row.extensions]]) {
+				if (!matchesSeries(row[field], series)) errors.push(label + ': ' + field + ' release identity is outside its series');
+			}
+			for (const field of ['realtime_head', 'extensions_head']) if (!GIT_HEAD.test(row[field])) errors.push(label + ': ' + field + ' must be a full lowercase git head');
+			if (!WIRE_PROTOCOL.test(row.wire_protocol)) errors.push(label + ': wire_protocol must be a positive integer revision');
+			if (row.procedure.split(' ').some((token) => !PROCEDURE_ANCHOR.test(token))) errors.push(label + ': procedure must be space-separated docs/releasing.md anchors');
+		}
+	}
+	if (currentRows.length === 1) {
+		const current = currentRows[0];
+		if (!current.dist_tag) errors.push('current channel has no dist tag');
+		if (current.provenance !== 'workspace') errors.push('current channel provenance must be workspace');
+		for (const field of ['realtime', 'extensions']) {
+			if (current[field] !== current.adapter) errors.push(current.channel + ': ' + field + ' series ' + current[field] + ' does not match the lockstep adapter series ' + current.adapter);
+		}
+		if (current.channel !== (String(current.adapter_version).includes('-') ? 'prerelease' : 'stable')) errors.push('current channel does not match the adapter version stability');
 	}
 	for (const [train, floor] of ADAPTER_FLOORS) {
-		const row = rows.find((candidate) => candidate.train === train && candidate.current === 'false');
-		if (!row) errors.push('adapter floor ' + floor + ' names train ' + train + ', which has no non-current manifest row; remove it from ADAPTER_FLOORS');
-		else if (!EXACT_VERSION.test(floor) || !matchesSeries(floor, row.adapter)) errors.push('adapter floor ' + floor + ' is outside the ' + train + ' adapter series ' + row.adapter);
+		const row = rows.find((candidate) => candidate.train === train);
+		if (!row) errors.push('the manifest no longer lists the ' + train + ' train; remove it from ADAPTER_FLOORS');
+		else if (semver.valid(floor) !== floor || !matchesSeries(floor, row.adapter)) errors.push('adapter floor ' + floor + ' is not an exact release inside the ' + train + ' adapter series ' + row.adapter);
 	}
 	return errors;
 }
 
 export function currentRow(rows) {
 	const errors = validateRows(rows);
-	if (errors.length) throw new Error(errors.join('\n'));
+	if (errors.length) throw new Error('Compatibility manifest is invalid:\n' + errors.join('\n'));
 	return rows.find((row) => row.current === 'true');
 }
 
-function matchesSeries(version, series) {
-	if (series.endsWith('.x')) return version.startsWith(series.slice(0, -1));
-	return version === series || version.startsWith(series + '.');
+/**
+ * Whether this package's version belongs to the manifest's realtime series.
+ * The stable cut of a prerelease series (0.6.0 for 0.6.0-next) counts, so
+ * this package can take its release version before the adapter publishes the
+ * stable manifest; --release still requires the exact declared version.
+ */
+export function inRealtimeSeries(version, series) {
+	if (matchesSeries(version, series)) return true;
+	const cut = /^(\d+\.\d+\.\d+)-/.exec(series);
+	return cut !== null && version === cut[1];
 }
 
 export function validatePackage(pkg, current, { release = false } = {}) {
@@ -174,7 +191,7 @@ export function validatePackage(pkg, current, { release = false } = {}) {
 	if (pkg.devDependencies?.['svelte-adapter-uws-extensions'] !== '^' + current.extensions_version) errors.push('Extensions development floor ' + JSON.stringify(pkg.devDependencies?.['svelte-adapter-uws-extensions']) + ' differs from the manifest; expected ^' + current.extensions_version);
 	if (release) {
 		if (pkg.version !== current.realtime_version) errors.push('Publishing ' + pkg.version + ' but the manifest declares svelte-realtime ' + current.realtime_version + '; install the adapter release that declares this version first');
-	} else if (!matchesSeries(pkg.version, current.realtime)) {
+	} else if (!inRealtimeSeries(pkg.version, current.realtime)) {
 		errors.push('package version ' + pkg.version + ' is outside the manifest realtime series ' + current.realtime);
 	}
 	return errors;
@@ -218,14 +235,37 @@ export function validateFirstRun(text, current) {
 	return [];
 }
 
-function channelLabel(row) {
-	return row.channel[0].toUpperCase() + row.channel.slice(1);
+const VERSION = '(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?)';
+const ADAPTER_REQUIREMENT = new RegExp('svelte-adapter-uws`?\\s*>=\\s*`?' + VERSION + '|svelte-adapter-uws`?\\s+`?' + VERSION + '`?\\s+or\\s+(?:newer|later)', 'g');
+
+/**
+ * Adapter releases that documented features require beyond the current
+ * tuple, grouped by version with the documents that state them. The README
+ * names them next to the table, so the tuple never reads as running every
+ * documented feature.
+ */
+export function aheadRequirements(documents, current) {
+	const ahead = new Map();
+	for (const [file, text] of documents) {
+		for (const match of text.matchAll(ADAPTER_REQUIREMENT)) {
+			const version = match[1] || match[2];
+			if (!semver.valid(version) || !semver.gt(version, current.adapter_version)) continue;
+			if (!ahead.has(version)) ahead.set(version, new Set());
+			ahead.get(version).add(file);
+		}
+	}
+	return [...ahead].sort(([a], [b]) => semver.compare(a, b)).map(([version, files]) => ({ version, files: [...files].sort((a, b) => (a === 'README.md' ? -1 : b === 'README.md' ? 1 : a.localeCompare(b))) }));
+}
+
+function cell(value) {
+	return '`' + value.replaceAll('|', '\\|') + '`';
 }
 
 function rowNotes(row) {
 	const current = row.current === 'true';
-	let notes = channelLabel(row) + (current ? ' ' + row.train + (row.channel === 'prerelease' ? ' candidate' : ' release') : '') + '.';
-	if (row.node) notes += ' Node ' + row.node + ' required.';
+	const label = row.channel[0].toUpperCase() + row.channel.slice(1);
+	let notes = label + (current ? ' ' + row.train + (row.channel === 'prerelease' ? ' candidate' : ' release') : '') + '.';
+	if (row.node) notes += ' Node ' + cell(row.node) + ' required.';
 	if (current && row.channel === 'prerelease') notes += ' Publish the tuple together before these registry commands are used.';
 	return notes;
 }
@@ -237,12 +277,18 @@ function rowVersions(row) {
 }
 
 /** Body of the README compatibility block: the table and the install commands. */
-export function renderCompatibility(rows) {
+export function renderCompatibility(rows, ahead = []) {
 	const current = currentRow(rows);
-	return [
+	const lines = [
 		'| `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |',
 		'| --- | --- | --- | --- |',
-		...rows.map((row) => '| ' + rowVersions(row).map((value) => '`' + value + '`').join(' | ') + ' | ' + rowNotes(row) + ' |'),
+		...rows.map((row) => '| ' + rowVersions(row).map(cell).join(' | ') + ' | ' + rowNotes(row) + ' |')
+	];
+	if (ahead.length) {
+		const where = (file) => (file === 'README.md' ? 'this README' : '[' + file + '](./' + file + ')');
+		lines.push('', 'Some documented features need a newer `svelte-adapter-uws` than this tuple: ' + ahead.map(({ version, files }) => cell(version) + ' (' + files.map(where).join(', ') + ')').join('; ') + '.');
+	}
+	lines.push(
 		'',
 		'Install the current ' + current.channel + ' tuple, the one the scaffolder installs, and run its native preflight:',
 		'',
@@ -253,7 +299,8 @@ export function renderCompatibility(rows) {
 		'npm exec -- svelte-adapter-uws-preflight',
 		'```',
 		''
-	].join('\n');
+	);
+	return lines.join('\n');
 }
 
 /** Body of the Quick start block: the scaffolder command pinned to the current tuple. */
@@ -271,7 +318,7 @@ export function renderCli(rows) {
 	].join('\n');
 }
 
-export const BLOCKS = { 'compatibility-cli': renderCli, compatibility: renderCompatibility };
+export const BLOCKS = ['compatibility-cli', 'compatibility'];
 
 export function blockBounds(text, name) {
 	const start = '<!-- ' + name + ':start -->';
@@ -288,25 +335,40 @@ export function blockBounds(text, name) {
 	return { inner: first + start.length, end: last, outerEnd: last + end.length, first };
 }
 
-export function renderReadme(readme, rows) {
-	for (const [name, render] of Object.entries(BLOCKS)) {
+export function renderReadme(readme, rows, ahead = []) {
+	const bodies = { 'compatibility-cli': renderCli(rows), compatibility: renderCompatibility(rows, ahead) };
+	for (const name of BLOCKS) {
 		const { inner, end } = blockBounds(readme, name);
-		readme = readme.slice(0, inner) + '\n' + render(rows) + readme.slice(end);
+		readme = readme.slice(0, inner) + '\n' + bodies[name] + readme.slice(end);
 	}
 	return readme;
 }
 
-const ECOSYSTEM_PIN = /\b(?:svelte-realtime|svelte-adapter-uws(?:-extensions)?)@\^?\d/g;
-
-/** Exact ecosystem install pins belong in the generated blocks only. */
-export function validateUnboundedPins(readme) {
-	let outside = readme;
-	for (const name of Object.keys(BLOCKS)) {
-		const { first, outerEnd } = blockBounds(outside, name);
-		outside = outside.slice(0, first) + outside.slice(outerEnd);
+/** The README with both generated blocks removed. */
+export function outsideBlocks(readme) {
+	for (const name of BLOCKS) {
+		const { first, outerEnd } = blockBounds(readme, name);
+		readme = readme.slice(0, first) + readme.slice(outerEnd);
 	}
-	const pins = outside.match(ECOSYSTEM_PIN) || [];
-	return pins.length ? ['README pins ' + [...new Set(pins)].join(', ') + ' outside the generated compatibility blocks'] : [];
+	return readme;
+}
+
+const UNBOUNDED = [
+	[/\b(?:svelte-realtime|svelte-adapter-uws(?:-extensions)?)@(?:[\w^~<>=*-]|\.(?=[\w*]))+/g, 'a pinned ecosystem package'],
+	[/@(?:latest|next)\b/g, 'a moving dist-tag'],
+	[/\b(?:npm\s+(?:install|i|add)|pnpm\s+(?:add|install)|yarn\s+add|bun\s+add|npx)\b[^\n`]*?\bsvelte-(?:realtime|adapter-uws)\b/g, 'an ecosystem install command'],
+	[/uNetworking\/uWebSockets\.js(?:#|\/archive\/)/g, 'a uWebSockets.js install source']
+];
+
+/** Install instructions for the ecosystem belong in the generated blocks only. */
+export function validateUnboundedPins(readme) {
+	const outside = outsideBlocks(readme);
+	const errors = [];
+	for (const [pattern, kind] of UNBOUNDED) {
+		const found = outside.match(pattern);
+		if (found) errors.push('README states ' + kind + ' outside the generated compatibility blocks: ' + [...new Set(found)].join(', '));
+	}
+	return errors;
 }
 
 export function applyStatements(file, source, current) {
@@ -322,6 +384,12 @@ export function applyStatements(file, source, current) {
 
 function readText(directory, path) {
 	return readFileSync(resolve(directory, path), 'utf8').replace(/\r\n/g, '\n');
+}
+
+/** README outside the generated blocks plus every top-level docs page. */
+export function requirementDocuments(directory, readme) {
+	const docs = readdirSync(resolve(directory, 'docs')).filter((name) => name.endsWith('.md')).sort();
+	return [['README.md', outsideBlocks(readme)], ...docs.map((name) => ['docs/' + name, readText(directory, 'docs/' + name)])];
 }
 
 /** Read and validate the installed adapter's manifest. */
@@ -344,12 +412,15 @@ export function checkCompatibility(directory = root, { write = false, release = 
 		...validateScaffold(current),
 		...validateFirstRun(readText(directory, 'docs/first-run.md'), current)
 	];
+	const readme = readText(directory, 'README.md');
+	const ahead = aheadRequirements(requirementDocuments(directory, readme), current);
+	if (release && ahead.length) errors.push('Documented features need svelte-adapter-uws ' + ahead.map(({ version }) => version).join(', ') + ', beyond the manifest tuple ' + current.adapter_version);
 	// Render every file before writing any, so a missing marker or statement
 	// leaves the tree untouched instead of half rewritten.
 	const stale = [];
 	for (const file of ['README.md', UPGRADE_GUIDE]) {
-		const source = readText(directory, file);
-		let expected = file === 'README.md' ? renderReadme(source, rows) : source;
+		const source = file === 'README.md' ? readme : readText(directory, file);
+		let expected = file === 'README.md' ? renderReadme(source, rows, ahead) : source;
 		expected = applyStatements(file, expected, current);
 		if (file === 'README.md') errors.push(...validateUnboundedPins(expected));
 		if (expected !== source) stale.push({ file, expected });
@@ -357,14 +428,14 @@ export function checkCompatibility(directory = root, { write = false, release = 
 	if (errors.length) throw new Error(errors.join('\n'));
 	if (write) for (const { file, expected } of stale) writeFileSync(resolve(directory, file), expected);
 	else if (stale.length) throw new Error(stale.map(({ file }) => file).join(', ') + ' compatibility content is stale; run node scripts/check-compatibility.js --write');
-	return { current, written: write ? stale.map(({ file }) => file) : [] };
+	return { current, ahead, written: write ? stale.map(({ file }) => file) : [] };
 }
 
 if (isScriptEntry(import.meta.url)) {
 	try {
 		const release = process.argv.includes('--release');
 		const { current } = checkCompatibility(root, { write: process.argv.includes('--write'), release });
-		console.log('check-compatibility: README, scaffolder, first-run, upgrade guide and package floors match svelte-adapter-uws ' + current.adapter_version + ' manifest' + (release ? '; release version matches' : ''));
+		console.log('check-compatibility: README, scaffolder, first-run, restated floors and package floors match svelte-adapter-uws ' + current.adapter_version + ' manifest' + (release ? '; release version matches' : ''));
 	} catch (error) {
 		console.error(error.message);
 		process.exitCode = 1;
