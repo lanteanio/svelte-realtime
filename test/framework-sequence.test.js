@@ -15,6 +15,7 @@ import {
 import { _throttles, _debounces } from '../src/server/publish-helpers.js';
 import { state } from '../src/server/state.js';
 import { _purgePresenceUser } from '../src/server/presence.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { createTestEnv } from '../src/testing.js';
 import { _buildCtx, _getCtxHelpers } from '../src/server/ctx.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -113,6 +114,7 @@ describe('framework-owned publishes declare no sequence', () => {
 		_throttles.clear();
 		_debounces.clear();
 		vi.useRealTimers();
+		resetRuntimeEnv();
 	});
 
 	function enforcedPlatform() {
@@ -122,6 +124,10 @@ describe('framework-owned publishes declare no sequence', () => {
 	}
 
 	it('publishes a cron tick result', async () => {
+		// Registering arms the real timer for the next minute. Half a minute away,
+		// it cannot publish a second tick before the assertion.
+		const minute = Math.floor(Date.now() / 60_000) * 60_000;
+		setRuntimeEnv({ clock: { wallEpoch: () => minute + 30_000 } });
 		const platform = enforcedPlatform();
 		setCronPlatform(platform);
 		__registerCron('seq/tick', live.cron('* * * * *', 'seq:cron', () => ({ n: 1 })));

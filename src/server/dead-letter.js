@@ -36,6 +36,26 @@ function _topicScope(topic) {
 	return slash > _TENANT_TOPIC_NS.length ? topic.slice(_TENANT_TOPIC_NS.length, slash) : undefined;
 }
 
+const _MAX_KEY_LENGTH = 256;
+
+/**
+ * The store-wide identity of a capture key: keys are scoped to their webhook
+ * and to the tenant scope of the record's topic, so a callback key that repeats
+ * across tenants never merges their records.
+ * @param {string} webhookId @param {string} topic @param {string} key
+ */
+function _scopedKey(webhookId, topic, key) {
+	return JSON.stringify([webhookId, _topicScope(topic) ?? null, key]);
+}
+
+/** @param {unknown} key */
+function _validKey(key) {
+	if (typeof key !== 'string' || key.length === 0 || key.length > _MAX_KEY_LENGTH) {
+		throw new TypeError('dead-letter: key must be a non-empty string of at most ' + _MAX_KEY_LENGTH + ' characters');
+	}
+	return key;
+}
+
 /**
  * @typedef {object} DeadLetterRecord
  * @property {string} id - Monotonic per-store record id.
@@ -52,6 +72,8 @@ function _topicScope(topic) {
  *   by the store's `forgetUserId` option (null when unset or not extractable).
  *   Right-to-erasure attribution: the event payload is app-defined, so the store
  *   cannot tell whose event a record holds without the extractor.
+ * @property {string | null} key - The capture key the record was added under
+ *   (null for an unkeyed add). Held only while the record is retained.
  */
 
 /**
@@ -80,6 +102,21 @@ export function _deadLetterStats(store) {
  *   records (oldest evicted first; default 1000); `ttlMs` drops records older
  *   than the TTL on access (default 0 = no TTL).
  */
+/**
+ * Stores built by `createDeadLetterStore`. They live in one process, so an
+ * erasure treats their purge as that process's own in-memory step.
+ * @type {WeakSet<object>}
+ */
+const _memoryStores = new WeakSet();
+
+/**
+ * Whether a dead-letter store is the built-in in-memory store.
+ * @param {unknown} store
+ */
+export function _isMemoryDeadLetterStore(store) {
+	return store !== null && typeof store === 'object' && _memoryStores.has(store);
+}
+
 export function createDeadLetterStore(options = {}) {
 	const max = Number.isInteger(options.max) && options.max > 0 ? options.max : 1000;
 	const ttlMs = Number.isInteger(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : 0;
@@ -95,6 +132,8 @@ export function createDeadLetterStore(options = {}) {
 	const forgetUserId = options.forgetUserId;
 	/** @type {Map<string, DeadLetterRecord>} insertion-ordered */
 	const records = new Map();
+	/** @type {Map<string, string>} scoped capture key -> its record id */
+	const keys = new Map();
 	let seq = 0;
 	// Forget tombstones: the most recent purge time per (tenant scope, authoring
 	// userId). A record whose delivery was already in flight when `live.forget`
@@ -116,8 +155,15 @@ export function createDeadLetterStore(options = {}) {
 		if (!ttlMs) return;
 		const cutoff = now() - ttlMs;
 		for (const [id, rec] of records) {
-			if (rec.failedAt < cutoff) records.delete(id);
+			if (rec.failedAt < cutoff) _drop(id, rec);
 		}
+	}
+
+	// Every removal path goes through here so a key never outlives its record.
+	/** @param {string} id @param {DeadLetterRecord} rec */
+	function _drop(id, rec) {
+		records.delete(id);
+		if (rec.key !== null) keys.delete(_scopedKey(rec.webhookId, rec.topic, rec.key));
 	}
 
 	// Drop tombstones older than the window: any delivery in flight across such an
@@ -135,17 +181,24 @@ export function createDeadLetterStore(options = {}) {
 	}
 
 	const store = {
+		/** `add` honors `key`, so a capture may repeat a write whose reply was lost. */
+		keyedAdd: true,
+
 		/**
-		 * Retain an undeliverable event. Returns the new record id, or `null` when a
-		 * forget tombstone drops the record (its delivery was in flight when
-		 * `live.forget` ran). Evicts the oldest record when over `max`.
-		 * @param {Omit<DeadLetterRecord, 'id'> & { startedAt?: number }} rec
+		 * Retain an undeliverable event. Returns the record id (the receipt), or
+		 * `null` when a forget tombstone drops the record (its delivery was in
+		 * flight when `live.forget` ran). Evicts the oldest record when over `max`.
+		 * With a `key`, the add is idempotent per webhook while the keyed record is
+		 * retained: a repeat returns the original id and changes nothing. The key
+		 * is the delivery's identity, so the content of a repeat is not compared.
+		 * @param {Omit<DeadLetterRecord, 'id' | 'userId' | 'key'> & { key?: string | null, startedAt?: number }} rec
 		 *   `startedAt` is the delivery start time as a MONOTONIC stamp (threaded by
 		 *   `_fireWebhookOut` via `monotonicNow`); used only for the forget-race
 		 *   tombstone, never stored.
 		 * @returns {string | null}
 		 */
 		add(rec) {
+			const key = rec.key == null ? null : _validKey(rec.key);
 			_expire();
 			_sweepTombstones();
 			// Extract the authoring userId FIRST so a forget tombstone can drop a
@@ -175,6 +228,10 @@ export function createDeadLetterStore(options = {}) {
 				const startedAt = typeof rec.startedAt === 'number' ? rec.startedAt : monotonicNow();
 				if (tomb !== undefined && tomb >= startedAt) return null;
 			}
+			if (key !== null) {
+				const held = keys.get(_scopedKey(rec.webhookId, rec.topic, key));
+				if (held !== undefined) return held;
+			}
 			const id = String(++seq);
 			/** @type {DeadLetterRecord} */
 			const record = {
@@ -187,13 +244,15 @@ export function createDeadLetterStore(options = {}) {
 				error: rec.error,
 				failedAt: typeof rec.failedAt === 'number' ? rec.failedAt : now(),
 				traceContext: rec.traceContext ?? null,
-				userId
+				userId,
+				key
 			};
 			records.set(id, record);
+			if (key !== null) keys.set(_scopedKey(record.webhookId, record.topic, key), id);
 			while (records.size > max) {
-				const oldest = records.keys().next().value;
+				const oldest = records.entries().next().value;
 				if (oldest === undefined) break;
-				records.delete(oldest);
+				_drop(oldest[0], oldest[1]);
 			}
 			return id;
 		},
@@ -206,7 +265,10 @@ export function createDeadLetterStore(options = {}) {
 
 		/** @param {string} id @returns {boolean} */
 		remove(id) {
-			return records.delete(id);
+			const rec = records.get(id);
+			if (rec === undefined) return false;
+			_drop(id, rec);
+			return true;
 		},
 
 		/**
@@ -248,7 +310,7 @@ export function createDeadLetterStore(options = {}) {
 			let n = 0;
 			for (const [id, rec] of records) {
 				if (rec.userId === userId && _topicInTenant(tenantId, rec.topic)) {
-					records.delete(id);
+					_drop(id, rec);
 					n++;
 				}
 			}
@@ -306,9 +368,11 @@ export function createDeadLetterStore(options = {}) {
 
 		clear() {
 			records.clear();
+			keys.clear();
 			purgedAt.clear();
 		}
 	};
+	_memoryStores.add(store);
 	// Records are kept in insertion order, so the first one failed first.
 	_builtinStats.set(store, () => {
 		_expire();

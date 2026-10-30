@@ -846,12 +846,44 @@ async function _recomputeDerived(entry, platform) {
  * userId (a numeric id, an email); they rebuild from new events. Missing
  * policies and failed resets are incomplete erasure, even if no cohort
  * currently contains the user. The historical surface name remains compatible.
+ *
+ * With `holders`, each aggregate holder (an aggregate, or one window of it) is
+ * keyed by its output topic: one handled before is in `done` and never reset
+ * again (it holds other users' data by then), one of an aggregate without an
+ * erasure policy goes to `never` and is not tried again, and one whose reset
+ * failed goes to `failed`, the only kind a later call retries. The first call
+ * records the holders it finds in `known`; later calls touch no other holder,
+ * since one registered since (a new or renamed aggregate after a reload) holds
+ * only data written after the erasure. A failed holder that is gone moves to
+ * `never`.
  * @param {string} contributorId
  * @param {any} [platform]
+ * @param {{ done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }} [holders]
  * @returns {number}
  */
-export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform) {
-	const entries = new Set([..._aggregateBySource.values()].flatMap(group => [...group]));
+export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform, holders) {
+	/** @param {any} entry @param {any} holder */
+	const keyOf = (entry, holder) => holder.outputTopic || entry.topic;
+	/** @param {any} entry */
+	const allHolders = (entry) => (entry.windowStates ? [...entry.windowStates.values()] : [entry]);
+	const all = [..._aggregateBySource.values()].flatMap(group => [...group]);
+	if (holders) {
+		const present = new Set(all.flatMap((entry) => allHolders(entry).map((holder) => keyOf(entry, holder))));
+		if (!holders.scoped) for (const key of present) holders.known.add(key);
+		for (const key of holders.failed) {
+			if (present.has(key)) continue;
+			holders.failed.delete(key);
+			holders.never.add(key);
+		}
+		holders.scoped = true;
+	}
+	/** @param {any} entry */
+	const pendingHolders = (entry) => allHolders(entry).filter((holder) => {
+		if (!holders) return true;
+		const key = keyOf(entry, holder);
+		return holders.known.has(key) && !holders.done.has(key) && !holders.never.has(key);
+	});
+	const entries = new Set(all.filter((entry) => pendingHolders(entry).length > 0));
 	const memberships = [];
 	const failures = [];
 	const resets = [];
@@ -867,17 +899,18 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 				entry._generation++;
 				entry._hydrationPromise = null;
 			}
-			const holders = entry.windowStates ? [...entry.windowStates.values()] : [entry];
-			for (const holder of holders) {
+			for (const holder of pendingHolders(entry)) {
 				if (entry.forget === 'retain') {
 					if (holder.cohort) holder.cohort.clear();
 					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.clear();
+					holders?.done.add(keyOf(entry, holder));
 					continue;
 				}
 				if (entry.forget !== 'reset') {
 					if (holder.cohort) holder.cohort.delete(contributorId);
 					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.delete(contributorId);
 					failures.push(new Error('Aggregate has no erasure policy'));
+					holders?.never.add(keyOf(entry, holder));
 					continue;
 				}
 				if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }
@@ -907,12 +940,17 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 				if (wire === REDACT_DROP) throw new Error('Aggregate erasure reset was dropped by redaction');
 				if (platform) _platformPublish(platform, topic, 'set', wire, UNSEQUENCED);
 				count++;
-			} catch (error) { failures.push(error); }
+				holders?.done.add(keyOf(entry, holder));
+				holders?.failed.delete(keyOf(entry, holder));
+			} catch (error) {
+				failures.push(error);
+				holders?.failed.add(keyOf(entry, holder));
+			}
 		}
 	} finally {
 		for (const [group, entry] of memberships) group.add(entry);
 	}
-	if (failures.length) throw new AggregateError(failures, 'Aggregate erasure incomplete');
+	if (failures.length || (holders && holders.never.size > 0)) throw new AggregateError(failures, 'Aggregate erasure incomplete');
 	return count;
 }
 

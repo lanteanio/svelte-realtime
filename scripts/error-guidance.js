@@ -45,23 +45,35 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. A denied stream or call is not retried.',
 		nextAction: 'Check the caller\'s permissions and the access rule. After a scope or access change, subscribe again. A message ending in `subscribe denied: RATE_LIMITED` means the adapter rate-limited the topic subscribe; retry later.'
 	}),
+	FORGET_CANCELLED: Object.freeze({
+		cause: '`abandonForgetJob(id)` gave up an erasure job while a run of `live.forget` or `resumeForgetJobs()` was working on it, on this process or another one.',
+		consequence: 'The run starts no further step, its pending store calls are abandoned (the durable `purgeUser` sees its `signal` fire), and it rejects with a FORGET_CANCELLED LiveError carrying the job reference in its non-enumerable `job` property. The job ends `abandoned`, and the process that abandoned it drops the in-memory steps it owed for it. Steps that finished stay erased. A run that had already finished every step completes instead, unless the store had already marked the job abandoned (a resume swept it while the run stalled, or its failure landed on the cancelled job): then the run ends with FORGET_CANCELLED although it finished every step, and `onForget` does not run. Calling `live.forget` again is optional and harmless.',
+		automaticRecovery: 'None. An abandoned job never runs again.',
+		nextAction: 'Nothing, if giving the erasure up was intended. To erase the user after all, call `live.forget` again; it records a new job.'
+	}),
 	FORGET_INCOMPLETE: Object.freeze({
-		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed.',
+		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed. With a job store, a run also ends with it when another run took its job over after this process stalled past its lease; that run finishes the shared steps.',
 		consequence: '`live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.',
-		automaticRecovery: 'None. The erasure is not retried by itself.',
-		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments. It is safe to repeat.'
+		automaticRecovery: 'Without a job store, none. With one, this process keeps the failed in-memory steps under the reference in the `job` property of the error and retries them by itself, and a failed shared step is recorded on the job. After a takeover this run recorded nothing on the job: the run holding the lease finishes the shared steps and records the outcome, so calling again is optional.',
+		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.'
+	}),
+	FORGET_JOB_FAILED: Object.freeze({
+		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. A call that does not answer within the optional `configureForget({ timeoutMs })` counts as failed. The in-memory store also refuses a new job while it holds its `max` jobs and every one of them is pending or failed.',
+		consequence: 'From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.',
+		automaticRecovery: 'None. The erasure does not start without its job record.',
+		nextAction: 'Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish or abandon its open jobs with `resumeForgetJobs()` or `abandonForgetJob(id)`, then call `live.forget` again.'
 	}),
 	FORGET_STORE_FAILED: Object.freeze({
-		cause: 'The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`.',
+		cause: 'The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`, or did not answer within the optional `configureForget({ timeoutMs })`.',
 		consequence: '`live.forget` rejects with a FORGET_STORE_FAILED LiveError and the erasure is incomplete. Owner successions the store already committed are still announced, and a `forget.incomplete` event names the durable surface.',
-		automaticRecovery: 'None. The durable purge is not retried by itself.',
-		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again. A repeat call only reprocesses the rooms that failed.'
+		automaticRecovery: 'None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.',
+		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again, or `resumeForgetJobs()` with a job store. A repeat call only reprocesses the rooms that failed.'
 	}),
 	IDEMPOTENCY_CAPACITY: Object.freeze({
-		cause: 'A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall. With a tenant resolver configured, each tenant and the unscoped bucket are also capped at 1,000 and the last 1,000 slots are kept for small tenants; without one, unscoped callers may use the whole store.',
-		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned.',
-		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.',
-		nextAction: 'Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.'
+		cause: 'A `live.idempotent` call brings a new key while the default in-process store is at a limit. Either the store is full for it (10,000 entries overall, 1,000 per tenant, the reserves kept for small holders, or the 1,000-slot cron and alarm pools), or the caller holds its whole share (a tenth of its tenant share per identity, anonymous connection or server-side bucket, or a tenth of the alarm pool per tenant) and has nothing of its own to give up: only running keys, results for `keyFrom` keys, or a bucket shared by callers that cannot be told apart.',
+		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Every cached result stays and can still be returned. A refusal at the caller\'s own share says so and carries `retryAfter`, the milliseconds until the earliest of its results can expire, counting a running call as committed now, and none while a call on a key of its own still runs, since that one can be replaced once it finishes. A hint can be as long as the TTL. A caller holding its whole share with a result for a client envelope key replaces its own oldest one instead of being refused.',
+		automaticRecovery: 'Offline-queue replays pause and retry after `retryAfter`, at least one second, or without one after a backoff that doubles from one second. Once a call would hold the queue past 30 seconds in all it is set aside, reported through `onReplayError` but kept queued with its stored row until then, and replay moves on to the calls behind it; a call whose wait would outlast its retention is dropped as STALE instead. Other callers are not retried, and slots free up as entries expire.',
+		nextAction: 'For a full store, retry with the same key and payload after a short backoff. For a refusal at the caller\'s own share, retry after `retryAfter` or not at all, and keep fewer results per caller: a shorter TTL, client envelope keys instead of a per-user `keyFrom`, or a durable idempotency store.'
 	}),
 	IDEMPOTENCY_COMMIT_UNKNOWN: Object.freeze({
 		cause: 'The handler wrapped by `live.idempotent` finished successfully, but the store\'s `commit` threw, so the runtime cannot tell whether the result was recorded.',
@@ -72,7 +84,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	IDEMPOTENCY_IN_PROGRESS: Object.freeze({
 		cause: 'A call arrives with an idempotency key that a durable store still lists as pending for an earlier request, and that request does not finish within five seconds of polling.',
 		consequence: 'The call rejects with an IDEMPOTENCY_IN_PROGRESS LiveError (RpcError on the client). The original request keeps running and is not cancelled.',
-		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried.',
+		automaticRecovery: 'Offline-queue replays pause and try again after a backoff that doubles from one second; once a call would hold the queue past 30 seconds in all it is set aside, reported through `onReplayError` but kept queued, and the calls behind it replay. Other callers are not retried.',
 		nextAction: 'Retry with the same key and payload after a short backoff. If it keeps happening, look for slow handlers or pending entries that never clear in the store.'
 	}),
 	IDEMPOTENCY_KEY_REUSED: Object.freeze({
@@ -172,8 +184,8 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Settle or clear the queue before switching identity or storage. Treat these rejections as expected during an account or storage switch.'
 	}),
 	OVERLOADED: Object.freeze({
-		cause: 'An RPC, binary call or stream subscribe finds its connection, its route or the worker at its concurrency limit (`realtime({ rpc })`, default 32, 256 and 1024 calls) while the shared admission queue (default 256, at most 32 calls of one connection) is full, disabled, or held it past its deadline; the client already has `rpc.maxPending` calls (default 256) awaiting a response; a new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule; the pending-upload aggregate byte cap is exceeded while uploads wait for authorization; or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
-		consequence: 'A refused call never runs: its RpcError carries `reason` (`concurrency_limit` or `queue_full`) and `scope` (`connection`, `route`, `global`, or `client` for the client cap), and a refused fire-and-forget call is dropped without a reply. The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure`, without a dead-letter record.',
+		cause: 'An RPC, binary call or stream subscribe finds its connection, its route or the worker at its concurrency limit (`realtime({ rpc })`, default 32, 256 and 1024 calls) while the shared admission queue (default 256, at most 32 calls of one connection) is full, disabled, or held it past its deadline; the client already has `rpc.maxPending` calls (default 256) awaiting a response; a new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule; the pending-upload aggregate byte cap is exceeded while uploads wait for authorization; unread upload bytes would pass the endpoint\x27s `maxBufferedBytesPerTenant` (default 256 MiB) or `maxBufferedBytesTotal` (default 1 GiB) limit; or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
+		consequence: 'A refused call never runs: its RpcError carries `reason` (`concurrency_limit` or `queue_full`) and `scope` (`connection`, `route`, `global`, or `client` for the client cap), and a refused fire-and-forget call is dropped without a reply. The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending or running one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure`, without a dead-letter record.',
 		automaticRecovery: 'None for refused calls or uploads; a refused call is not retried. A shed stream subscribes again only after the next reconnect while it still has subscribers. An effect or webhook takes new publishes again as soon as its queue has room.',
 		nextAction: 'For a refused call, retry after a short backoff only if the call is safe to repeat, and read `svelte_realtime_rpc_inflight`, `svelte_realtime_rpc_queued` and `svelte_realtime_rpc_overloaded_total` to find the route that holds the permits; fix its slow dependency or bound it with `perRouteConcurrent` before raising a limit. Investigate the pressure source (`platform.pressure.reason`) or upload volume, and check the admission class rules. For an effect or webhook, find why its calls are slow, then raise `maxConcurrent` or `maxQueued` only if the work can keep up.'
 	}),
@@ -214,7 +226,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check the file or stream source the app passed in, then start a new upload. Show the user that the file could not be read.'
 	}),
 	STALE: Object.freeze({
-		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
+		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is told by an idempotency refusal to wait past them, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
 		consequence: 'The mutation is dropped without being sent. Its promise rejects with a STALE RpcError, sometimes with a `cause`, and `offline.onReplayError` is notified.',
 		automaticRecovery: 'None. Dropped mutations are not re-queued.',
 		nextAction: 'Check `maxAge`, retention, `beforeReplay` and `replay` logic. Make `beforeReplay` synchronous and non-throwing, and surface dropped edits to the user via `onReplayError`.'
@@ -232,7 +244,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key. For an effect, find the call that never settles (an awaited promise without a timeout of its own) or raise `timeoutMs` for work that is legitimately slow.'
 	}),
 	TOO_MANY_UPLOADS: Object.freeze({
-		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession` or `maxConcurrentTotal` limit.',
+		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession`, `maxConcurrentPerUser` (default 16 per signed-in user across sessions), `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads, cancelled ones included, hold their slot until their handler returns.',
 		consequence: 'The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.',
 		automaticRecovery: 'None. The refused upload is not queued or retried.',
 		nextAction: 'Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.'
@@ -326,10 +338,46 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the error reported in the `error` attribute for `path`. Make sure the fallback value renders sensibly. Use `onError` if you need the raw error.'
 	}),
 	'forget.incomplete': Object.freeze({
-		cause: '`live.forget` attempted every erasure surface and at least one in-memory surface, named document or the durable store failed. The surfaces are listed in `failedSurfaces`.',
+		cause: '`live.forget` attempted every erasure surface and at least one in-memory surface, named document or the durable store failed or did not answer within the optional `configureForget({ timeoutMs })`. The surfaces are listed in `failedSurfaces`.',
 		consequence: 'The user\'s data may still exist on the listed surfaces. The call rejects with FORGET_INCOMPLETE, or FORGET_STORE_FAILED when the durable store failed. `onForget` does not run.',
-		automaticRecovery: 'None. The erasure is not retried automatically, although owner changes the store already committed are still announced.',
-		nextAction: 'Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant.'
+		automaticRecovery: 'None. The erasure is not retried automatically, although owner changes the store already committed are still announced. With a job store the `job` attribute names the job recorded as failed.',
+		nextAction: 'Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant, or `resumeForgetJobs()` with a job store.'
+	}),
+	'forget.job-evicted': Object.freeze({
+		cause: 'The in-memory erasure job store was full and dropped an exhausted job to record a new erasure. The `job` attribute is the dropped job reference.',
+		consequence: 'The exhausted job is gone from the store, so it no longer lists or resumes. Its shared steps may still hold the user data it was meant to erase.',
+		automaticRecovery: 'None.',
+		nextAction: 'Resolve exhausted jobs promptly with `resumeForgetJobs({ exhausted: true })` or `abandonForgetJob(id)`, raise `max`, or use a durable job store. Rerun the erasure for the dropped job if it was not finished.'
+	}),
+	'forget.job-exhausted': Object.freeze({
+		cause: 'An erasure job failed on 24 runs. The `job` attribute is the job reference, `code` the last failure code and `attempts` the runs made.',
+		consequence: 'The job stays listed with status `exhausted` and keeps the user id, but no longer runs by itself. The surfaces in its last error may still hold the user data.',
+		automaticRecovery: 'None. An exhausted job only runs again on request.',
+		nextAction: 'Find the cause from the error surfaces of the job (a store outage, a dead-letter store without `purgeUser`, an aggregate without a reset policy), fix it, and run `resumeForgetJobs({ id })`, or `resumeForgetJobs({ exhausted: true })` for every exhausted job. If the erasure cannot be finished, record why and call `abandonForgetJob(id)`.'
+	}),
+	'forget.local-dropped': Object.freeze({
+		cause: 'A process stopped keeping the open in-memory erasure steps of a job. The `reason` attribute says why: `full` (it already owes 10,000 jobs, none of them exhausted, so the new job is not kept), `evicted` (an exhausted job made room for a new one) or `expired` (an exhausted job reached a day without being resumed) or `reset` (`configureForget(null)` dropped an exhausted job). The `job` attribute names the job.',
+		consequence: 'This process no longer retries those in-memory steps, so its in-memory state may still hold the user data.',
+		automaticRecovery: 'None.',
+		nextAction: 'Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without an erasure policy, a document declaration without `drop`) and fix it, then call `live.forget` again on this process for the affected user.'
+	}),
+	'forget.local-exhausted': Object.freeze({
+		cause: 'The in-memory erasure steps a process owes for a job are no longer retried by themselves. The `reason` attribute is `attempts` (they failed on 24 tries) or `blocked` (what is left can never succeed as configured: an aggregate without an erasure policy, a document declaration without `drop`); the holders that did succeed are never run again. `job` names the job and `attempts` the tries made.',
+		consequence: 'The steps stay listed in the `local` field of the job on that process for up to a day. Its in-memory state may still hold the user data.',
+		automaticRecovery: 'None. The steps only run again on request.',
+		nextAction: 'Fix the cause shown by the `forget.incomplete` events of the job, then call `resumeForgetJobs({ exhausted: true })` or `resumeForgetJobs({ id })` on the same process, or `abandonForgetJob(id)`.'
+	}),
+	'forget.run-overdue': Object.freeze({
+		cause: 'An erasure run has been going for 15 minutes, and again for every further 15 minutes, usually because a store call is slow or never returns and no `timeoutMs` is configured. The `job` attribute is the job reference and `runningMs` how long the run has gone on.',
+		consequence: 'The run keeps its job, renewing the lease, so no other run starts on it while it lasts.',
+		automaticRecovery: 'None. The run goes on until its store calls return.',
+		nextAction: 'Find the store call that is slow or hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run. If the run is stuck, `abandonForgetJob(id)` cancels it: at once on its own process, and from any other process at its next lease renewal; the job then ends abandoned.'
+	}),
+	'forget.job-unrecorded': Object.freeze({
+		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',
+		consequence: 'The erasure result returned to the caller is accurate, but the job stays unfinished in the store and still holds the user id until a later run completes it.',
+		automaticRecovery: 'None. The job is due again once the lease of its run expires; the next `resumeForgetJobs()` on any process (or the `resumeIntervalMs` timer) finishes the shared steps still open.',
+		nextAction: 'Fix the job store, then call `resumeForgetJobs()` so the job reaches a recorded outcome.'
 	}),
 	'forget.owner-succession-unannounced': Object.freeze({
 		cause: 'The erasure store reports room owner changes caused by the erasure, but there is no erasure platform and no captured server platform to publish them through.',
@@ -463,10 +511,16 @@ export const EVENT_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None needed. The late `next()` is refused so the handler cannot run after the answer.',
 		nextAction: 'Fix the middleware at the logged path so it calls `next()` once, before deciding the answer, and does not defer it.'
 	}),
+	'webhook.dead-letter.key-unavailable': Object.freeze({
+		cause: 'An outbound webhook delivery failed and its idempotency key could not be determined for the dead-letter capture: the `idempotencyKey` callback threw or did not settle within `callbackTimeoutMs` (default 10 seconds). The `webhookId` attribute names the webhook.',
+		consequence: 'The failed event is captured once without a key. If that single write fails, the event is lost and `webhook.dead-letter.persist-failed` follows; a repeated capture of the same delivery is not merged with it.',
+		automaticRecovery: 'None for this capture. Later deliveries compute their key again.',
+		nextAction: 'Make the `idempotencyKey` callback return promptly and without throwing, for example by deriving it from the event data alone.'
+	}),
 	'webhook.dead-letter.persist-failed': Object.freeze({
-		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects when the failed record is added.',
+		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record, or 1000 dead-letter writes are already in flight in this process (a store that stopped answering), so the record is not written at all.',
 		consequence: 'The record was the only replay copy, so this webhook event is lost for good. The `svelte_realtime_webhook_dead_letter_failures_total` counter goes up.',
-		automaticRecovery: 'None. The record is not retried into the store.',
+		automaticRecovery: 'A keyed write to a store that declares `keyedAdd` is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. An unkeyed write, and a write the store refuses by throwing at once, is made once. Writes run after the delivery has given its slot back, so a slow store never holds up deliveries.',
 		nextAction: 'Check the dead-letter store backend (connection, capacity, permissions). Alert on the failure counter. Rebuild lost events from your own source data if they matter.'
 	}),
 	'webhook.delivery.overflow': Object.freeze({

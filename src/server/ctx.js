@@ -626,6 +626,33 @@ export function _rerunCtx(ctx, kind) {
 }
 
 /**
+ * Which server-scheduled work a context runs: 'cron' or 'alarm'. An own
+ * enumerable property under a module-private symbol, so a handler's
+ * `{ ...ctx, extra }` copy keeps it and nothing outside this module can set it.
+ */
+const _WORK_ORIGIN = Symbol('svelte-realtime.workOrigin');
+
+/**
+ * Mark a context as work the server scheduled itself.
+ * @template T
+ * @param {T} ctx
+ * @param {'cron' | 'alarm'} origin
+ * @returns {T}
+ */
+export function _markWorkOrigin(ctx, origin) {
+	/** @type {any} */ (ctx)[_WORK_ORIGIN] = origin;
+	return ctx;
+}
+
+/**
+ * @param {any} ctx
+ * @returns {'cron' | 'alarm' | undefined}
+ */
+export function _workOrigin(ctx) {
+	return ctx !== null && typeof ctx === 'object' ? ctx[_WORK_ORIGIN] : undefined;
+}
+
+/**
  * Bind a wire call's admission record and deadline tick to its context.
  * @type {(ctx: LiveCallContext, conn: any, deadline: number) => void}
  */
@@ -716,6 +743,8 @@ export class LiveCallContext {
 		this.setAlarm = _alarmUnavailable;
 		this.getAlarm = _alarmGetUnavailable;
 		this.deleteAlarm = _alarmUnavailable;
+		// Set only on cron and alarm contexts (see _markWorkOrigin).
+		this[_WORK_ORIGIN] = undefined;
 		this._idempotencyKey = idempotencyKey;
 		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
 		// null). `_publishWire` is the raw, non-prefixing publish for framework
@@ -750,7 +779,7 @@ export class LiveCallContext {
 
 /** Build background work without resolving a missing user's tenant. */
 export function _buildPersistedCtx(platform, helpers, tenantId) {
-	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
+	return _markWorkOrigin(_buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId)), 'alarm');
 }
 
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId) {

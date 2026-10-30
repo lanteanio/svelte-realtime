@@ -90,8 +90,9 @@ export { sourceGap } from './server/source-gap.js';
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
 export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';
-import { configureForget, _resetForget, installForget } from './server/forget.js';
-export { configureForget, _resetForget };
+import { configureForget, _resetForget, installForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, _stopForgetTimers, _restartForgetTimers } from './server/forget.js';
+import { createForgetJobStore } from './server/forget-jobs.js';
+export { configureForget, _resetForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, createForgetJobStore };
 import { configureRpc, _validateRouteConcurrent, _openRpcConnection, _closeRpcConnection, _rpcRoute, NEVER_ABORTED } from './server/rpc-admission.js';
 export { configureRpc };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
@@ -943,6 +944,7 @@ export function _resetStaleWatch() {
  */
 function _stopBackgroundWork() {
 	_stopCronScheduler();
+	_stopForgetTimers();
 	for (const entry of _topicStaleWatch.values()) clearTimer(entry.timerId);
 }
 
@@ -1902,11 +1904,12 @@ live.binary = function binary(fn, options) {
  *   - `ctx.signal`  - AbortSignal that fires on cancel / disconnect / cap exceeded
  *   - `ctx.upload`  - { id: string, total?: number, source: 'file'|'blob'|'buffer'|'stream' }
  *
- * Caps default to: 100MB per upload, 4 concurrent per session, unbounded
- * globally, 64 buffered chunks before flow-control kicks in.
+ * Caps default to: 100MB per upload, 4 concurrent per session, 16 per user,
+ * 100 per tenant and 1000 per process, 64 buffered chunks before flow-control
+ * kicks in, and 256 MiB of unread chunks per tenant and 1 GiB per process.
  *
  * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
- * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number, diagnostics?: boolean }} [options]
+ * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentPerUser?: number, maxConcurrentPerTenant?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, maxBufferedBytesPerTenant?: number, maxBufferedBytesTotal?: number, reauthEvery?: number, diagnostics?: boolean }} [options]
  * @returns {Function}
  */
 live.upload = function upload(fn, options) {
@@ -1928,6 +1931,13 @@ live.upload = function upload(fn, options) {
 	if (maxBufferedChunks !== undefined && (!Number.isSafeInteger(maxBufferedChunks) || maxBufferedChunks < 1)) {
 		throw new Error('live.upload: maxBufferedChunks must be a positive integer');
 	}
+	// Quotas shared across sessions: a positive integer, or Infinity to lift one.
+	for (const name of ['maxConcurrentPerUser', 'maxConcurrentPerTenant', 'maxConcurrentTotal', 'maxBufferedBytesPerTenant', 'maxBufferedBytesTotal']) {
+		const value = options?.[name];
+		if (value !== undefined && value !== Infinity && (!Number.isSafeInteger(value) || value < 1)) {
+			throw new Error('live.upload: ' + name + ' must be a positive integer or Infinity');
+		}
+	}
 	const diagnostics = options?.diagnostics;
 	if (diagnostics !== undefined && typeof diagnostics !== 'boolean') {
 		throw new Error('live.upload: diagnostics must be a boolean');
@@ -1936,8 +1946,12 @@ live.upload = function upload(fn, options) {
 	/** @type {any} */ (fn).__uploadOptions = {
 		maxSize: options?.maxSize ?? 104857600,
 		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
-		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
+		maxConcurrentPerUser: options?.maxConcurrentPerUser ?? 16,
+		maxConcurrentPerTenant: options?.maxConcurrentPerTenant ?? 100,
+		maxConcurrentTotal: options?.maxConcurrentTotal ?? 1000,
 		maxBufferedChunks: maxBufferedChunks ?? 64,
+		maxBufferedBytesPerTenant: options?.maxBufferedBytesPerTenant ?? 268435456,
+		maxBufferedBytesTotal: options?.maxBufferedBytesTotal ?? 1073741824,
 		reauthEvery: reauthEvery ?? 0,
 		diagnostics: diagnostics === true
 	};
@@ -3813,6 +3827,9 @@ export function _prepareHmr() {
 
 	// Clear pending alarm timers (live.alarm); keeps the store/leader config like cron.
 	_resetAlarms();
+
+	// Erasure retry timers start over; the forget config and the work it owes stay.
+	_restartForgetTimers();
 
 	// Clear lazy queue and reset lazy init state
 	_lazyQueue.length = 0;

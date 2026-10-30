@@ -15,7 +15,7 @@ import {
 	setOperationalEventSink
 } from '../src/server.js';
 import { monotonicNow, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
-import { _fireWebhookOut } from '../src/server/webhook-out.js';
+import { _fireWebhookOut, _deadLetterCapturesSettled } from '../src/server/webhook-out.js';
 import { state, _webhookOutById } from '../src/server/state.js';
 
 const adminFor = (requires) => /** @type {any} */ (realtime({ admin: { requires } })).admin;
@@ -535,7 +535,9 @@ describe('dead-letter persistence failure', () => {
 		store.add = () => Promise.reject(new Error('redis down'));
 		configureWebhooks({ deadLetter: store });
 		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null);
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		// The built-in store takes keyed writes, so a rejected one is repeated
+		// before it is reported.
+		await _deadLetterCapturesSettled();
 		expect(persistFailed()).toHaveLength(1);
 		expect(persistFailed()[0].attributes).toEqual({ webhookId: 'test/wh', error: 'redis down' });
 		expect(failures).toBe(1);

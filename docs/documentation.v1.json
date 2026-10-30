@@ -3,7 +3,7 @@
   "owner": "svelte-realtime",
   "compatibilitySource": "node_modules/svelte-adapter-uws/docs/compatibility.v1.csv",
   "entryBudgetLines": 60,
-  "readmeMaxLines": 5626,
+  "readmeMaxLines": 5618,
   "paths": [
     {
       "key": "identity",
