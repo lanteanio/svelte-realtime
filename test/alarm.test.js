@@ -3,7 +3,7 @@ import { memoryAlarmStore as memStore } from './helpers/alarm-store.js';
 // + store seam. Tests the alarm mechanism via _bindAlarmCtx (the same binding the
 // stream loader-dispatch establishes) + the option validation + the ctx defaults.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { live, configureAlarm, _resetAlarms } from '../src/server.js';
 import { _bindAlarmCtx, _pollAlarms } from '../src/server/alarm.js';
 import { _buildCtx, _getCtxHelpers } from '../src/server/ctx.js';
@@ -96,20 +96,33 @@ describe('live.alarm', () => {
 	});
 
 	it('onAlarm receives a fresh ctx that can re-arm (TTL refresh) and publish to its room', async () => {
-		let runs = 0;
-		let sawPublish = false;
-		const ctx = alarmCtx('room:rearm', (c) => {
-			runs++;
-			expect(typeof c.publish).toBe('function');
-			expect(typeof c.setAlarm).toBe('function');
-			c.publish('ping', { runs }); // room-scoped publish, must not throw
-			sawPublish = true;
-			if (runs === 1) c.setAlarm(Date.now() + 5); // re-arm once
-		});
-		ctx.setAlarm(Date.now() + 5);
-		await tick(40);
-		expect(runs).toBe(2); // fired, re-armed inside onAlarm, fired again
-		expect(sawPublish).toBe(true);
+		// Fake time: two chained 5 ms timers must not depend on how busy the
+		// machine is (a 15.6 ms timer tick alone puts the second firing near
+		// 31 ms of wall time).
+		vi.useFakeTimers();
+		try {
+			let runs = 0;
+			let sawPublish = false;
+			const ctx = alarmCtx('room:rearm', (c) => {
+				runs++;
+				expect(typeof c.publish).toBe('function');
+				expect(typeof c.setAlarm).toBe('function');
+				c.publish('ping', { runs }); // room-scoped publish, must not throw
+				sawPublish = true;
+				if (runs === 1) c.setAlarm(Date.now() + 5); // re-arm once
+			});
+			ctx.setAlarm(Date.now() + 5);
+			await vi.advanceTimersByTimeAsync(5);
+			expect(runs).toBe(1);
+			expect(ctx.getAlarm()).toBe(Date.now() + 5); // re-armed from inside onAlarm
+			await vi.advanceTimersByTimeAsync(5);
+			expect(runs).toBe(2); // fired, re-armed inside onAlarm, fired again
+			expect(sawPublish).toBe(true);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(runs).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('a past at fires on the next tick (fire-ASAP, not an error)', async () => {
