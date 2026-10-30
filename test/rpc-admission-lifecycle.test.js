@@ -60,7 +60,7 @@ describe('per-call abort signal', () => {
 		api.handleRpc(ws, text('signal/quick', 'a'), platform);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(replies(platform).get('a')).toMatchObject({ ok: true });
-		expect(admission._rpcAdmissionSnapshot().pendingSignals).toBe(0);
+		expect(admission._rpcAdmissionSnapshot().openSignals).toBe(0);
 		await vi.advanceTimersByTimeAsync(2000);
 		api.close(ws, { platform });
 		expect(fired).toEqual([]);
@@ -89,12 +89,22 @@ describe('per-call abort signal', () => {
 		await settle();
 	});
 
-	it('allocates no controller for a handler that never reads the signal', async () => {
-		api.__register('signal/unread', api.live(async () => 1));
+	it('allocates no controller for a running handler that never reads the signal', async () => {
+		let release;
+		const gate = new Promise(resolve => { release = resolve; });
+		api.__register('signal/unread', api.live(async () => { await gate; return 1; }));
+		api.__register('signal/read', api.live(async (ctx) => { ctx.abortSignal; await gate; return 1; }));
 		const platform = mockPlatform();
 		for (let i = 0; i < 50; i++) api.handleRpc(mockWs({ id: 'u' + i }), text('signal/unread', 'n' + i), platform);
 		await settle();
-		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ pendingSignals: 0, buckets: 0 });
+		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ active: 50, openSignals: 0 });
+		// The same count moves for a handler that does read it.
+		api.handleRpc(mockWs({ id: 'reader' }), text('signal/read', 'r'), platform);
+		await settle();
+		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ active: 51, openSignals: 1 });
+		release();
+		await settle();
+		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ active: 0, openSignals: 0 });
 	});
 
 	it('keeps controllers and listeners flat across calls with timeout 0', async () => {
@@ -121,7 +131,9 @@ describe('per-call abort signal', () => {
 		// One controller per call and none kept once its call settled, so no
 		// signal collects more than its own call's listeners.
 		expect(signals.size).toBe(40);
-		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ pendingSignals: 0, buckets: 0 });
+		// Without a deadline only the connection holds a signal; a settled
+		// call leaves it, so the connection keeps none of the 40.
+		expect(admission._rpcAdmissionSnapshot().openSignals).toBe(0);
 		expect(warnings.filter(name => name === 'MaxListenersExceededWarning')).toEqual([]);
 	});
 
@@ -142,11 +154,13 @@ describe('per-call abort signal', () => {
 		expect(late.reason).toMatchObject({ code: 'TIMEOUT' });
 	});
 
-	it('closing one socket leaves another socket with the same user data alone', async () => {
+	it('closing one socket leaves another socket of the same user alone', async () => {
 		api.configureRpc({ perConnectionConcurrent: 1, maxQueue: 0 });
-		const user = { id: 'shared' };
-		const one = { ...mockWs({}), getUserData: () => user };
-		const two = { ...mockWs({}), getUserData: () => user };
+		// Two sockets from one upgrade result: each gets its own user data, as
+		// the adapter copies it per socket.
+		const upgraded = { id: 'shared' };
+		const one = mockWs({ ...upgraded });
+		const two = mockWs({ ...upgraded });
 		const signals = {};
 		let release;
 		const gate = new Promise(resolve => { release = resolve; });
@@ -303,5 +317,31 @@ describe('release on every exit', () => {
 		expect(running.size).toBe(3);
 		open();
 		await settle();
+	});
+});
+
+describe('ctx as LiveCallContext', () => {
+	it('keeps the admission state out of copies and keys', async () => {
+		let seen;
+		api.__register('shape/ctx', api.live(async (ctx) => { seen = ctx; return 1; }));
+		api.handleRpc(mockWs({ id: 'u' }), text('shape/ctx', 'c'), mockPlatform());
+		await settle();
+		expect(seen.constructor.name).toBe('LiveCallContext');
+		expect(Object.keys(seen).some(key => key.startsWith('_rpc') || key.startsWith('_abort'))).toBe(false);
+		const copy = { ...seen };
+		expect('abortSignal' in copy).toBe(false);
+		expect(Object.getOwnPropertySymbols(copy)).toEqual([]);
+	});
+
+	it('a handler under live.lock reads the call signal lazily', async () => {
+		let seen;
+		api.__register('shape/locked', api.live.lock({ key: () => 'k', maxExecutionMs: 1000 }, async (ctx) => { seen = ctx.abortSignal; return 1; }));
+		const platform = mockPlatform();
+		api.handleRpc(mockWs({ id: 'u' }), text('shape/locked', 'l'), platform);
+		await settle();
+		await settle();
+		expect(replies(platform).get('l')).toMatchObject({ ok: true });
+		expect(seen).toBeInstanceOf(AbortSignal);
+		expect(seen.aborted).toBe(false);
 	});
 });

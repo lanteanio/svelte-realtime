@@ -14,9 +14,9 @@ import { state } from './state.js';
 // of 0 is disabled.
 //
 // The unsaturated path is three compares and three counters: the route's
-// record hangs off its registered function, the connection's record is found
-// by socket (the last socket is remembered, so a connection calling again
-// skips the map), and the worker's count is a module integer.
+// record hangs off its registered function, the connection's record sits in a
+// slot on the socket's user data (declared at open, like the adapter's own
+// per-connection slots), and the worker's count is a module integer.
 //
 // A call's deadline is counted in ticks of RPC_DEADLINE_TICK_MS from the tick
 // it arrived in. The ticker runs while calls run, wait or hold a deadline, and
@@ -139,7 +139,13 @@ export function _validateRouteConcurrent(value, where) {
  * @property {number} active - calls running
  * @property {number} queued - calls waiting in the queue
  * @property {boolean} closed
- * @property {Set<any> | null} calls - contexts of running calls whose handler read its signal
+ * @property {Map<any, RpcCallSignal> | null} calls - running calls whose handler read its signal, by ctx
+ */
+
+/**
+ * @typedef {object} RpcCallSignal
+ * @property {AbortController} ctrl
+ * @property {number} deadline - its deadline tick, -1 for none
  */
 
 /**
@@ -164,15 +170,20 @@ export const RPC_ROUTE = Symbol('svelte-realtime.rpc.route');
 
 /** @type {Map<string, RpcRoute>} */
 const _routes = new Map();
-/** @type {WeakMap<object, RpcConn>} */
-const _conns = new WeakMap();
-/** The socket of the last admitted call and its record, so a connection calling again skips the map. */
-let _lastWs = /** @type {object | null} */ (null);
-let _lastConn = /** @type {RpcConn | null} */ (null);
+/**
+ * Where a socket's user data keeps its admission record. `Symbol.for`, like
+ * the adapter's own per-connection slots, so a bundled and a loaded copy of
+ * this module agree on it.
+ */
+export const RPC_CONNECTION = Symbol.for('svelte-realtime.rpc.connection');
+/** Records of sockets whose user data cannot carry the slot (not an extensible object). @type {WeakMap<object, RpcConn>} */
+const _unslotted = new WeakMap();
 let _active = 0;
+/** Signals created and not yet retired or fired, for tests and introspection. */
+let _openSignals = 0;
 /** @type {QueuedCall[]} */
 const _queue = [];
-/** Running calls whose signal was read, by deadline tick. @type {Map<number, Set<any>>} */
+/** Running calls whose signal was read, by deadline tick. @type {Map<number, Set<RpcConn>>} */
 const _buckets = new Map();
 /** The deadline clock, in ticks of RPC_DEADLINE_TICK_MS. Read it to stamp a call's arrival. */
 export let rpcTick = 0;
@@ -248,16 +259,51 @@ export function _rpcRoute(path, fn) {
 	return route;
 }
 
-/** @param {object} ws @returns {RpcConn} */
-function _connOf(ws) {
-	let conn = _conns.get(ws);
-	if (conn === undefined) {
-		conn = { active: 0, queued: 0, closed: false, calls: null };
-		_conns.set(ws, conn);
+/** @returns {RpcConn} */
+function _newConn() {
+	return { active: 0, queued: 0, closed: false, calls: null };
+}
+
+/**
+ * Declare a socket's admission slot on its user data. The open hook calls
+ * this, so a call reads its connection's record with one property load; a
+ * connection opened without the hook gets its slot on its first call. The
+ * slot is not enumerable, so a copy of the user data does not carry it.
+ * @param {any} user - the socket's user data
+ * @param {object} [ws]
+ * @returns {RpcConn}
+ */
+export function _openRpcConnection(user, ws) {
+	if (user !== null && typeof user === 'object') {
+		const own = Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION) ? user[RPC_CONNECTION] : undefined;
+		if (own !== undefined) return own;
+		const conn = _newConn();
+		if (Object.isExtensible(user)) {
+			Object.defineProperty(user, RPC_CONNECTION, { value: conn, writable: true, enumerable: false, configurable: true });
+			return conn;
+		}
+		if (ws) _unslotted.set(ws, conn);
+		return conn;
 	}
-	_lastWs = ws;
-	_lastConn = conn;
+	if (!ws) return _newConn();
+	let conn = _unslotted.get(ws);
+	if (conn === undefined) {
+		conn = _newConn();
+		_unslotted.set(ws, conn);
+	}
 	return conn;
+}
+
+/**
+ * The admission record of a socket, from its user data's slot.
+ * @param {any} user
+ * @param {object} ws
+ * @returns {RpcConn}
+ */
+function _connOf(user, ws) {
+	const slotted = user?.[RPC_CONNECTION];
+	if (slotted !== undefined) return slotted;
+	return _unslotted.get(ws) || _openRpcConnection(user, ws);
 }
 
 /**
@@ -275,17 +321,20 @@ function _blocked(conn, route) {
 }
 
 /**
- * Admit a call of `route` from `ws` that arrived at deadline tick `arrived`.
- * Returns the connection's record (the permit) when the call may start now,
- * a rejection when it is refused, or a promise of either when it waits in the
- * queue. A rejected call holds nothing.
+ * Admit a call of `route` from `ws`, whose user data is `user`, that
+ * arrived at deadline tick `arrived`. Returns the connection's record (the
+ * permit) when the call may start now, a rejection when it is refused, or a
+ * promise of either when it waits in the queue. A rejected call holds
+ * nothing.
+ * @param {any} user
  * @param {object} ws
  * @param {RpcRoute} route
  * @param {number} arrived - `rpcTick` when the call arrived
  * @returns {RpcConn | RpcRejection | Promise<RpcConn | RpcRejection>}
  */
-export function _admitRpc(ws, route, arrived) {
-	const conn = ws === _lastWs ? /** @type {RpcConn} */ (_lastConn) : _connOf(ws);
+export function _admitRpc(user, ws, route, arrived) {
+	let conn = user?.[RPC_CONNECTION];
+	if (conn === undefined) conn = _connOf(user, ws);
 	if (conn.active < _connCap && route.active < route.cap && _active < _globalCap) {
 		conn.active++;
 		route.active++;
@@ -307,48 +356,45 @@ export function _admitRpc(ws, route, arrived) {
 }
 
 /**
- * The handler of an admitted call settled: give its permits back, retire its
- * signal so it never fires, and start what the queue can now run.
+ * The handler of an admitted call settled: give its permits back and start
+ * what the queue can now run. `ctx` is the call's context when its handler
+ * read the signal, else null; its signal is then retired and never fires.
  * @param {RpcRoute} route
  * @param {RpcConn} conn
- * @param {any} ctx - the call's context, or null when it was never built
+ * @param {any} opened
  */
-export function _releaseRpc(route, conn, ctx) {
+export function _releaseRpc(route, conn, opened) {
 	conn.active--;
 	route.active--;
 	_active--;
-	if (ctx !== null) {
-		ctx._rpcConn = null;
-		if (ctx._abortCtrl !== null) _retireCall(ctx, conn);
-	}
+	if (opened !== null) _retireCall(opened, conn);
 	if (_queue.length !== 0) _drain();
 }
 
 /**
- * The handler read `ctx.abortSignal` for the first time: create its
+ * A handler read `ctx.abortSignal` for the first time: create its
  * controller and register it for its deadline and its connection's close.
  * @param {any} ctx
+ * @param {RpcConn} conn
+ * @param {number} deadline - its deadline tick, -1 for none
  * @returns {AbortSignal}
  */
-export function _openCallSignal(ctx) {
+export function _openCallSignal(ctx, conn, deadline) {
 	const ctrl = new AbortController();
-	ctx._abortCtrl = ctrl;
-	ctx._abortSignal = ctrl.signal;
-	const conn = /** @type {RpcConn} */ (ctx._rpcConn);
-	const deadline = ctx._rpcDeadline;
 	if (conn.closed) {
 		ctrl.abort(new LiveError('CONNECTION_CLOSED', 'The connection closed'));
 	} else if (deadline !== -1 && deadline <= rpcTick) {
 		ctrl.abort(new LiveError('TIMEOUT', 'The call passed its deadline'));
 	} else {
-		(conn.calls || (conn.calls = new Set())).add(ctx);
+		_openSignals++;
+		(conn.calls || (conn.calls = new Map())).set(ctx, { ctrl, deadline });
 		if (deadline !== -1) {
 			let bucket = _buckets.get(deadline);
 			if (bucket === undefined) {
 				bucket = new Set();
 				_buckets.set(deadline, bucket);
 			}
-			bucket.add(ctx);
+			bucket.add(conn);
 			if (_ticker === null) _startTicker();
 		}
 	}
@@ -356,18 +402,13 @@ export function _openCallSignal(ctx) {
 }
 
 /**
- * Take a settled call's controller out of its connection and its deadline
- * bucket.
+ * Take a settled call's controller out of its connection, so neither its
+ * deadline nor its connection's close fires it.
  * @param {any} ctx
  * @param {RpcConn} conn
  */
 function _retireCall(ctx, conn) {
-	conn.calls?.delete(ctx);
-	const deadline = ctx._rpcDeadline;
-	if (deadline !== -1) {
-		const bucket = _buckets.get(deadline);
-		if (bucket !== undefined && bucket.delete(ctx) && bucket.size === 0) _buckets.delete(deadline);
-	}
+	if (conn.calls?.delete(ctx)) _openSignals--;
 }
 
 /** Start queued calls, oldest first, while their scopes have room. */
@@ -401,15 +442,12 @@ function _dropQueued(index, rejection) {
 /**
  * The connection closed: fire the signals its running calls read and drop its
  * queued calls. Running calls keep their permits until their handlers settle.
+ * @param {any} user - the socket's user data
  * @param {object} ws
  */
-export function _closeRpcConnection(ws) {
-	const conn = _conns.get(ws);
-	if (_lastWs === ws) {
-		_lastWs = null;
-		_lastConn = null;
-	}
-	if (conn === undefined) return;
+export function _closeRpcConnection(user, ws) {
+	const conn = _connOf(user, ws);
+	if (conn.closed) return;
 	conn.closed = true;
 	for (let i = _queue.length - 1; i >= 0; i--) {
 		if (_queue[i].conn === conn) _dropQueued(i, _CLOSED_WAITING);
@@ -417,10 +455,9 @@ export function _closeRpcConnection(ws) {
 	const calls = conn.calls;
 	conn.calls = null;
 	if (calls !== null) {
-		for (const ctx of calls) {
-			const deadline = ctx._rpcDeadline;
-			if (deadline !== -1) _buckets.get(deadline)?.delete(ctx);
-			ctx._abortCtrl.abort(new LiveError('CONNECTION_CLOSED', 'The connection closed'));
+		for (const call of calls.values()) {
+			_openSignals--;
+			call.ctrl.abort(new LiveError('CONNECTION_CLOSED', 'The connection closed'));
 		}
 	}
 	if (_queue.length !== 0) _drain();
@@ -436,9 +473,17 @@ function _onTick() {
 	const bucket = _buckets.get(tick);
 	if (bucket !== undefined) {
 		_buckets.delete(tick);
-		for (const ctx of bucket) {
-			ctx._rpcConn?.calls?.delete(ctx);
-			ctx._abortCtrl.abort(new LiveError('TIMEOUT', 'The call passed its deadline'));
+		// A bucket names the connections with a call due now; a call that
+		// settled since has left its connection's map and is not fired.
+		for (const conn of bucket) {
+			const calls = conn.calls;
+			if (calls === null) continue;
+			for (const [ctx, call] of calls) {
+				if (call.deadline !== tick) continue;
+				calls.delete(ctx);
+				_openSignals--;
+				call.ctrl.abort(new LiveError('TIMEOUT', 'The call passed its deadline'));
+			}
 		}
 	}
 	let deadlines = false;
@@ -506,9 +551,7 @@ export function _publishRpcGauges() {
 export function _rpcAdmissionSnapshot() {
 	const routes = {};
 	for (const [path, route] of _routes) routes[path] = { active: route.active, queued: route.queued, cap: route.cap };
-	let pendingSignals = 0;
-	for (const bucket of _buckets.values()) pendingSignals += bucket.size;
-	return { active: _active, queued: _queue.length, config: _config, routes, pendingSignals, buckets: _buckets.size, ticking: _ticker !== null };
+	return { active: _active, queued: _queue.length, config: _config, routes, openSignals: _openSignals, ticking: _ticker !== null };
 }
 
 /**
@@ -525,8 +568,7 @@ export function _resetRpcAdmission() {
 	_queue.length = 0;
 	_applyConfig();
 	_active = 0;
-	_lastWs = null;
-	_lastConn = null;
+	_openSignals = 0;
 	_buckets.clear();
 	_shown.clear();
 	if (_ticker !== null) clearIntervalTimer(_ticker);

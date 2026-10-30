@@ -1,5 +1,6 @@
 // @ts-check
 import { LiveError } from './live-error.js';
+import { _openRpcConnection } from './rpc-admission.js';
 import { assert } from '../shared/assert.js';
 import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { _IS_DEV } from './env.js';
@@ -231,6 +232,8 @@ export const pushHooks = {
 		if (!ctx || !ctx.platform) {
 			throw new Error('[svelte-realtime] pushHooks.open: missing platform on hook context');
 		}
+		// Declare the connection's RPC admission slot before any call reads it.
+		_openRpcConnection(ws.getUserData(), ws);
 		const platform = ctx.platform;
 
 		// Resolve and validate every identity before changing either registry. A

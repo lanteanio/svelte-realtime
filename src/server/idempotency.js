@@ -513,7 +513,10 @@ function _withLockDeadline(lock, key, fn, ctx, args, opts, maxExecutionMs) {
 				reject(error);
 				controller.abort(error);
 			}, maxExecutionMs);
-			try { return await fn({ ...ctx, lockSignal: signal, abortSignal: ctx.abortSignal }, ...args); }
+			// The copy reads the call's signal only when the handler does.
+			const locked = { ...ctx, lockSignal: signal };
+			Object.defineProperty(locked, 'abortSignal', { get: () => ctx.abortSignal, enumerable: true, configurable: true });
+			try { return await fn(locked, ...args); }
 			finally { clearTimer(timer); }
 		}, opts);
 		Promise.resolve(held).then(resolve, reject);

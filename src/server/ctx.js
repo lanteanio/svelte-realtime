@@ -626,12 +626,44 @@ export function _rerunCtx(ctx, kind) {
 }
 
 /**
+ * Bind a wire call's admission record and deadline tick to its context.
+ * @type {(ctx: LiveCallContext, conn: any, deadline: number) => void}
+ */
+export let _startCall;
+/**
+ * The call settled: unbind it, and return its context when the handler read
+ * the signal (so admission retires it), else null.
+ * @type {(ctx: LiveCallContext) => LiveCallContext | null}
+ */
+export let _endCall;
+
+/**
  * The context of one operation. A class rather than a literal so every ctx
  * shares one hidden class and `abortSignal` can be an accessor on the
  * prototype: a wire call creates its controller only when the handler reads
- * the signal. Field order is the hidden class; keep it fixed.
+ * the signal. Field order is the hidden class; keep it fixed. The call's
+ * admission state lives in private fields, so neither `{ ...ctx }` nor
+ * `Object.keys(ctx)` sees it and a copy does not keep the connection alive.
  */
-class LiveCallContext {
+export class LiveCallContext {
+	/** The call's admission record while it runs, else null. */
+	#conn = null;
+	/** The call's deadline tick, -1 for none. */
+	#deadline = -1;
+	/** The signal once read or set, else null. */
+	#signal = null;
+
+	static {
+		_startCall = (ctx, conn, deadline) => {
+			ctx.#conn = conn;
+			ctx.#deadline = deadline;
+		};
+		_endCall = (ctx) => {
+			ctx.#conn = null;
+			return ctx.#signal !== null ? ctx : null;
+		};
+	}
+
 	constructor(user, ws, contextPlatform, publish, cursor, scopedHelpers, helpers, skip, connectionId, requestId, platform, idempotencyKey, tenantId) {
 		this.user = user;
 		this.ws = ws;
@@ -698,12 +730,6 @@ class LiveCallContext {
 		// subscriber's behalf carries 'invalidateOn', 'staleAfterMs' or 'derived'
 		// here, so middleware can tell it apart from the call it serves.
 		this.rerun = null;
-		// RPC admission: the call's connection record while the call runs, its
-		// deadline tick, and its abort signal once read or set.
-		this._rpcConn = null;
-		this._rpcDeadline = -1;
-		this._abortCtrl = null;
-		this._abortSignal = null;
 	}
 
 	/**
@@ -712,13 +738,13 @@ class LiveCallContext {
 	 * never fires.
 	 */
 	get abortSignal() {
-		if (this._abortSignal !== null) return this._abortSignal;
-		if (this._rpcConn === null) return NEVER_ABORTED;
-		return _openCallSignal(this);
+		if (this.#signal !== null) return this.#signal;
+		if (this.#conn === null) return NEVER_ABORTED;
+		return (this.#signal = _openCallSignal(this, this.#conn, this.#deadline));
 	}
 
 	set abortSignal(value) {
-		this._abortSignal = value;
+		this.#signal = value;
 	}
 }
 

@@ -92,7 +92,7 @@ export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';
 import { configureForget, _resetForget, installForget } from './server/forget.js';
 export { configureForget, _resetForget };
-import { configureRpc, _validateRouteConcurrent, _closeRpcConnection, _rpcRoute, NEVER_ABORTED } from './server/rpc-admission.js';
+import { configureRpc, _validateRouteConcurrent, _openRpcConnection, _closeRpcConnection, _rpcRoute, NEVER_ABORTED } from './server/rpc-admission.js';
 export { configureRpc };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
@@ -4144,9 +4144,10 @@ const _firedUnsubscribes = new WeakMap();
 export function close(ws, { platform, subscriptions }) {
 	forgetDeliverySubscription(ws);
 	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
-	// Fire the signals the socket's running calls read and drop its queued
-	// calls; running calls keep their permits until their handlers settle.
-	_closeRpcConnection(ws);
+	// Refuse the socket's later calls, fire the signals its running calls read
+	// and drop its queued calls; running calls keep their permits until their
+	// handlers settle.
+	_closeRpcConnection(ws.getUserData(), ws);
 
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth

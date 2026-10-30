@@ -16,7 +16,7 @@ import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from 
 import { state, registry, guards, cronRegistry, _declaredRedact, _pendingSubscribeHooks, _topicWsCounts } from './state.js';
 import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
-import { _getCtxHelpers, _buildCtx } from './ctx.js';
+import { _getCtxHelpers, _buildCtx, _startCall, _endCall } from './ctx.js';
 import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './rate-limit.js';
 import { _recordRpcMetrics, _recordRpcDelivery, _recordRejectedRpc, _recordRpcOverload, _rpcClosedSockets } from './metrics.js';
 import { _shouldShed } from './admission.js';
@@ -1513,9 +1513,10 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 
 	// Occupancy admission: a call that cannot start waits in the bounded queue
 	// or is refused at once, and a refused call runs nothing.
+	const user = ws.getUserData();
 	const route = /** @type {any} */ (fn)[RPC_ROUTE] || _rpcRoute(path, fn);
 	const arrived = rpcTick;
-	let permit = _admitRpc(ws, route, arrived);
+	let permit = _admitRpc(user, ws, route, arrived);
 	if (/** @type {any} */ (permit).active === undefined) {
 		if (/** @type {any} */ (permit).reason === undefined) permit = await permit;
 		if (/** @type {any} */ (permit).active === undefined) {
@@ -1529,14 +1530,13 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 
 	let ctx;
 	try {
-		ctx = _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
+		ctx = _buildCtx(user, ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
 	} catch (err) {
-		// A closed socket or a tenant resolver can throw; the call then holds nothing.
+		// A tenant resolver can throw; the call then holds nothing.
 		_releaseRpc(route, conn, null);
 		throw err;
 	}
-	ctx._rpcConn = conn;
-	ctx._rpcDeadline = route.ticks === 0 ? -1 : arrived + route.ticks;
+	_startCall(ctx, conn, route.ticks === 0 ? -1 : arrived + route.ticks);
 	/** @type {{ topic: any, claimTopic: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} */
 	const _subscribedRef = { topic: null, claimTopic: null };
 	// Only a middleware can answer while the chain still runs; the chain's
@@ -1549,7 +1549,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 		settled() {
 			if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
 			if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
-			_releaseRpc(route, conn, ctx);
+			_releaseRpc(route, conn, _endCall(ctx));
 		}
 	} : undefined;
 
@@ -1678,7 +1678,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			});
 		return { id, ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' };
 	} finally {
-		if (!detached) _releaseRpc(route, conn, ctx);
+		if (!detached) _releaseRpc(route, conn, _endCall(ctx));
 	}
 }
 
@@ -1775,9 +1775,10 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		return;
 	}
 
+	const user = ws.getUserData();
 	const route = /** @type {any} */ (fn)[RPC_ROUTE] || _rpcRoute(path, fn);
 	const arrived = rpcTick;
-	let permit = _admitRpc(ws, route, arrived);
+	let permit = _admitRpc(user, ws, route, arrived);
 	if (/** @type {any} */ (permit).active === undefined) {
 		if (/** @type {any} */ (permit).reason === undefined) permit = await permit;
 		if (/** @type {any} */ (permit).active === undefined) {
@@ -1790,13 +1791,12 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 	let ctx;
 	try {
-		ctx = _buildCtx(ws.getUserData(), ws, platform, _getCtxHelpers(platform), null, null, requestId);
+		ctx = _buildCtx(user, ws, platform, _getCtxHelpers(platform), null, null, requestId);
 	} catch (err) {
 		_releaseRpc(route, conn, null);
 		throw err;
 	}
-	ctx._rpcConn = conn;
-	ctx._rpcDeadline = route.ticks === 0 ? -1 : arrived + route.ticks;
+	_startCall(ctx, conn, route.ticks === 0 ? -1 : arrived + route.ticks);
 
 	try {
 		let answer = await _runRpcChain(ctx, async () => {
@@ -1815,7 +1815,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			return { ok: true, data: result };
-		}, _hasMiddleware() ? { path, cancel() { detached = true; }, settled() { _releaseRpc(route, conn, ctx); } } : undefined);
+		}, _hasMiddleware() ? { path, cancel() { detached = true; }, settled() { _releaseRpc(route, conn, _endCall(ctx)); } } : undefined);
 		// Consumed only by an answer that succeeds, so a middleware refusal
 		// leaves the one-shot deprecation signal for a later call.
 		if (answer.ok !== false) {
@@ -1851,7 +1851,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, requestId, path);
 		}
 	} finally {
-		if (!detached) _releaseRpc(route, conn, ctx);
+		if (!detached) _releaseRpc(route, conn, _endCall(ctx));
 	}
 }
 

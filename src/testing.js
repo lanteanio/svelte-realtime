@@ -3,6 +3,7 @@ import { __register, __registerGuard, __registerCron, __registerDerived, __regis
 import { isStaleRow } from './shared/merge.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
 import { _noteTopicPublish } from './server/publish-helpers.js';
+import { _openRpcConnection } from './server/rpc-admission.js';
 
 /**
  * Build a `ctx`-shaped object suitable for direct unit tests of guards,
@@ -495,10 +496,14 @@ export function createTestEnv(options) {
 
 	/**
 	 * Create a fake connected user.
-	 * @param {any} userData - User data (like what upgrade() returns)
+	 * @param {any} upgradeData - User data (like what upgrade() returns)
 	 * @returns {TestClient}
 	 */
-	function connect(userData) {
+	function connect(upgradeData) {
+		// Every socket gets its own user data, copied from what upgrade
+		// returned, as the adapter does: two connections never share
+		// per-connection state.
+		const userData = _copyUpgradeData(upgradeData);
 		const subscribedTopics = new Set();
 		/** @type {Map<string, { resolve: Function, reject: Function }>} */
 		const pendingCalls = new Map();
@@ -554,6 +559,7 @@ export function createTestEnv(options) {
 			_onSend: null,
 			_sendHandlers
 		};
+		_openRpcConnection(userData, ws);
 
 		platform.connections++;
 		allConnections.push(ws);
@@ -909,3 +915,17 @@ export function createTestEnv(options) {
  * @property {(predicate: (value: any) => boolean, timeout?: number) => Promise<any>} waitFor
  * @property {(event: string, data: any) => void} simulatePublish
  */
+
+/**
+ * Copy upgrade data into one socket's own user data: the enumerable own keys,
+ * as the adapter copies them. A value that is not an object passes through.
+ * @param {any} source
+ */
+function _copyUpgradeData(source) {
+	if (source === null || typeof source !== 'object') return source;
+	const copy = {};
+	for (const key of Reflect.ownKeys(source)) {
+		if (Object.prototype.propertyIsEnumerable.call(source, key)) copy[key] = source[key];
+	}
+	return copy;
+}
