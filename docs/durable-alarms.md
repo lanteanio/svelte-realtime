@@ -32,6 +32,10 @@ Upgrade every durable store implementation to the complete contract, including t
 
 The Redis and PostgreSQL stores belong to `svelte-adapter-uws-extensions`. Deploy a compatible store release with the realtime release; `configureAlarm` rejects a store missing `nextGeneration` or `get` rather than guessing whether its deletes are conditional.
 
+## Renaming an alarmed stream
+
+Give every durable alarm a stable `alarm.id` before renaming its stream RPC path. The id is persisted beside the legacy path, and recovery resolves the id first, so an in-flight row survives a forward rename and rollback. Stage the id on every worker and keep the pre-rename release deployable until every alarm row written without the id has fired, been cancelled, or been explicitly drained. There is no framework maximum: a durable store may retain a future alarm indefinitely, and a pre-id worker can only understand the old path. An unresolved or duplicate id is retained, not claimed and dropped, and emits `alarm.recovery.unresolved` for operator disposition.
+
 ## Retained executions and explicit retry
 
 A scheduled row and a retained execution are separate records. `claim(topic, generation)` atomically moves the matching schedule into execution storage and returns `{ attempt }`, starting at one. It returns `null` when another worker already claimed or replaced the schedule. A newly scheduled generation can coexist with the earlier execution without either overwriting the other. If execution storage reaches its configured capacity, claiming must reject and leave the scheduled row intact; unresolved executions must never be evicted to make room.
