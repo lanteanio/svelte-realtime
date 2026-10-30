@@ -30,11 +30,12 @@ const _MAX_TIMER_MS = 2147483647;
 let _redrain = null;
 
 /**
- * No re-drain before this time (wall ms): the latest backoff or server hint a
- * refusal asked the queue head to wait. A set-aside call that comes due
+ * No re-drain of `scope` before `at` (wall ms): the latest backoff or server
+ * hint a refusal asked the queue head to wait. A set-aside call that comes due
  * earlier waits for it too, so the head is never retried early.
+ * @type {{ scope: any, at: number }}
  */
-let _redrainNotBefore = 0;
+let _redrainNotBefore = { scope: null, at: 0 };
 
 /**
  * Drain the current queue again after `delay` ms (no sooner than the latest
@@ -44,10 +45,12 @@ let _redrainNotBefore = 0;
  */
 function _scheduleRedrain(delay) {
 	if (clientState.isOffline || clientState.terminated) return;
-	const at = Math.max(now() + delay, _redrainNotBefore);
+	const floor = _redrainNotBefore.scope === _offlineScope() ? _redrainNotBefore.at : 0;
+	const at = Math.max(now() + delay, floor);
 	delay = at - now();
 	if (_redrain !== null) {
-		if (_redrain.at <= at) return;
+		// A wake armed before the latest backoff moves out to its end.
+		if (_redrain.at <= at && _redrain.at >= floor) return;
 		clearTimer(_redrain.handle);
 	}
 	_redrain = { at, handle: setTimer(() => {
@@ -57,7 +60,7 @@ function _scheduleRedrain(delay) {
 }
 
 function _cancelRedrain() {
-	_redrainNotBefore = 0;
+	_redrainNotBefore = { scope: null, at: 0 };
 	if (_redrain === null) return;
 	clearTimer(_redrain.handle);
 	_redrain = null;
@@ -265,8 +268,8 @@ async function _drainOfflineQueue() {
 		const settled = new Set();
 		/** @type {Set<OfflineEntry>} Calls set aside until their retryAt; still queued. */
 		const deferred = new Set();
-		/** @type {Set<OfflineEntry>} Calls an idempotency refusal holds the queue for. */
-		const held = new Set();
+		/** @type {Map<OfflineEntry, number>} Calls an idempotency refusal holds the queue for, and when. */
+		const held = new Map();
 		/**
 		 * The path and args a replay function gave a call in place of its own.
 		 * @type {Map<OfflineEntry, { path: string, args: any[] }>}
@@ -380,7 +383,7 @@ async function _drainOfflineQueue() {
 						}
 						// Held for the drain's wait once every refusal is in: with
 						// concurrent replay that is the longest of them.
-						held.add(entry);
+						held.set(entry, now());
 						cut = true;
 						retryIdempotency = true;
 						retryDelay = Math.max(retryDelay, wait);
@@ -571,8 +574,10 @@ async function _drainOfflineQueue() {
 			}
 		}
 
-		// Each held call waits as long as the drain does.
-		for (const entry of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + retryDelay;
+		// Each held call waits for the rest of the drain, then for its longest
+		// wait: that is the time it holds the queue.
+		const heldUntil = now() + retryDelay;
+		for (const [entry, refusedAt] of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + heldUntil - refusedAt;
 		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (closed()) cut = true;
@@ -638,7 +643,7 @@ async function _drainOfflineQueue() {
 		else {
 			_setUploading(false);
 			if (again) {
-				if (retryIdempotency) _redrainNotBefore = Math.max(_redrainNotBefore, at + retryDelay);
+				if (retryIdempotency) _redrainNotBefore = { scope, at: Math.max(_redrainNotBefore.scope === scope ? _redrainNotBefore.at : 0, at + retryDelay) };
 				_scheduleRedrain(retryDelay);
 			}
 		}

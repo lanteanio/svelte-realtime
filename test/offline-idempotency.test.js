@@ -469,4 +469,55 @@ describe('offline backoff around the hold and retention', () => {
 		expect(onReplayError).toHaveBeenCalledTimes(1);
 		expect(await calls[1]).toBe('b');
 	});
+
+	it('moves an earlier wake out past a hold that starts after it was armed', async () => {
+		await queued(['a', 'd', 'b']);
+		refuse(last('a'), 31000); await turn();
+		refuse(last('d'), 40000); await turn();
+		// a comes due while b is still out: the drain that picks it up starts
+		// with the wake for d already armed.
+		await vi.advanceTimersByTimeAsync(31500);
+		answer(last('b'), { ok: true, data: 'b' }); await turn();
+		expect(sent('a')).toBe(2);
+		refuse(last('a'), 20000); await turn();
+		await vi.advanceTimersByTimeAsync(19999);
+		expect(sent('a')).toBe(2); expect(sent('d')).toBe(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sent('a')).toBe(3);
+	});
+
+	it('counts the time a concurrent replay waited for the rest of its drain', async () => {
+		const { onReplayError } = await queued(['a', 'b'], { replay: 'concurrent' });
+		refuse(last('a')); await turn();
+		await vi.advanceTimersByTimeAsync(25000);
+		answer(last('b'), { ok: true, data: 'b' }); await turn();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(sent('a')).toBe(2);
+		// 25 s for b, then the 1 s backoff: another 5 s passes the hold.
+		refuse(last('a'), 5000); await turn();
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not hold a new scope to the backoff of the scope before it', async () => {
+		await queued(['a']);
+		refuse(last('a'), 25000); await turn();
+		const value = rows.get(stored()[0]);
+		rows.set('q:other:000000000001', { ...value, args: [{ value: 'o' }] });
+		client.configure({ offline: { queue: true, persist: persist(), persistKey: 'other' } }); await turn();
+		expect(sent('o')).toBe(1);
+		refuse(last('o')); await turn();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(sent('o')).toBe(2);
+	});
+
+	it('wakes a new scope\'s set-aside call on time after the scope before it backed off', async () => {
+		await queued(['a']);
+		refuse(last('a'), 25000); await turn();
+		const value = rows.get(stored()[0]);
+		rows.set('q:other:000000000001', { ...value, args: [{ value: 'o' }], retryAt: Date.now() + 5000 });
+		client.configure({ offline: { queue: true, persist: persist(), persistKey: 'other' } }); await turn();
+		expect(sent('o')).toBe(0);
+		await vi.advanceTimersByTimeAsync(4999); expect(sent('o')).toBe(0);
+		await vi.advanceTimersByTimeAsync(1); expect(sent('o')).toBe(1);
+	});
 });
