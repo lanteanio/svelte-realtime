@@ -237,18 +237,23 @@ describe('idempotency capacity preserves accepted effects', () => {
 		expect(effects.get('::quiet')).toBe(1);
 	});
 
-	it('names no wait while a caller at its share still has calls running', async () => {
+	it('names when a running call\'s result can expire, and admits once it has', async () => {
 		const gate = deferred(); gates.push(gate);
-		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => { if (key === 'slow') await gate.promise; return key; });
+		const long = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		const short = live.idempotent({ ttl: 60, keyFrom: (ctx, key) => key }, async (ctx, key) => { if (key === 'slow') await gate.promise; return key; });
 		const alice = { user: { id: 'alice' } };
-		for (let i = 1; i < TENANT; i++) await run(alice, 'k' + i);
-		const slow = run(alice, 'slow');
+		for (let i = 1; i < TENANT; i++) await long(alice, 'k' + i);
+		const slow = short(alice, 'slow');
 		await nextTurn();
-		const refusal = await run(alice, 'over').catch(error => error);
-		expect(refusal).toMatchObject(capacityError);
-		expect(refusal.retryAfter).toBeUndefined();
-		expect(refusal.message).toMatch(/still running/);
+		await expect(long(alice, 'over')).rejects.toMatchObject({ ...capacityError, retryAfter: 60000 });
+		clock += 1000;
 		gate.resolve(); await slow;
+		// The settled call keeps its slot, so the share is still full until its result expires.
+		await expect(long(alice, 'over')).rejects.toMatchObject({ ...capacityError, retryAfter: 60000 });
+		clock += 59999;
+		await expect(long(alice, 'over')).rejects.toMatchObject({ ...capacityError, retryAfter: 1 });
+		clock += 1;
+		await expect(long(alice, 'over')).resolves.toBe('over');
 	});
 
 	it('names the wait until the oldest result expires when a caller cannot give one up', async () => {
@@ -510,6 +515,40 @@ describe('idempotency capacity for alarms', () => {
 		store.seed('room', Date.now() - 1, { path: 'rooms/closing', tenantId: null });
 		await _pollAlarms();
 		expect(effects.get(null)).toBe(1);
+	});
+
+	async function fireAlarms(store, counts) {
+		for (const [tenantId, count] of Object.entries(counts)) {
+			for (let i = 0; i < count; i++) {
+				const room = tenantId === '' ? 'room' + i : '@t/' + tenantId + '/room' + i;
+				store.seed(room, Date.now() - 1, { path: 'rooms/closing', tenantId: tenantId === '' ? null : tenantId });
+			}
+		}
+		await _pollAlarms();
+	}
+
+	it('keeps the last tenth of the alarm pool for tenants holding fewer than ten', async () => {
+		const effects = new Map();
+		const store = closingRoom(effects);
+		const big = {};
+		for (let t = 0; t < 9; t++) big['big' + t] = TENANT / 10;
+		await fireAlarms(store, big);
+		await fireAlarms(store, { x: 11, y: 9 });
+		expect(effects.get('x')).toBe(10);
+		expect(effects.get('y')).toBe(9);
+		const rest = {};
+		for (let t = 0; t < 8; t++) rest['z' + t] = 10;
+		await fireAlarms(store, { ...rest, w: 1 });
+		await fireAlarms(store, { v: 1 });
+		expect(effects.get('w')).toBe(1);
+		expect(effects.get('v')).toBeUndefined();
+	});
+
+	it('charges tenantless alarms under a tenant resolver to one bucket of a hundred', async () => {
+		const effects = new Map();
+		const store = closingRoom(effects);
+		await fireAlarms(store, { '': TENANT / 10 + 1 });
+		expect(effects.get(null)).toBe(TENANT / 10);
 	});
 
 	it('divides the alarm pool between tenants', async () => {

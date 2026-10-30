@@ -119,9 +119,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const pools = { cron: { limit: Math.max(1, reserve), count: 0 }, alarm: { limit: Math.max(1, reserve), count: 0 } };
 	const tenantCounts = new Map();
 	/**
-	 * @typedef {{ pkey: string, tenant: string | null, pool: { limit: number, count: number } | null, count: number, cachedCount: number, byTtl: Map<number, Set<string>>, results: Set<string> }} Principal
+	 * @typedef {{ pkey: string, tenant: string | null, pool: { limit: number, count: number } | null, count: number, cachedCount: number, byTtl: Map<number, Set<string>>, running: Map<number, number>, results: Set<string> }} Principal
 	 * byTtl: its committed keys by TTL, each set in commit (so expiry) order;
-	 * results: those it may give up.
+	 * running: how many of its calls still run, by TTL; results: the keys it may
+	 * give up.
 	 */
 	/** @type {Map<string, Principal>} */
 	const principals = new Map();
@@ -219,17 +220,20 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		serverState.metricsInstruments?.idempotencyCapacity?.inc({ outcome });
 	}
 
-	// Milliseconds until the first of a principal's cached results expires: the
-	// earliest its share can admit a key it cannot replace. Each TTL's keys sit
-	// in expiry order, so this reads one key per distinct TTL. Undefined while
-	// the principal also holds running keys, which can free a slot any moment.
+	// Milliseconds until the earliest of a principal's results can expire: a
+	// cached one, or the result of a running call committed now. That is the
+	// soonest its share can admit a key it cannot replace, unless a running call
+	// fails first. Each TTL's keys sit in commit order, which is expiry order
+	// while the wall clock does not step back, so this reads one key per
+	// distinct TTL; a backward step only makes the hint approximate.
 	function _retryAfter(owner, now) {
-		if (!owner || owner.cachedCount < owner.count) return undefined;
+		if (!owner) return undefined;
 		let first = Infinity;
 		for (const keys of owner.byTtl.values()) {
 			const entry = results.get(keys.values().next().value);
 			if (entry && entry.expiresAt < first) first = entry.expiresAt;
 		}
+		for (const ttl of owner.running.keys()) if (now + ttl < first) first = now + ttl;
 		return first === Infinity ? undefined : Math.max(0, Math.ceil(first - now));
 	}
 
@@ -296,8 +300,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					_recordCapacity('rejected');
 					if (pressure === _OWN_SHARE) {
 						const retryAfter = _retryAfter(principals.get(pkey), now);
-						if (retryAfter === undefined) throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store, partly with calls still running; the handler has not run. Retry once one of them settles.');
-						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after its oldest result expires.', { retryAfter });
+						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after retryAfter, the earliest one of its results can expire.', retryAfter === undefined ? undefined : { retryAfter });
 					}
 					throw new LiveError('IDEMPOTENCY_CAPACITY', 'The idempotency store is full; the handler has not run. Retry after capacity becomes available.');
 				}
@@ -316,7 +319,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		promise.catch(() => {});
 		inflight.set(key, promise);
 		let owner = principals.get(pkey);
-		if (!owner) { owner = { pkey, tenant, pool, count: 0, cachedCount: 0, byTtl: new Map(), results: new Set() }; principals.set(pkey, owner); }
+		if (!owner) { owner = { pkey, tenant, pool, count: 0, cachedCount: 0, byTtl: new Map(), running: new Map(), results: new Set() }; principals.set(pkey, owner); }
 		owner.count++;
 		keyOwners.set(key, owner);
 		if (pool) pool.count++;
@@ -324,11 +327,19 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 
 		let settled = false;
 		const ttlMs = ttlSec * 1000;
+		const runningOwner = owner;
+		runningOwner.running.set(ttlMs, (runningOwner.running.get(ttlMs) || 0) + 1);
+		const stopRunning = () => {
+			const left = runningOwner.running.get(ttlMs) - 1;
+			if (left > 0) runningOwner.running.set(ttlMs, left);
+			else runningOwner.running.delete(ttlMs);
+		};
 		return {
 			acquired: true,
 			async commit(value) {
 				if (settled) return;
 				settled = true;
+				stopRunning();
 				// Drop the cache write if this user was purged at-or-after this
 				// slot was acquired (within the grace window): the request was in
 				// flight when live.forget ran, so caching its result would
@@ -360,6 +371,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			async abort() {
 				if (settled) return;
 				settled = true;
+				stopRunning();
 				inflight.delete(key);
 				_releaseCapacity(key);
 				_releaseUser(idemUser, activeUser);

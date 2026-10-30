@@ -2119,8 +2119,8 @@ export namespace live {
 	 * up, a new key gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler
 	 * runs and every cached result stays, so no caller's traffic evicts another
 	 * caller's result. A refusal at the caller's own share carries `retryAfter`,
-	 * the milliseconds until its oldest result expires, unless some of its calls
-	 * are still running. Server-side calls without a user (`.load()`, form
+	 * the milliseconds until the earliest of its results can expire, counting a
+	 * running call as committed now. Server-side calls without a user (`.load()`, form
 	 * actions) share one identity-sized bucket per tenant that never replaces.
 	 * Cron jobs and alarms have pools of 1,000 of their own that callers cannot
 	 * fill; with a tenant resolver each tenant's alarms may hold 100 of theirs.
