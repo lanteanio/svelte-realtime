@@ -137,3 +137,51 @@ describe('stream resume against a replay buffer that cannot fill the gap', () =>
 		off();
 	});
 });
+
+describe('a stream whose events each replace the whole value', () => {
+	it('a flag resumes to the latest set the buffer holds when it kept only that one', async () => {
+		const topic = 'resume-flag-' + ++n;
+		const path = 'resumeflag' + n + '/mode';
+		__register(path, live.public(live.flag(topic, 'off')));
+		server.platform.replay = createReplay({ size: 1 });
+		const store = __stream(path, { merge: 'set' });
+		const off = store.subscribe(() => {});
+		await until(() => get(store) === 'off', 'the snapshot');
+		server.platform.replay.publish(server.platform, topic, 'set', 'a');
+		await until(() => get(store) === 'a', 'the live set');
+		simulateOffline();
+		await sleep(20);
+		// Two sets this replica never saw, as on a replica that booted after
+		// them: they reach the shared buffer but not its flag value, which is
+		// what its loader serves.
+		const elsewhere = { publish() { return true; } };
+		server.platform.replay.publish(elsewhere, topic, 'set', 'b');
+		server.platform.replay.publish(elsewhere, topic, 'set', 'c');
+		resumeOnline();
+		await until(() => get(store) === 'c', 'the resume').catch(() => {});
+		expect(get(store)).toBe('c');
+		off();
+	});
+
+	it('a set stream resumes from the newest value the buffer holds, whatever came before it', async () => {
+		const topic = 'resume-set-' + ++n;
+		const path = 'resumeset' + n + '/state';
+		let loads = 0;
+		__register(path, live.public(live.stream(topic, async () => { loads++; return { v: 'loader' }; }, { merge: 'set', replay: true })));
+		server.platform.replay = createReplay({ size: 1 });
+		const set = (value) => server.platform.replay.publish(server.platform, topic, 'set', value);
+		const store = __stream(path, { merge: 'set' });
+		const off = store.subscribe(() => {});
+		await until(() => get(store) !== undefined, 'the snapshot');
+		set({ v: 1 });
+		await until(() => get(store).v === 1, 'the live set');
+		simulateOffline();
+		await sleep(20);
+		set({ v: 2 });
+		set({ v: 3 });
+		resumeOnline();
+		await until(() => get(store).v === 3, 'the resume');
+		expect(loads).toBe(1);
+		off();
+	});
+});

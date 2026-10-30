@@ -887,18 +887,23 @@ function _settleClaimBarriers(ws, topic, fn) {
  * no hole and reach at least the sequence read before them. A buffer trimmed
  * past the cursor returns a later suffix; a buffer that lost its history (a
  * restart, an eviction) returns nothing while its sequence is behind the
- * cursor. Both answer with the loader instead, which replaces the view.
+ * cursor. Both answer with the loader instead, which replaces the view. Each
+ * event of a `set` stream replaces the whole value, so there a hole does not
+ * matter: entries after the cursor, in order, whose last one reaches the
+ * current sequence carry the value (a `live.flag` buffer keeps one entry).
  * @param {unknown} missed
  * @param {number} clientSeq
  * @param {unknown} currentSeq
+ * @param {string | undefined} merge
  * @returns {number | null}
  */
-function _replayFilledTo(missed, clientSeq, currentSeq) {
+function _replayFilledTo(missed, clientSeq, currentSeq, merge) {
 	if (!Array.isArray(missed) || typeof currentSeq !== 'number' || !Number.isSafeInteger(clientSeq) || currentSeq < clientSeq) return null;
+	const whole = merge === 'set';
 	let last = clientSeq;
-	for (let i = 0; i < missed.length; i++) {
-		const entry = missed[i];
-		if (entry === null || typeof entry !== 'object' || entry.seq !== last + 1) return null;
+	for (const entry of missed) {
+		if (entry === null || typeof entry !== 'object' || !Number.isSafeInteger(entry.seq)) return null;
+		if (whole ? entry.seq <= last : entry.seq !== last + 1) return null;
 		last = entry.seq;
 	}
 	return last >= currentSeq ? last : null;
@@ -1281,7 +1286,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 			// has to come back from the buffer for the replay to fill the gap.
 			const currentSeq = await platform.replay.seq(topic);
 			const missed = await platform.replay.since(topic, clientSeq);
-			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq);
+			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq, streamOpts.merge);
 			if (filledTo !== null) {
 				armReloads();
 				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: filledTo, replay: true };

@@ -4670,7 +4670,7 @@ How it works:
 
 ### Three-tier reconnect with `delta.fromSeq`
 
-For seq-based reconnects of a stream without a replay buffer, `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. A stream with one resumes from the buffer, and a gap the buffer cannot cover goes to the loader rather than to this hook. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
+For seq-based reconnects of a stream without a replay buffer, `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. A stream with one resumes from the buffer, and a gap the buffer cannot cover, or a buffer read that fails, goes to the loader rather than to this hook; declaring both `replay` and `delta.fromSeq` warns in dev. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
@@ -4679,7 +4679,6 @@ export const auditFeed = live.stream(
   {
     merge: 'crud',
     key: 'id',
-    replay: true,
     delta: {
       fromSeq: async (sinceSeq) => {
         const events = await db.auditEvents.where('seq', '>', sinceSeq).orderBy('seq').limit(500);
@@ -4692,7 +4691,7 @@ export const auditFeed = live.stream(
 );
 ```
 
-Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.fromSeq(clientSeq)` (this hook, only for a stream without a replay buffer) -> full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, answers with the loader. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks them without extra plumbing.
+Resolution order on reconnect-with-seq: a stream with a replay buffer resumes from it (bounded, fast) or from the loader; a stream without one calls `delta.fromSeq(clientSeq)` (this hook) and falls back to a full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, answers with the loader. A `merge: 'set'` stream, `live.flag` included, needs only the newest event, reaching the current sequence: each one replaces the whole value. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks them without extra plumbing.
 
 ### Replay
 

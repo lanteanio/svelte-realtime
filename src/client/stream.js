@@ -298,19 +298,23 @@ const _ORDER_MARKS_MAX = 4;
  * entries must run on from the cursor without a hole, and its sequence must
  * not be behind the cursor. A buffer trimmed past the cursor answers with a
  * later suffix, and one whose sequence restarted behind it with nothing;
- * applying either would leave the view on a stale base. The answer's sequence
- * may be ahead of its last entry: an older server reads it after the entries,
- * and what was published in between reaches the client live.
+ * applying either would leave the view on a stale base. Each event of a `set`
+ * stream replaces the whole value, so there the entries only have to come
+ * after the cursor and in order: the last one is the value. The answer's
+ * sequence may be ahead of its last entry: an older server reads it after the
+ * entries, and what was published in between reaches the client live.
  * @param {any} response
  * @param {unknown} cursor the `seq` the subscribe resumed from
+ * @param {string} merge
  */
-function _replayContinues(response, cursor) {
+function _replayContinues(response, cursor, merge) {
 	if (typeof cursor !== 'number') return true;
 	if (!Array.isArray(response.data)) return false;
+	const whole = merge === 'set';
 	let last = cursor;
 	for (const evt of response.data) {
-		if (evt == null || evt.seq === undefined) continue;
-		if (evt.seq !== last + 1) return false;
+		if (evt == null || evt.seq == null) continue;
+		if (whole ? !(evt.seq > last) : evt.seq !== last + 1) return false;
 		last = evt.seq;
 	}
 	return typeof response.seq !== 'number' || response.seq >= cursor;
@@ -2006,7 +2010,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// stream subscribes again without a cursor and takes the full
 				// snapshot. A `delta.fromSeq` answer carries the application's own
 				// numbering and is applied as given.
-				if (response.replay === true && response.fromSeq !== true && !_replayContinues(response, ticket.request.seq)) {
+				if (response.replay === true && response.fromSeq !== true && !_replayContinues(response, ticket.request.seq, response.merge || merge)) {
 					if (topicUnsub) { topicUnsub(); topicUnsub = null; }
 					_jitter.clear();
 					_dropResumeCursors();

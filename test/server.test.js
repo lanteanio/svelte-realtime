@@ -12353,6 +12353,53 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		expect(response.seq).toBe(current);
 	});
 
+	it('a replay buffer whose seq() fails answers from the loader and never calls fromSeq', async () => {
+		const ws = mockWs();
+		const platform = mockPlatform();
+		let sinceCalls = 0;
+		platform.replay = {
+			seq: async () => { throw new Error('replay store down'); },
+			since: async () => { sinceCalls++; return []; }
+		};
+		const fromSeqCalls = [];
+		const stream = live.stream('tt/seq-fails', async () => [{ id: 1, name: 'fresh' }], {
+			merge: 'crud', key: 'id', replay: true,
+			delta: { fromSeq: async (s) => { fromSeqCalls.push(s); return [{ event: 'created', data: { id: 99 }, seq: 50 }]; } }
+		});
+		__register('tt/seq-fails', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/seq-fails', id: 't2s', args: [], stream: true, seq: 5 }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0].data;
+		expect(response.ok).toBe(true);
+		expect(fromSeqCalls).toEqual([]);
+		expect(sinceCalls).toBe(0);
+		expect(response.replay).toBe(false);
+		expect(response.data).toEqual([{ id: 1, name: 'fresh' }]);
+		expect(response.seq).toBeUndefined();
+	});
+
+	it.each([
+		['replays the newest set across a hole', 9, [{ seq: 9, event: 'set', data: 'c' }], true],
+		['answers from the loader when the newest set is behind the current sequence', 10, [{ seq: 9, event: 'set', data: 'c' }], false],
+		['answers from the loader when the sets are out of order', 8, [{ seq: 9, event: 'set', data: 'c' }, { seq: 8, event: 'set', data: 'b' }], false]
+	])('a set stream %s', async (_, current, missed, replayed) => {
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform.replay = { seq: async () => current, since: async () => missed };
+		const stream = live.stream('tt/set-resume', async () => 'loader', { merge: 'set', replay: true });
+		__register('tt/set-resume', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tt/set-resume', id: 't2v', args: [], stream: true, seq: 5 }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0].data;
+		expect(response.replay).toBe(replayed);
+		expect(response.data).toEqual(replayed ? missed : 'loader');
+		expect(response.seq).toBe(replayed ? 9 : current);
+	});
+
 	it('tier 2: without a replay buffer, delta.fromSeq fills the gap', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();

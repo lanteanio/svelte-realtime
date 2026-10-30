@@ -3732,6 +3732,63 @@ describe('__stream() reconnect cursor time-check', () => {
 		unsub();
 	});
 
+	it('applies a replay with an event that carries no sequence between numbered ones', async () => {
+		// A buffer entry with `seq: null` was published without a number; it
+		// is not a hole in the numbered run.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('nullseq/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, {
+			ok: true, topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 12, replay: true,
+			data: [{ seq: 11, event: 'created', data: { id: 2 } }, { seq: null, event: 'created', data: { id: 3 } }, { seq: 12, event: 'created', data: { id: 4 } }]
+		});
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+
+		unsub();
+	});
+
+	it('applies a set replay whose newest value follows a hole', async () => {
+		// Each event of a set stream replaces the whole value, so the sets the
+		// buffer no longer holds do not show.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('sethole/state', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: 'a', topic: 'sethole-topic', merge: 'set', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'set', data: 'd' }], topic: 'sethole-topic', merge: 'set', seq: 13, replay: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toBe('d');
+
+		unsub();
+	});
+
 	it('keeps a live frame that arrived during a delta.fromSeq answer whatever the answer numbers its events', async () => {
 		// The application numbers the bridged events; a live frame with the
 		// same number is a different event and stays.

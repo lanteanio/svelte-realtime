@@ -2181,7 +2181,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "1ae7d1b71b217103c3e8812f6d965db0bb63593c454daf34eed84a6111f7371d",
+			"fingerprint": "5d1765dc2424e2cf5f6ae4aba224dafc4d63219711cf133353d20b9a59819873",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Delta sync and replay > Three-tier reconnect with `delta.fromSeq`",
