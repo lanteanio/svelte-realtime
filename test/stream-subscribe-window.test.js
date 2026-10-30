@@ -1,10 +1,11 @@
 // A stream subscribe registers the socket for the topic before its loader
 // runs, and the response leaves only after the loader (in a batch, after every
-// loader in the batch). Frames published in between reach a client that has no
-// store for the topic yet, and the adapter client drops frames for such a
-// topic. These tests run the real client, the installed adapter client and the
-// adapter's test server, park one loader of a batch, publish into the open
-// window, and assert what the other stream shows.
+// loader in the batch). The adapter client drops frames for a topic with no
+// store, so a frame published in between survives only because the attach
+// frame installs the stream's listener before the loader runs. These tests run
+// the real client, the installed adapter client and the adapter's test server,
+// park one loader of a batch, publish into the open window, and assert what
+// the other stream shows.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';

@@ -1372,8 +1372,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		id, ok: true, data: resultData, topic, merge: streamOpts.merge,
 		key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max,
 		hasMore: undefined, cursor: undefined, seq: undefined,
-		version: undefined, schemaVersion: undefined, replay: undefined,
-		derived: /** @type {any} */ (fn).__isDerived || undefined
+		version: undefined, schemaVersion: undefined, replay: undefined
 	};
 
 	if (isPaginated) {

@@ -7635,7 +7635,7 @@ describe('live.flag()', () => {
 // - derived stream RPC response -----------------------------------------------
 
 describe('derived stream handleRpc response', () => {
-	it('includes derived: true in the response', async () => {
+	it('answers like any stream, without a derived marker the client would treat as stale', async () => {
 		const derivedFn = live.derived(['source1'], async () => {
 			return { total: 99 };
 		});
@@ -7652,7 +7652,7 @@ describe('derived stream handleRpc response', () => {
 		expect(platform.sent.length).toBe(1);
 		expect(platform.sent[0].data.ok).toBe(true);
 		expect(platform.sent[0].data.data).toEqual({ total: 99 });
-		expect(platform.sent[0].data.derived).toBe(true);
+		expect(platform.sent[0].data).not.toHaveProperty('derived');
 	});
 
 	it('uses stream path as topic instead of __derived: prefix', async () => {

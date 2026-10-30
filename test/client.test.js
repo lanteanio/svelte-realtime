@@ -1463,6 +1463,23 @@ describe('__stream() mutate queue-replay correctness', () => {
 	// drain promotes it. A snapshot that arrives meanwhile has to become that
 	// server state, or the drain puts the pre-snapshot baseline back.
 
+	it('hydrate during a pending mutate keeps the hydrated rows after it settles', async () => {
+		const ctx = await setupCrudStream('qr/rehydrate', 't-rehydrate', [{ id: 1, name: 'A' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+		// A load re-run (an invalidation) hands the page fresh rows.
+		ctx.store.hydrate([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		simulateTopicMessage('t-rehydrate', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		// The key index follows the hydrated rows.
+		simulateTopicMessage('t-rehydrate', { event: 'updated', data: { id: 3, name: 'Cee' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'Cee' }, { id: 'n', name: 'N' }]);
+		ctx.unsub();
+	});
+
 	it('mutate before the first load keeps the loaded rows after it settles', async () => {
 		const store = __stream('qr/early-click', { merge: 'crud', key: 'id' });
 		const values = [];

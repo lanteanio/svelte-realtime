@@ -1954,10 +1954,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		pending.set(id, {
 			stream: true,
 			/**
-			 * Early attach: the server named the wire topic before subscribing the
-			 * socket. Bind it and install the live listener now, while
-			 * `initialLoaded` is still false, so every frame the subscription
-			 * delivers ahead of the snapshot lands in `buffer` instead of being
+			 * Early attach: the server named the wire topic after subscribing the
+			 * socket and before running the loader. Bind it and install the live
+			 * listener now, while `initialLoaded` is still false, so every frame
+			 * the snapshot read cannot see lands in `buffer` instead of being
 			 * dropped for want of a store. The response then replays the buffer
 			 * over the snapshot as it always has.
 			 * @param {string | null | undefined} attachTopic
@@ -2983,7 +2983,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					);
 				}
 			}
-			currentValue = _prepareRows(initialData);
+			if (_optimisticQueue.length > 0) {
+				// Hydrated rows are server state: the queue drain promotes
+				// `_serverValue`, so writing only the display would lose them.
+				_serverValue = _prepareRows(initialData);
+				_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
+				currentValue = _replayQueue().value;
+			} else {
+				currentValue = _prepareRows(initialData);
+			}
 			_rebuildIndex();
 			store.set(currentValue);
 			return this;
