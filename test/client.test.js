@@ -1463,6 +1463,23 @@ describe('__stream() mutate queue-replay correctness', () => {
 	// drain promotes it. A snapshot that arrives meanwhile has to become that
 	// server state, or the drain puts the pre-snapshot baseline back.
 
+	it('hydrate during a pending mutate keeps the hydrated rows after it settles', async () => {
+		const ctx = await setupCrudStream('qr/rehydrate', 't-rehydrate', [{ id: 1, name: 'A' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'n', name: 'N' } });
+		// A load re-run (an invalidation) hands the page fresh rows.
+		ctx.store.hydrate([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		simulateTopicMessage('t-rehydrate', { event: 'created', data: { id: 'n', name: 'N' } });
+		d.resolve();
+		await m;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'C' }, { id: 'n', name: 'N' }]);
+		// The key index follows the hydrated rows.
+		simulateTopicMessage('t-rehydrate', { event: 'updated', data: { id: 3, name: 'Cee' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A2' }, { id: 3, name: 'Cee' }, { id: 'n', name: 'N' }]);
+		ctx.unsub();
+	});
+
 	it('mutate before the first load keeps the loaded rows after it settles', async () => {
 		const store = __stream('qr/early-click', { merge: 'crud', key: 'id' });
 		const values = [];
@@ -3614,6 +3631,220 @@ describe('__stream() reconnect cursor time-check', () => {
 		// The displayed data survived the reconnect - no blank flash before the
 		// rehydrate lands (the cursor drop keeps currentValue).
 		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		// The rehydrate replaces the view: row 2 was deleted while the socket
+		// was down and is gone, not kept from the stale base.
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 1 }, { id: 3 }], topic: 'stale-topic', merge: 'crud', key: 'id', seq: 40 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3 }]);
+		simulateTopicMessage('stale-topic', { event: 'updated', data: { id: 3, v: 1 }, seq: 41 });
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3, v: 1 }]);
+
+		unsub();
+	});
+
+	it('replaces the view when the server cannot fill the gap and answers a full snapshot', async () => {
+		// The cursor is in range, but the server's replay buffer no longer
+		// reaches back to it, so it answers with the loader's snapshot instead
+		// of a replay. The client must not merge that onto the stale rows.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('evicted/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ id: 2, v: 1 }, { id: 4 }], topic: 'evicted-topic', merge: 'crud', key: 'id', seq: 90, replay: false });
+		expect(values[values.length - 1]).toEqual([{ id: 2, v: 1 }, { id: 4 }]);
+
+		unsub();
+	});
+
+	it.each([
+		['starts past the cursor', [{ seq: 13, event: 'deleted', data: { id: 1 } }], 13],
+		['is empty while the sequence went back', [], 2]
+	])('discards a replay that %s and subscribes again for a full snapshot', async (_, replayed, seq) => {
+		// An older server answers whatever its buffer holds after the cursor:
+		// a later suffix, or nothing once the buffer restarted. Applying that
+		// would keep the rows the client held.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('suffix/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: replayed, topic: 'suffix-topic', merge: 'crud', key: 'id', seq, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		simulateRpcResponse(sent3.id, { ok: true, data: [{ id: 2 }, { id: 3 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq });
+		expect(values[values.length - 1]).toEqual([{ id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
+	it('applies a replay whose sequence is ahead of its last event', async () => {
+		// An older server reads the sequence after the events: one published in
+		// between is not in the answer and reaches the client live.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('ahead/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 11, event: 'created', data: { id: 2 } }], topic: 'ahead-topic', merge: 'crud', key: 'id', seq: 12, replay: true });
+		simulateTopicMessage('ahead-topic', { event: 'created', data: { id: 3 }, seq: 12 });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
+	it('applies a replay with an event that carries no sequence between numbered ones', async () => {
+		// A buffer entry with `seq: null` was published without a number; it
+		// is not a hole in the numbered run. Only an older server sends such a
+		// reply: a current one answers from the loader when an entry has no
+		// number.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('nullseq/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }], topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, {
+			ok: true, topic: 'nullseq-topic', merge: 'crud', key: 'id', seq: 12, replay: true,
+			data: [{ seq: 11, event: 'created', data: { id: 2 } }, { seq: null, event: 'created', data: { id: 3 } }, { seq: 12, event: 'created', data: { id: 4 } }]
+		});
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+
+		unsub();
+	});
+
+	it('applies a set replay whose newest value follows a hole', async () => {
+		// Each event of a set stream replaces the whole value, so the sets the
+		// buffer no longer holds do not show.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('sethole/state', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: 'a', topic: 'sethole-topic', merge: 'set', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'set', data: 'd' }], topic: 'sethole-topic', merge: 'set', seq: 13, replay: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toBe('d');
+
+		unsub();
+	});
+
+	it('discards a latest replay with a hole even when it reaches the answer sequence', async () => {
+		// Only a set stream skips a hole; a latest stream would lose the
+		// events in it.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('latesthole/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'push', data: { n: 4 } }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 13, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ n: 1 }]);
+
+		unsub();
+	});
+
+	it('keeps a live frame that arrived during a delta.fromSeq answer whatever the answer numbers its events', async () => {
+		// The application numbers the bridged events; a live frame with the
+		// same number is a different event and stays.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('bridged/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { attach: true, topic: 'bridged-topic' });
+		simulateTopicMessage('bridged-topic', { event: 'push', data: { n: 3 }, seq: 12 });
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 12, event: 'push', data: { n: 2 } }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 12, replay: true, fromSeq: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
 
 		unsub();
 	});

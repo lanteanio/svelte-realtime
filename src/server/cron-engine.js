@@ -1,4 +1,5 @@
 // @ts-check
+import { _bgClock, _bgCount, _bgDone, _bgInflight } from './background-metrics.js';
 import { state, cronRegistry, _lazyQueue } from './state.js';
 import { _IS_DEV } from './env.js';
 import { now as runtimeNow, wallEpoch, effectiveTimeZone, setTimer, clearTimer } from '../shared/runtime.js';
@@ -442,6 +443,7 @@ export async function _tickCron(_at, epoch) {
 		// invariant that one cron path runs at most once concurrently.
 		if (_cronRunning.has(path)) {
 			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path, status: 'skipped' });
+			_bgCount('cron', 'skipped');
 			continue;
 		}
 		_cronRunning.add(path);
@@ -451,6 +453,10 @@ export async function _tickCron(_at, epoch) {
 
 		// Match - run the job
 		(async () => {
+			let startedAt = 0;
+			let ran = false;
+			/** @type {'ok' | 'error'} */
+			let outcome = 'error';
 			try {
 				if (!state.cronPlatform) {
 					// Warn at most once per process lifetime. Without dedup,
@@ -465,6 +471,7 @@ export async function _tickCron(_at, epoch) {
 						console.warn(`[svelte-realtime] Cron registered but no platform captured. Wire setCronPlatform(platform) from your hooks.ws.js init({ platform }) hook (svelte-adapter-uws >= 0.5.0-next.15) or from your open(ws, platform) hook on older adapters.\n  See: https://svti.me/cron`);
 						_cronPlatformWarnFired = true;
 					}
+					_bgCount('cron', 'skipped');
 					return;
 				}
 				// Cluster fan-out is the framework's publish wrap's job
@@ -476,6 +483,9 @@ export async function _tickCron(_at, epoch) {
 				// here, which eliminates the 0.5.6 double-relay class of
 				// bugs by construction.
 				const cronPub = state.cronPlatform;
+				ran = true;
+				_bgInflight('cron', 1);
+				startedAt = _bgClock();
 				const _h = _getCtxHelpers(cronPub);
 				const ctx = _buildCtx(null, null, cronPub, _h, null);
 				const result = await entry.fn(ctx);
@@ -497,6 +507,7 @@ export async function _tickCron(_at, epoch) {
 					}
 				}
 				if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path, status: 'ok' });
+				outcome = 'ok';
 			} catch (err) {
 				if (state.metricsInstruments) {
 					state.metricsInstruments.cronCount.inc({ path, status: 'error' });
@@ -515,6 +526,10 @@ export async function _tickCron(_at, epoch) {
 					attributes: { path, error: diagnosticErrorMessage(err), help: 'https://svti.me/cron' }
 				});
 			} finally {
+				if (ran) {
+					_bgInflight('cron', -1);
+					_bgDone('cron', startedAt, outcome);
+				}
 				_cronRunning.delete(path);
 				_exitInFlight();
 			}

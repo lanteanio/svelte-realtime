@@ -54,7 +54,9 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 		writeFileSync(file, moduleSource('late'));
 		await expect.poll(() => globalThis[key].entered, { timeout: 10000 }).toBe(true);
 		writeFileSync(file, moduleSource('newer'));
-		await expect.poll(() => pending.length).toBe(2);
+		// The second edit reaches the plugin through the real file watcher, like
+		// the waits above, so it gets the same allowance.
+		await expect.poll(() => pending.length, { timeout: 10000 }).toBe(2);
 		expect(timers).toHaveLength(2);
 		for (const timer of timers) timer.fire();
 		await expect.poll(() => outcomes.length).toBe(2);

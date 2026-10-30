@@ -18,6 +18,7 @@ import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { _getCtxHelpers, _buildPersistedCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
+import { _bgClock, _bgCount, _bgDone, _bgInflight } from './background-metrics.js';
 import { _validTenantId, _topicInTenant } from './tenant.js';
 
 /**
@@ -360,6 +361,7 @@ async function _fireClaim(wireTopic, entry) {
 		if (_IS_DEV) {
 			console.warn('[svelte-realtime] alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + entry.misfireMs + '); skipped.');
 		}
+		_bgCount('alarm', 'skipped');
 		if (entry.store) await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, true);
 		return;
 	}
@@ -416,9 +418,14 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 			_alarmPlatformWarnFired = true;
 			console.warn('[svelte-realtime] alarm fired but no platform captured. Wire setCronPlatform(platform) from your hooks.ws.js init({ platform }) hook.');
 		}
+		_bgCount('alarm', 'skipped');
 		return false;
 	}
 
+	_bgInflight('alarm', 1);
+	const startedAt = _bgClock();
+	/** @type {'ok' | 'error'} */
+	let outcome = 'error';
 	try {
 		const _h = _getCtxHelpers(platform);
 		// Fresh ws-less server ctx (the room may be empty), exactly like a cron tick.
@@ -440,6 +447,7 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 				idempotencyKey: fire.generation ? JSON.stringify([wireTopic, fire.generation]) : null });
 		}
 		await onAlarm(ctx);
+		outcome = 'ok';
 		return true;
 	} catch (err) {
 		if (state.serverErrorHandler) {
@@ -455,6 +463,9 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 			attributes: { errorClass: 'handler', durable: !!fire?.generation }
 		});
 		return false;
+	} finally {
+		_bgInflight('alarm', -1);
+		_bgDone('alarm', startedAt, outcome);
 	}
 }
 
@@ -575,6 +586,7 @@ async function _pollAlarmRows() {
 			if (_IS_DEV) {
 				console.warn('[svelte-realtime] recovered alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + misfireMs + '); skipped.');
 			}
+			_bgCount('alarm', 'skipped');
 			await _settleAlarm(store, wireTopic, row.generation, claimed.attempt, true);
 			continue;
 		}

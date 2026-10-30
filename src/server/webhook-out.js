@@ -5,6 +5,9 @@ import { deliverWebhook, redactUrl } from 'svelte-adapter-uws/plugins/webhooks';
 import { now, monotonicNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { state } from './state.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
+import { _createLane, _laneSubmit, LANE_FAILED, WEBHOOK_MAX_CONCURRENT, WEBHOOK_MAX_QUEUED } from './work-lane.js';
+import { LiveError } from './live-error.js';
+import { _bgRetryExhausted, _bgDeadLetterChanged } from './background-metrics.js';
 
 // The generic SSRF-gated, retrying delivery engine now lives in the adapter
 // plugin (svelte-adapter-uws/plugins/webhooks); this module is the realtime glue
@@ -196,7 +199,33 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 		? await deliverWebhook(entry.config, topic, event, data, hooks)
 		: await _deliverySlot.run(slot, () => deliverWebhook(_keyedConfig(entry.config), topic, event, data, hooks));
 	if (r.ok) return;
+	// Every attempt the retry policy allows was made and the last one failed. A
+	// delivery the gate, the breaker, the retry budget or a non-retryable status
+	// stopped earlier is not counted.
+	if (r.attempts >= _retryAttempts(entry.config)) _bgRetryExhausted('webhook');
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
+	// The capture runs inside the webhook's lane slot, so a slow dead-letter
+	// store holds this webhook's slots instead of piling up pending writes.
+	await _captureDeadLetter(entry, slot, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+	return LANE_FAILED;
+}
+
+/**
+ * The attempt limit the delivery engine applies for this config: `retry.attempts`
+ * when it is a positive integer, else the engine's default of 3.
+ * @param {any} config
+ */
+function _retryAttempts(config) {
+	const n = config.retry?.attempts;
+	return Number.isInteger(n) && n > 0 ? n : 3;
+}
+
+/**
+ * Keep an undelivered event in the dead-letter store, when one is configured.
+ * `slot` holds what the delivery recorded for its capture key, or null when
+ * the store does not honor keys.
+ */
+async function _captureDeadLetter(entry, slot, topic, event, data, attempts, err, startedAt, traceContext) {
 	const store = state.webhookDeadLetter;
 	if (!store) return;
 	/** @type {Record<string, unknown>} */
@@ -205,8 +234,8 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 		topic,
 		event,
 		data,
-		attempts: r.attempts | 0,
-		error: String((r.err && r.err.message) || r.err || 'unknown'),
+		attempts: attempts | 0,
+		error: String((err && err.message) || err || 'unknown'),
 		failedAt: now(),
 		startedAt,
 		traceContext
@@ -224,16 +253,98 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	if (key !== null) rec.key = key;
 	for (let attempt = 0; ; attempt++) {
 		try {
-			await store.add(rec);
+			const added = store.add(rec);
+			if (added && typeof added.then === 'function') await added;
+			else _bgDeadLetterChanged();
 			return;
-		} catch (err) {
+		} catch (e) {
 			if (key === null || attempt >= _DEAD_LETTER_RETRY_MS.length) {
-				_reportDeadLetterFailure(entry, err);
+				_reportDeadLetterFailure(entry, e);
 				return;
 			}
 			await new Promise((resolve) => setTimer(resolve, _DEAD_LETTER_RETRY_MS[attempt]));
 		}
 	}
+}
+
+/**
+ * The webhook's delivery lane (its bulkhead), created on first use from the
+ * registration's `maxConcurrent` / `maxQueued`. One lane per registration, so
+ * a stalled endpoint holds only its own slots.
+ * @param {any} entry
+ */
+function _webhookLane(entry) {
+	const config = entry.config;
+	const lane = _createLane('webhook', {
+		maxConcurrent: config.maxConcurrent ?? WEBHOOK_MAX_CONCURRENT,
+		maxQueued: config.maxQueued ?? WEBHOOK_MAX_QUEUED
+	}, (topic, event, data, platform) => _fireWebhookOut(entry, topic, event, data, platform), {
+		onReject: (l, topic, event, data) => _webhookOverflow(entry, l, topic, event, data),
+		onOverflowEnded: _webhookOverflowEnded
+	});
+	lane.id = entry.id;
+	return entry.lane = lane;
+}
+
+/**
+ * Hand one source event to an outbound webhook. Delivery starts off the publish
+ * path; an event past the webhook's limits is not sent and goes to `onFailure`
+ * (attempts 0).
+ * @param {any} entry
+ * @param {string} topic
+ * @param {string} event
+ * @param {any} data
+ * @param {any} platform
+ */
+export function _submitWebhookOut(entry, topic, event, data, platform) {
+	_laneSubmit(entry.lane || _webhookLane(entry), topic, event, data, platform);
+}
+
+/**
+ * Fail one rejected event. It stays out of the dead-letter store: an overflow
+ * burst rejects events by the thousand, and the store's capacity belongs to
+ * the deliveries that failed, which such a burst would otherwise evict.
+ */
+function _webhookOverflow(entry, lane, topic, event, data) {
+	const first = lane.rejected === 1;
+	const err = new LiveError('OVERLOADED',
+		"outbound webhook '" + entry.id + "' is at its limit (maxConcurrent " + lane.maxConcurrent + ', maxQueued ' + lane.maxQueued +
+		'); the event was not delivered.');
+	const config = entry.config;
+	// onFailure is the per-event report. The global handler and the operational
+	// event hear the first rejection of an overflow episode only.
+	if (config.onFailure) {
+		try {
+			const r = config.onFailure(err, event, data, 0);
+			if (r && typeof r.then === 'function') r.catch(() => {});
+		} catch { /* swallow listener errors */ }
+	} else if (first && state.serverErrorHandler) {
+		try { state.serverErrorHandler('webhook', err); } catch {}
+	}
+	if (first) {
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.webhook',
+			event: 'webhook.delivery.overflow',
+			severity: 'warn',
+			dataClass: 'operational',
+			message: 'An outbound webhook is at its concurrency and queue limits; new events are not delivered.',
+			attributes: { webhookId: entry.id, maxConcurrent: lane.maxConcurrent, maxQueued: lane.maxQueued }
+		});
+	}
+}
+
+/** @param {any} lane @param {number} rejected */
+function _webhookOverflowEnded(lane, rejected) {
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.webhook',
+		event: 'webhook.delivery.overflow.ended',
+		severity: 'info',
+		dataClass: 'operational',
+		message: 'An outbound webhook queue is back to half its limit after rejecting events.',
+		attributes: { webhookId: lane.id, rejected }
+	});
 }
 
 export async function _fireWebhookOut(entry, topic, event, data, platform) {

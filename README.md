@@ -329,11 +329,11 @@ export const addTodo = live(async (ctx, text) => {
 {/each}
 ```
 
-**Ordering writes to one row.** By default crud is last-writer-by-arrival: each client applies `created`, `updated` and `deleted` in the order its socket delivers them. Two replicas publishing absolute values for one row can reach two clients in opposite orders, and a client that receives the older value last keeps it. An event's `seq` cannot fix this: it numbers delivery per subscriber (the resume cursor), so one event can carry different seqs on different clients. Name a monotonic field the publisher sets, such as a counter from the shared store, with `rowVersion: 'rev'`: a `created` or `updated` row whose version is not greater than the held row's is dropped, and a `deleted` below it is ignored. Versions compare as numbers or as strings; strings compare character by character, so `'10'` sorts before `'9'`: zero-pad string versions to a fixed width (`'0009'`, `'0010'`) or use numbers. A row without a comparable version applies as before, and a deleted row's version goes with it. A wall-clock timestamp is not enough: two writes a client must order often share a millisecond.
+**Ordering writes to one row.** By default crud is last-writer-by-arrival: each client applies `created`, `updated` and `deleted` in the order its socket delivers them. Two replicas publishing absolute values for one row can reach two clients in opposite orders, and a client that receives the older value last keeps it. Live events are applied in the order they arrive, and an event delivered twice is applied twice; `seq` only moves the resume cursor, which keeps the highest sequence seen until the next subscribe answer sets it. An event that arrives after a later one and is still in flight when the socket drops is therefore skipped by the next resume. Name a monotonic field the publisher sets, such as a counter from the shared store, with `rowVersion: 'rev'`: a `created` or `updated` row whose version is not greater than the held row's is dropped, and a `deleted` below it is ignored. Versions compare as numbers or as strings; strings compare character by character, so `'10'` sorts before `'9'`: zero-pad string versions to a fixed width (`'0009'`, `'0010'`) or use numbers. A row without a comparable version applies as before, and a deleted row's version goes with it, so a `created` repeated after its `deleted` brings the row back. A wall-clock timestamp is not enough: two writes a client must order often share a millisecond. `set` and `latest` have no such option: a `set` stream shows the value that arrived last, and a `latest` stream lists a repeated event again.
 
 ### latest
 
-Ring buffer of the last N events. Good for activity feeds and logs.
+Ring buffer of the last N events. Good for activity feeds and logs. An event published while the loader runs reaches the client both in the snapshot and live, and is listed twice; give events an id and dedupe on it where that matters.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const activity = live.stream('activity', async (ctx) => {
@@ -2638,7 +2638,7 @@ Single-instance setups without a registry continue to throw `LiveError('NOT_FOUN
 
 ## Prometheus metrics
 
-Opt-in instrumentation for RPC calls, stream subscriptions, and cron executions. Zero overhead if not called.
+Opt-in instrumentation for RPC calls, stream subscriptions, and background work. Zero overhead if not called.
 
 `live.metrics(registry)` is a one-time setup call. The top of `src/hooks.ws.{js,ts}` is a natural place, since it loads once when the server boots. Pair it with the `createMetrics()` registry from `svelte-adapter-uws-extensions/prometheus`:
 
@@ -2666,56 +2666,7 @@ app.get('/metrics', metrics.handler);
 
 The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, preserving that range independently of the extensions registry's configured defaults. The registry's generic default uses fractional seconds through 1 s. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
 
-### Registered metrics
-
-- `svelte_realtime_rpc_total` - RPC call count by path and status
-- `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
-- `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
-- `svelte_realtime_stream_subscriptions` - active stream subscription gauge
-- `svelte_realtime_cron_total` - cron execution count by path and status
-- `svelte_realtime_cron_errors_total` - cron errors by path
-- `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
-- `svelte_realtime_webhook_dead_letter_failures_total` - failed webhook deliveries the dead-letter store could not persist (see "Dead-letter queue")
-
-### Cohort-stratified metrics - never trust the aggregate
-
-An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC execution series carries the caller's cohort label:
-<!-- doc-code: ambient names="live" -->
-```js
-live.metrics(registry, {
-  // Classified ONCE per connection from whatever your upgrade hook stashed
-  // on the connection's user data. Keep the cardinality SMALL.
-  cohort: (userData) => `${userData.deviceClass}-${userData.netClass}` // 'desktop-fast', 'mobile-3g', ...
-});
-```
-
-Distinct labels are bounded at 16 (overflow folds into `'other'`; a pre-identification guard path or a throwing classifier reads `'unknown'`). The unlabeled aggregate stays derivable by summing - dashboard the per-cohort series first and the aggregate as context, not the other way around.
-
-### Per-subsystem performance budgets
-
-Declare how long a subsystem is ALLOWED to take, measure what it ACTUALLY takes, and let the dashboard render budget vs actual over time - the drift is the early warning, the exceeded counter is the alert:
-<!-- doc-code: ambient names="live" -->
-```js
-const tickBudget = live.perfBudget('tick', 8); // 8ms per game tick
-
-// Per iteration - either wrap:
-tickBudget.measure(() => runTick());
-// ...or record a duration you already have:
-tickBudget.track(elapsedMs);
-```
-
-Emits `svelte_realtime_perf_budget_seconds` (gauge - the declaration), `svelte_realtime_perf_actual_seconds` (histogram), and `svelte_realtime_perf_budget_exceeded_total` (counter), all labeled by `subsystem`. Requires `live.metrics()` first.
-
-### Pause-aware lifeline `/metrics`
-
-A `/metrics` handler that serializes the registry inline competes with whatever is melting the event loop - exactly when you need the numbers most, the scrape adds work or stalls. The lifeline decouples them: the registry is pre-serialized on a background interval into an in-memory snapshot, and the admin route serves THAT string in O(1):
-<!-- doc-code: ambient names="live" -->
-```js
-live.metrics(registry, { lifeline: true }); // or { lifeline: { intervalMs: 5000 } }
-```
-
-`GET <adminPath>/metrics` (behind the same fail-closed `realtime({ admin })` auth gate as `/dlq` and `/introspect`) answers with the snapshot; its age rides the `x-snapshot-age-ms` header, so the scraper can tell a fresh read from a wedged renderer. Requires a registry with `serialize()` - the extensions `createMetrics()` qualifies. The plain `app.get('/metrics', metrics.handler)` mount above remains fine for normal operation; the lifeline is the degraded-day path.
+The [metrics reference](docs/metrics.md) lists every registered series and covers cohort-stratified RPC series (`cohort`), per-subsystem performance budgets (`live.perfBudget`) and the pause-aware lifeline scrape (`lifeline`). Cron, alarms, polls, derived streams, effects, outbound webhooks and dead-letter replays report through one bounded schema, the `svelte_realtime_background_*` series described in [Background work metrics](docs/background-metrics.md) and exported as `BACKGROUND_METRICS`.
 
 ### Push, not poll
 
@@ -3291,6 +3242,15 @@ export const orderNotifications = live.effect(['orders'], async (event, data, pl
 ```
 
 Effects are server-only. They fire whenever a matching topic publishes and cannot be subscribed to from the client.
+
+Each effect runs at most `maxConcurrent` calls at once (default 32) and queues at most `maxQueued` more (default 10000) in publish order, so a stalled handler cannot pile up unbounded work. A publish that finds both full is the effect's overflow, set by `overflow`:
+
+- `'reject'` (default): that call is skipped. The first skip of an overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits a `reactive.effect.overflow` event, and the episode ends once the queue is back to half of `maxQueued`; every skip counts in `svelte_realtime_background_total{kind="effect",result="rejected"}`.
+- `'coalesce'`: the new call replaces the newest waiting one, for effects where only the latest event matters (a cache refresh, a recount).
+
+A call still pending `timeoutMs` after it started (default 30000) gives its slot back, so a handler that never settles cannot stall the effect for good; the handler keeps running, its late result is ignored (a late rejection is still reported through `onError`), and the release reaches `onError('effect', err)` with code `TIMEOUT`. A released call no longer holds a slot, so the next call runs alongside it: past its deadline `maxConcurrent: 1` is no longer a mutex. Pass `timeoutMs: Infinity` to an effect whose calls must never overlap. Released calls count against a total of twice `maxConcurrent` calls alive: the effect starts a new call only while fewer than that are running, so an effect whose calls never settle stops starting calls until one settles. That shows as rising `svelte_realtime_background_queued` and `svelte_realtime_background_oldest_age_seconds` for `kind="effect"`, and as `OVERLOADED` rejections once `maxQueued` calls wait.
+
+Pass `Infinity` to lift a limit or the deadline, for example `live.effect(['orders'], sendReceipt, { maxConcurrent: 4, maxQueued: 500 })`.
 
 ---
 
@@ -4402,7 +4362,7 @@ import { createCrdtCluster } from 'svelte-adapter-uws-extensions/redis/crdt';
 platform.crdt = createCrdtCluster(redisClient);   // alongside platform.redis / platform.presence
 ```
 
-That is the whole wiring. The document layer detects `platform.crdt` and routes through it automatically: every instance keeps its own replica and serves its own subscribers (no extra hop), every edit relays so all replicas converge, and a cold-joining instance pulls the latest from a live peer. One instance at a time writes a topic's snapshot (a per-topic lease), and it writes its replica's full state at write time, so instances never store divergent snapshots side by side. When the lease moves to another instance, that replica replaces the stored snapshot without merging it first. Relays are how replicas converge, so the incoming writer persists the state its peers agreed on; an edit that only the previous writer held (its relay was lost) does not survive the handover. Without it the document family still works - it just runs single-instance, which is correct on one process and divergent across a cluster.
+That is the whole wiring. The document layer detects `platform.crdt` and routes through it automatically: every instance keeps its own replica and serves its own subscribers (no extra hop), every edit relays so all replicas converge, and a cold-joining instance pulls the latest from a live peer. One instance at a time writes a topic's snapshot (a per-topic lease), and it writes its replica's full state at write time, so instances never store divergent snapshots side by side. When the lease moves to another instance, the new writer first merges the stored snapshot into its replica and passes what that adds to its subscribers and peers, so an edit that only the previous writer held (its relay was lost) survives the handover. That merge needs a coordinator that reports fresh leases (`acquirePersistDetailed`); with one that only offers `acquirePersist`, the new writer replaces the stored snapshot with the state its peers agreed on, and such an edit is lost. Without it the document family still works - it just runs single-instance, which is correct on one process and divergent across a cluster.
 
 Requires Svelte 5 (the stores are rune classes) and svelte-adapter-uws 0.6.0-next.25 or newer.
 
@@ -4538,7 +4498,9 @@ The freshness check is what closes capture-replay: without it any observed (body
 | `allow` | - | Allowlisted hostnames for `urlMode: 'allowlist'`. |
 | `validateUrl` | - | Additional restriction `(url) => boolean \| Promise<boolean>`, ANDed with the built-in guard on every hop. Narrows only. |
 | `resolve` | `node:dns` | Custom DNS resolver `(hostname) => address \| address[] \| Promise<...>` for the pin. |
-| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect). |
+| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect, or an event past the limits below). |
+| `maxConcurrent` | `64` | Deliveries in flight at once for this webhook. A delivery keeps its slot through its retries, backoff and timeouts, so the webhook carries at most `maxConcurrent` events per delivery time: 128 events/s to a 500 ms endpoint, about 2 events/s to one that times out on all 3 default attempts. With a leader only the leader delivers, so this is the cluster's ceiling. `Infinity` lifts the limit. |
+| `maxQueued` | `10000` | Events waiting for a delivery slot. An event past both limits is not sent: `onFailure(err, event, data, 0)` receives a `LiveError` with code `OVERLOADED` (without `onFailure`, the first rejection of an episode reaches `onError('webhook', err)`). The dead-letter queue does not keep it, so an overflow burst never evicts failed deliveries; keep it from `onFailure` if it must be replayed. |
 
 ### Dead-letter queue
 
@@ -4708,7 +4670,7 @@ How it works:
 
 ### Three-tier reconnect with `delta.fromSeq`
 
-For seq-based reconnects where the bounded replay buffer cannot satisfy the gap (the client's `lastSeenSeq` is older than the oldest entry in the buffer), `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
+For seq-based reconnects of a stream without a replay buffer, `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. A stream with one resumes from the buffer, and a gap the buffer cannot cover, or a buffer read that fails, goes to the loader rather than to this hook; declaring both `replay` and `delta.fromSeq` warns in dev. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
@@ -4717,7 +4679,6 @@ export const auditFeed = live.stream(
   {
     merge: 'crud',
     key: 'id',
-    replay: true,
     delta: {
       fromSeq: async (sinceSeq) => {
         const events = await db.auditEvents.where('seq', '>', sinceSeq).orderBy('seq').limit(500);
@@ -4730,7 +4691,7 @@ export const auditFeed = live.stream(
 );
 ```
 
-Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.fromSeq(clientSeq)` (this hook) -> full rehydrate via the loader (always safe). Returning `[]` signals "nothing missed" (client no-op). Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks correctly without extra plumbing.
+Resolution order on reconnect-with-seq: a stream with a replay buffer resumes from it (bounded, fast) or from the loader; a stream without one calls `delta.fromSeq(clientSeq)` (this hook) and falls back to a full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, answers with the loader. A `merge: 'set'` stream, `live.flag` included, needs only the newest event, reaching the current sequence: each one replaces the whole value. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks them without extra plumbing.
 
 ### Replay
 

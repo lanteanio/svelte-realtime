@@ -8,7 +8,7 @@ beforeEach(() => { _resetCoalesceRegistry(); _resetTransformRegistry(); _resetRe
 afterEach(() => { env?.cleanup(); _resetCoalesceRegistry(); _resetTransformRegistry(); _resetRedactRegistry(); _resetTenantResolver(); });
 function setup(topic, options = {}) {
   env = createTestEnv();
-  env.platform.relayCoalesced = vi.fn();
+  env.platform.relayCoalesced = vi.fn(() => true);
   env.platform.sendCoalesced = vi.fn(() => true);
   const stream = live.stream(topic, () => null, { merge: 'set', coalesceBy: value => value.id, transform: value => ({ price: value.price }), ...options });
   env.register('prices', { stream, write: live((ctx, destination, value) => ctx.publish(destination, 'set', value)) });
@@ -31,6 +31,37 @@ describe('declared coalescing', () => {
     await expect(publisher.call('prices/write', 'quotes', { id: 'asset', price: 5 })).resolves.toBe(true);
     expect(publish).toHaveBeenCalledWith('quotes', 'set', { id: 'asset', price: 5 }, undefined);
     expect(env.platform.sendCoalesced).not.toHaveBeenCalled();
+  });
+
+  it('publishes plainly without a local subscriber when the relay reaches no other worker', async () => {
+    const { publisher } = setup('quotes');
+    env.platform.relayCoalesced.mockReturnValue(false);
+    const publish = vi.spyOn(env.platform, 'publish');
+    await expect(publisher.call('prices/write', 'quotes', { id: 'asset', price: 5 })).resolves.toBe(true);
+    expect(env.platform.relayCoalesced).toHaveBeenCalledExactlyOnceWith('quotes', 'set', { price: 5 }, 'asset');
+    expect(publish).toHaveBeenCalledWith('quotes', 'set', { id: 'asset', price: 5 }, undefined);
+    expect(env.platform.sendCoalesced).not.toHaveBeenCalled();
+  });
+
+  it.each([[true], [undefined]])('does not also publish plainly when the relay answers %s', async answer => {
+    const { publisher } = setup('quotes');
+    env.platform.relayCoalesced.mockReturnValue(answer);
+    const publish = vi.spyOn(env.platform, 'publish');
+    await expect(publisher.call('prices/write', 'quotes', { id: 'asset', price: 6 })).resolves.toBe(true);
+    expect(env.platform.relayCoalesced).toHaveBeenCalledOnce();
+    expect(publish).not.toHaveBeenCalledWith('quotes', expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it('keeps coalescing onto a local subscriber when the relay reaches no other worker', async () => {
+    const { publisher } = setup('quotes');
+    env.platform.relayCoalesced.mockReturnValue(false);
+    const reader = env.connect({ id: 'reader' });
+    await reader.subscribe('prices/stream').waitFor(value => value === null);
+    const publish = vi.spyOn(env.platform, 'publish');
+    await publisher.call('prices/write', 'quotes', { id: 'asset', price: 7 });
+    expect(env.platform.sendCoalesced).toHaveBeenCalledTimes(1);
+    expect(env.platform.sendCoalesced.mock.calls[0][1]).toMatchObject({ key: 'quotes\0asset', data: { price: 7 } });
+    expect(publish).not.toHaveBeenCalledWith('quotes', expect.anything(), expect.anything(), expect.anything());
   });
 
   it.each(['disconnect', 'unsubscribe'])('keeps the declaration after the last %s and uses the new socket after reconnect', async ending => {

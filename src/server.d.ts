@@ -13,6 +13,45 @@ export const PRESSURE_REASONS: readonly [
 	'MEMORY'
 ];
 
+/** A metric descriptor of the background work schema. */
+export interface BackgroundMetricDescriptor<T extends 'counter' | 'histogram' | 'gauge', L extends readonly string[]> {
+	readonly type: T;
+	readonly name: string;
+	readonly help: string;
+	readonly labelNames: L;
+}
+
+/**
+ * The background work metric schema: one set of series for cron, alarm, poll,
+ * derived, effect, outbound webhook and dead-letter work in this package and
+ * for the durable jobs and tasks of svelte-adapter-uws-extensions. `kind` and
+ * `result` take only the listed values, and no label carries a topic, path,
+ * tenant, user or payload. Every producer registers these exact descriptors
+ * and reports only its own kinds. See docs/background-metrics.md.
+ */
+export const BACKGROUND_METRICS: {
+	readonly kinds: readonly ['cron', 'alarm', 'poll', 'derived', 'effect', 'webhook', 'dlq', 'job', 'task'];
+	readonly results: readonly ['ok', 'error', 'timeout', 'skipped', 'rejected', 'coalesced'];
+	/** Items by how they ended. */
+	readonly total: BackgroundMetricDescriptor<'counter', readonly ['kind', 'result']>;
+	/** Run time in seconds of items that finished (`ok`, `error`). */
+	readonly duration: BackgroundMetricDescriptor<'histogram', readonly ['kind', 'result']> & { readonly buckets: readonly number[] };
+	/** Items running in this process. */
+	readonly inflight: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Items waiting to start. */
+	readonly queued: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Age in seconds of the oldest waiting item, 0 when none waits. */
+	readonly oldestAge: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Items that failed on the last attempt their retry policy allows. */
+	readonly retriesExhausted: BackgroundMetricDescriptor<'counter', readonly ['kind']>;
+};
+
+/** The `kind` label of the background work metrics. */
+export type BackgroundWorkKind = (typeof BACKGROUND_METRICS.kinds)[number];
+
+/** The `result` label of the background work count and duration. */
+export type BackgroundWorkResult = (typeof BACKGROUND_METRICS.results)[number];
+
 /** Validated W3C distributed-trace carrier. */
 export interface OperationTraceContext {
 	readonly traceparent: string;
@@ -821,14 +860,15 @@ export interface StreamOptions extends LiveOptions {
 	 *   since that version. Useful when the data shape has a coarse
 	 *   version stamp (e.g., a `last_modified_at` aggregate).
 	 *
-	 * - **Seq-based delta** (`fromSeq`): the user-provided bridge for the
-	 *   middle tier of three-tier reconnect. When the bounded replay buffer
-	 *   cannot satisfy the gap (clientSeq is older than the oldest entry),
-	 *   the server calls `fromSeq(clientSeq)` to fetch missed events from
-	 *   the durable store (e.g., Postgres). Resolution order:
+	 * - **Seq-based delta** (`fromSeq`): the user-provided bridge for a
+	 *   stream without a replay buffer. On a resume the server calls
+	 *   `fromSeq(clientSeq)` to fetch missed events from the durable store
+	 *   (e.g., Postgres). Resolution order:
 	 *
-	 *   1. Replay buffer (bounded, fast) - if `replay: true` is set.
-	 *   2. `delta.fromSeq(clientSeq)` - this hook.
+	 *   1. Replay buffer (bounded, fast) - if `replay: true` is set and the
+	 *      platform exposes `platform.replay`. A gap the buffer cannot cover
+	 *      goes to the loader, not to this hook; declaring both warns in dev.
+	 *   2. `delta.fromSeq(clientSeq)` - this hook, for a stream without one.
 	 *   3. Full rehydrate via the loader (always safe).
 	 *
 	 *   Returning `null`/`undefined` falls through to rehydrate. Returning
@@ -841,8 +881,8 @@ export interface StreamOptions extends LiveOptions {
 		/** Return only the items that changed since `sinceVersion`. Return null to force full refetch. */
 		diff?(sinceVersion: any): any[] | Promise<any[] | null> | null;
 		/**
-		 * Bridge tier for seq-based reconnect. Called when the replay buffer
-		 * cannot satisfy a gap. Returns the events the client missed, or
+		 * Bridge tier for seq-based reconnect of a stream without a replay
+		 * buffer. Returns the events the client missed, or
 		 * `null`/`undefined` to fall through to full rehydrate.
 		 *
 		 * @example
@@ -1233,6 +1273,15 @@ export interface MetricsRegistry {
 	gauge(opts: { name: string; help: string; labelNames?: string[] }): {
 		inc(): void;
 		dec(): void;
+		/**
+		 * Write a value, labelled or not. The background work gauges, the lock
+		 * waiter gauge and the performance budget gauge are written this way;
+		 * a gauge without it leaves them empty.
+		 */
+		set?: {
+			(value: number): void;
+			(labels: Record<string, string | number>, value: number): void;
+		};
 	};
 }
 
@@ -2775,9 +2824,13 @@ export namespace live {
 	 * Create a server-side reactive side effect.
 	 * Effects fire when source topics publish. Fire-and-forget - no data, no topic.
 	 *
+	 * Each effect runs at most `maxConcurrent` calls at once and queues at most
+	 * `maxQueued` more in publish order; a publish past both limits follows
+	 * `overflow`.
+	 *
 	 * @param sources - Topic names to watch
 	 * @param fn - Async function called on each matching publish
-	 * @param options - Debounce settings
+	 * @param options - Debounce and concurrency settings
 	 *
 	 * @example
 	 * ```js
@@ -2791,7 +2844,7 @@ export namespace live {
 	function effect(
 		sources: string[],
 		fn: (event: string, data: any, platform: Platform) => void | Promise<void>,
-		options?: { debounce?: number }
+		options?: EffectOptions
 	): Function;
 
 	/**
@@ -2981,9 +3034,14 @@ export namespace live {
 
 	/**
 	 * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
-	 * subscriptions, and cron executions. Disabled until called. RPC delivery
+	 * subscriptions, and background work. Disabled until called. RPC delivery
 	 * outcomes are separate from execution: delivered, backpressure, closed,
 	 * or exception. Delivery acceptance is not a client acknowledgement.
+	 *
+	 * Background work (cron, alarm, poll, derived, effect, outbound webhook and
+	 * dead-letter replay) is reported through the `svelte_realtime_background_*`
+	 * series described by {@link BACKGROUND_METRICS}. Their gauges are written
+	 * with `set`, so a registry gauge without it leaves them empty.
 	 *
 	 * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
 	 * See the README "Prometheus metrics" section for a working example
@@ -3932,9 +3990,12 @@ export interface DocConfig {
 	 * the schedule. `load` returns the stored full-state bytes for a cold
 	 * topic (or null for a brand-new document); `store` persists the
 	 * compacted full-state bytes. Omit for a purely in-memory document.
+	 * `info.signal` aborts when the document is erased or torn down while
+	 * the load runs. In a cluster, a new persist lease holder also calls
+	 * `load` to merge the stored snapshot before its first write.
 	 */
 	persist?: {
-		load?: (topic: string) => Promise<Uint8Array | number[] | null | undefined> | Uint8Array | number[] | null | undefined;
+		load?: (topic: string, info: { signal: AbortSignal }) => Promise<Uint8Array | number[] | null | undefined> | Uint8Array | number[] | null | undefined;
 		store?: (topic: string, bytes: Uint8Array) => Promise<void> | void;
 	};
 	/** Persist this long after the last edit (ms). @default 2000 */
@@ -3985,6 +4046,60 @@ export interface WebhookHandler {
 	__isWebhook: true;
 	/** Handle an incoming webhook request. */
 	handle(req: { body: string; headers: Record<string, string>; platform: Platform }): Promise<{ status: number; body?: string }>;
+}
+
+/**
+ * Options for `live.effect()`.
+ */
+export interface EffectOptions {
+	/** Wait this many milliseconds after the last publish and run once with that publish. */
+	debounce?: number;
+	/**
+	 * Handler calls running at once. An integer >= 1, or `Infinity`.
+	 * @default 32
+	 */
+	maxConcurrent?: number;
+	/**
+	 * Calls waiting for a slot, started in publish order. An integer >= 0, or
+	 * `Infinity`.
+	 * @default 10000
+	 */
+	maxQueued?: number;
+	/**
+	 * What happens to a publish that finds the effect at both limits.
+	 * - `'reject'`: the call is skipped and counted in
+	 *   `svelte_realtime_background_total{kind="effect",result="rejected"}`. The
+	 *   first skip of an overflow episode reaches `onError('effect', err)` as a
+	 *   `LiveError` with code `OVERLOADED` and emits `reactive.effect.overflow`.
+	 *   The episode ends once the queue is back to half of `maxQueued`, when
+	 *   `reactive.effect.overflow.ended` reports its count; the next skip
+	 *   starts a new episode.
+	 * - `'coalesce'`: the call replaces the newest waiting call, so the effect
+	 *   still sees the latest event. Needs `maxQueued >= 1`.
+	 * @default 'reject'
+	 */
+	overflow?: 'reject' | 'coalesce';
+	/**
+	 * Milliseconds a call may stay pending before its slot is given back, so a
+	 * handler that never settles cannot hold the effect's slots for good. The
+	 * slot is released between `timeoutMs` and 1.25 x `timeoutMs` after the
+	 * call started; the handler is not stopped and its late result is ignored,
+	 * though a late rejection still reaches `onError`.
+	 * The next call then runs alongside the released one, so past its deadline
+	 * `maxConcurrent: 1` is no longer a mutex: use `Infinity` for an effect
+	 * whose calls must never overlap. Released calls count against a total of
+	 * twice `maxConcurrent` calls alive: an effect whose calls never settle
+	 * stops starting calls until one settles, which shows as rising queued and
+	 * oldest-age gauges and as `OVERLOADED` once `maxQueued` calls wait.
+	 * Released calls count in
+	 * `svelte_realtime_background_total{kind="effect",result="timeout"}` and
+	 * stay in `svelte_realtime_background_inflight` until they settle; every
+	 * deadline check that releases calls reaches `onError('effect', err)` as a
+	 * `LiveError` with code `TIMEOUT` and emits `reactive.effect.timeout` with
+	 * their count. An integer from 100 to 2147483647, or `Infinity`.
+	 * @default 30000
+	 */
+	timeoutMs?: number;
 }
 
 /**
@@ -4096,6 +4211,30 @@ export interface OutboundWebhookConfig {
 	 * credentials. May return a promise (it is detached, not awaited).
 	 */
 	onFailure?: (err: Error, event: string, data: any, attempts: number) => void | Promise<void>;
+	/**
+	 * Deliveries of this webhook in flight at once. A delivery holds its slot
+	 * through its retries, their backoff and every per-attempt timeout, so the
+	 * webhook carries at most `maxConcurrent` events per delivery time: 128
+	 * events/s at the default to an endpoint that answers in 500 ms, about 2
+	 * events/s to one that times out on all 3 default attempts of 10 s. With a
+	 * leader configured only the leader delivers, so this is the ceiling of the
+	 * whole cluster. An integer >= 1, or `Infinity`.
+	 * @default 64
+	 */
+	maxConcurrent?: number;
+	/**
+	 * Events waiting for a delivery slot. An event past both limits is not
+	 * sent: `onFailure` receives a `LiveError` with code `OVERLOADED` and
+	 * `attempts` 0, and it counts in
+	 * `svelte_realtime_background_total{kind="webhook",result="rejected"}`. It
+	 * is not written to the dead-letter store, which keeps the events whose
+	 * delivery failed, so an overflow burst cannot evict them; keep rejected
+	 * events from `onFailure` when they must be replayed. Without `onFailure`, the
+	 * first rejection of an overflow episode reaches `onError('webhook', err)`.
+	 * An integer >= 0, or `Infinity`.
+	 * @default 10000
+	 */
+	maxQueued?: number;
 }
 
 /**
