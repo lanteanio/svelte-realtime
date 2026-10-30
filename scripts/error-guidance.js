@@ -214,7 +214,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check the file or stream source the app passed in, then start a new upload. Show the user that the file could not be read.'
 	}),
 	STALE: Object.freeze({
-		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
+		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is told by an idempotency refusal to wait past them, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
 		consequence: 'The mutation is dropped without being sent. Its promise rejects with a STALE RpcError, sometimes with a `cause`, and `offline.onReplayError` is notified.',
 		automaticRecovery: 'None. Dropped mutations are not re-queued.',
 		nextAction: 'Check `maxAge`, retention, `beforeReplay` and `replay` logic. Make `beforeReplay` synchronous and non-throwing, and surface dropped edits to the user via `onReplayError`.'
