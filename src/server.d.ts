@@ -2120,7 +2120,8 @@ export namespace live {
 	 * runs and every cached result stays, so no caller's traffic evicts another
 	 * caller's result. A refusal at the caller's own share carries `retryAfter`,
 	 * the milliseconds until the earliest of its results can expire, counting a
-	 * running call as committed now. Server-side calls without a user (`.load()`, form
+	 * running call as committed now, and none while a call on a key of its own
+	 * still runs. Server-side calls without a user (`.load()`, form
 	 * actions) share one identity-sized bucket per tenant that never replaces.
 	 * Cron jobs and alarms have pools of 1,000 of their own that callers cannot
 	 * fill; with a tenant resolver each tenant's alarms may hold 100 of theirs.

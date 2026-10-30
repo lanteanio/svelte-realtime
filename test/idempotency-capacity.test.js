@@ -256,6 +256,22 @@ describe('idempotency capacity preserves accepted effects', () => {
 		await expect(long(alice, 'over')).resolves.toBe('over');
 	});
 
+	it('names no long wait while a call on a key of its own still runs', async () => {
+		const gate = deferred(); gates.push(gate);
+		const shared = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		const own = enveloped(live.idempotent({}, async (ctx, key) => { await gate.promise; return key; }));
+		const alice = { user: { id: 'alice' } };
+		for (let i = 1; i < TENANT; i++) await shared(alice, 'k' + i);
+		const running = own(alice, 'mine');
+		await nextTurn();
+		const refusal = await shared(alice, 'over').catch(error => error);
+		expect(refusal).toMatchObject(capacityError);
+		expect(refusal.retryAfter).toBeUndefined();
+		expect(refusal.message).toMatch(/still running/);
+		gate.resolve(); await running;
+		await expect(shared(alice, 'over')).resolves.toBe('over');
+	});
+
 	it('names the wait until the oldest result expires when a caller cannot give one up', async () => {
 		let effects = 0;
 		const run = live.idempotent({ ttl: 60, keyFrom: (ctx, key) => ctx.user.id + ':' + key }, async () => ++effects);

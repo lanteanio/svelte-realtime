@@ -119,10 +119,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const pools = { cron: { limit: Math.max(1, reserve), count: 0 }, alarm: { limit: Math.max(1, reserve), count: 0 } };
 	const tenantCounts = new Map();
 	/**
-	 * @typedef {{ pkey: string, tenant: string | null, pool: { limit: number, count: number } | null, count: number, cachedCount: number, byTtl: Map<number, Set<string>>, running: Map<number, number>, results: Set<string> }} Principal
+	 * @typedef {{ pkey: string, tenant: string | null, pool: { limit: number, count: number } | null, count: number, cachedCount: number, byTtl: Map<number, Set<string>>, running: Map<number, number>, runningOwn: number, results: Set<string> }} Principal
 	 * byTtl: its committed keys by TTL, each set in commit (so expiry) order;
-	 * running: how many of its calls still run, by TTL; results: the keys it may
-	 * give up.
+	 * running: how many of its calls on keys it cannot give up still run, by
+	 * TTL; runningOwn: how many on keys it can; results: the keys it may give up.
 	 */
 	/** @type {Map<string, Principal>} */
 	const principals = new Map();
@@ -223,11 +223,13 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	// Milliseconds until the earliest of a principal's results can expire: a
 	// cached one, or the result of a running call committed now. That is the
 	// soonest its share can admit a key it cannot replace, unless a running call
-	// fails first. Each TTL's keys sit in commit order, which is expiry order
-	// while the wall clock does not step back, so this reads one key per
-	// distinct TTL; a backward step only makes the hint approximate.
+	// fails first. None while a call on a key of its own runs: once committed it
+	// can be replaced, so a retry soon may be admitted. Each TTL's keys sit in
+	// commit order, which is expiry order while the wall clock does not step
+	// back, so this reads one key per distinct TTL; a backward step only makes
+	// the hint approximate.
 	function _retryAfter(owner, now) {
-		if (!owner) return undefined;
+		if (!owner || owner.runningOwn > 0) return undefined;
 		let first = Infinity;
 		for (const keys of owner.byTtl.values()) {
 			const entry = results.get(keys.values().next().value);
@@ -300,7 +302,8 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					_recordCapacity('rejected');
 					if (pressure === _OWN_SHARE) {
 						const retryAfter = _retryAfter(principals.get(pkey), now);
-						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after retryAfter, the earliest one of its results can expire.', retryAfter === undefined ? undefined : { retryAfter });
+						if (retryAfter === undefined) throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store; the handler has not run. Retry shortly: a call of its own that is still running can be replaced once it finishes.');
+						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after retryAfter milliseconds, when the first of its results can expire.', { retryAfter });
 					}
 					throw new LiveError('IDEMPOTENCY_CAPACITY', 'The idempotency store is full; the handler has not run. Retry after capacity becomes available.');
 				}
@@ -319,7 +322,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		promise.catch(() => {});
 		inflight.set(key, promise);
 		let owner = principals.get(pkey);
-		if (!owner) { owner = { pkey, tenant, pool, count: 0, cachedCount: 0, byTtl: new Map(), running: new Map(), results: new Set() }; principals.set(pkey, owner); }
+		if (!owner) { owner = { pkey, tenant, pool, count: 0, cachedCount: 0, byTtl: new Map(), running: new Map(), runningOwn: 0, results: new Set() }; principals.set(pkey, owner); }
 		owner.count++;
 		keyOwners.set(key, owner);
 		if (pool) pool.count++;
@@ -328,8 +331,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		let settled = false;
 		const ttlMs = ttlSec * 1000;
 		const runningOwner = owner;
-		runningOwner.running.set(ttlMs, (runningOwner.running.get(ttlMs) || 0) + 1);
+		if (ownKey) runningOwner.runningOwn++;
+		else runningOwner.running.set(ttlMs, (runningOwner.running.get(ttlMs) || 0) + 1);
 		const stopRunning = () => {
+			if (ownKey) { runningOwner.runningOwn--; return; }
 			const left = runningOwner.running.get(ttlMs) - 1;
 			if (left > 0) runningOwner.running.set(ttlMs, left);
 			else runningOwner.running.delete(ttlMs);
