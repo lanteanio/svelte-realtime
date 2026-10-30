@@ -2331,8 +2331,9 @@ export namespace live {
 	 * With `configureForget({ jobs })` every erasure is also a job: its intent
 	 * is recorded before any surface is touched (a failure to record it rejects
 	 * with FORGET_JOB_FAILED and erases nothing), its outcome afterwards, and
-	 * `resumeForgetJobs()` runs unfinished jobs again. Rejections then carry the
-	 * job reference as `details.job` and the result carries it as `job`.
+	 * `resumeForgetJobs()` runs unfinished jobs again. Each call is its own job;
+	 * the result carries its reference as `job`, and a rejection as a
+	 * non-enumerable `job` property that is never part of `details`.
 	 * The forget.incomplete operator event names failed surfaces without user
 	 * IDs or exception payloads; onForget runs only on complete success.
 	 * A store reporting cluster-wide owner evictions
@@ -4626,9 +4627,8 @@ export type ForgetJobStatus = 'pending' | 'failed' | 'completed';
  */
 export interface ForgetJob {
 	/**
-	 * Job reference: 32 hex characters of SHA-256, or HMAC-SHA-256 with the
-	 * audit key, over the JSON array `[tenantId, userId]`. The same user and
-	 * tenant always map to the same job, so a repeated erasure reuses it.
+	 * Job reference: a random UUID drawn for each `live.forget` call, so it
+	 * reveals nothing about the user and a repeated erasure is a new job.
 	 */
 	id: string;
 	/** The audit identifier `onForget` receives for this user. */

@@ -48,19 +48,19 @@ export const CODE_GUIDANCE = Object.freeze({
 	FORGET_INCOMPLETE: Object.freeze({
 		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed.',
 		consequence: '`live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.',
-		automaticRecovery: 'None. The erasure is not retried by itself. With a job store the job is recorded as failed under the reference in `details.job`.',
+		automaticRecovery: 'None. The erasure is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.',
 		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.'
 	}),
 	FORGET_JOB_FAILED: Object.freeze({
 		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it.',
-		consequence: 'From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in `details.job`. A listing or resume rejects without running anything.',
+		consequence: 'From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.',
 		automaticRecovery: 'None. The erasure does not start without its job record.',
 		nextAction: 'Fix the job store (connectivity, permissions, schema), then call `live.forget` or `resumeForgetJobs()` again.'
 	}),
 	FORGET_STORE_FAILED: Object.freeze({
 		cause: 'The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`.',
 		consequence: '`live.forget` rejects with a FORGET_STORE_FAILED LiveError and the erasure is incomplete. Owner successions the store already committed are still announced, and a `forget.incomplete` event names the durable surface.',
-		automaticRecovery: 'None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in `details.job`.',
+		automaticRecovery: 'None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.',
 		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again, or `resumeForgetJobs()` with a job store. A repeat call only reprocesses the rooms that failed.'
 	}),
 	IDEMPOTENCY_CAPACITY: Object.freeze({

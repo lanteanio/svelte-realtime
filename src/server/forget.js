@@ -279,13 +279,16 @@ function _reportJobUnrecorded(job, outcome) {
 }
 
 /**
- * The job reference of one erasure: tenant and user hashed together, so the
- * same user in two tenants is two jobs and the reference reveals neither.
- * @param {string | null} tenantId @param {string} userId
- * @param {import('node:crypto').KeyObject | null} key
+ * Attach the job reference to an erasure error for the server caller. It is
+ * not enumerable and not in `details`, so an error rethrown to a client or
+ * serialized into a response does not carry it.
+ * @param {any} err @param {string | null} jobId
  */
-function _jobId(tenantId, userId, key) {
-	return _hashUserId(JSON.stringify([tenantId, userId]), key);
+function _withJob(err, jobId) {
+	if (jobId !== null && err !== null && typeof err === 'object' && !Object.prototype.hasOwnProperty.call(err, 'job')) {
+		Object.defineProperty(err, 'job', { value: jobId, enumerable: false, configurable: true });
+	}
+	return err;
 }
 
 const _liveForget = async function forget(userId, opts) {
@@ -342,7 +345,10 @@ const _liveForget = async function forget(userId, opts) {
 	// the audit identifier of an erasure that has already started.
 	const jobs = _forgetJobs;
 	const userIdHash = onForget || jobs !== null ? _hashUserId(userId, hashKey) : null;
-	const jobId = jobs === null ? null : _jobId(tenantId, userId, hashKey);
+	// Every call is its own job under a random reference: two workers erasing
+	// the same user each record their own outcome, and the reference reveals
+	// nothing about the user.
+	const jobId = jobs === null ? null : randomUuid();
 	return _runErasure(jobs, jobId, { userId, userIdHash, tenantId, cascade }, onForget);
 };
 
@@ -369,7 +375,7 @@ async function _runErasure(jobs, jobId, run, onForget) {
 			try {
 				await jobs.begin({ id: jobId, runId, userIdHash, tenantId, userId, cascade, at: wallEpoch() });
 			} catch {
-				throw new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased', { details: { job: jobId } });
+				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
 			_activeJobs.set(jobId, (_activeJobs.get(jobId) || 0) + 1);
 		}
@@ -388,7 +394,7 @@ async function _runErasure(jobs, jobId, run, onForget) {
 						_reportJobUnrecorded(jobId, 'failed');
 					}
 				}
-				throw err;
+				throw _withJob(err, jobId);
 			}
 			const { surfaces, rowsAffected } = erased;
 			const at = wallEpoch();
@@ -436,7 +442,6 @@ async function _runErasure(jobs, jobId, run, onForget) {
  * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
  */
 async function _erase(userId, tenantId, cascade, jobId, failure) {
-	const metadata = jobId === null ? undefined : { details: { job: jobId } };
 	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
 	/** @type {Record<string, number>} */
 	const surfaces = {};
@@ -532,7 +537,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure) {
 					if (_IS_DEV) console.error('[svelte-realtime] live.forget announce-on-failure threw:', pubErr);
 				}
 			}
-			throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried', metadata);
+			throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried');
 		}
 		// Publish the store's owner successions AFTER the durable try/catch:
 		// the authoritative eviction already committed in the store, so the
@@ -546,7 +551,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure) {
 
 	if (failedSurfaces.length) {
 		_reportIncomplete(failedSurfaces, rowsAffected, jobId);
-		throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry', metadata);
+		throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry');
 	}
 
 	return { surfaces, rowsAffected };

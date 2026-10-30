@@ -62,7 +62,7 @@ describe('erasure jobs', () => {
 		configureForget({ store: durable(), jobs });
 		const pending = await listForgetJobs({ status: 'pending' });
 		expect(pending).toHaveLength(1);
-		expect(pending[0]).toMatchObject({ id: sha(JSON.stringify([null, 'alice'])), userIdHash: sha('alice'), tenantId: null, attempts: 1 });
+		expect(pending[0]).toMatchObject({ userIdHash: sha('alice'), tenantId: null, attempts: 1 });
 		expect(JSON.stringify(pending)).not.toContain('alice');
 
 		const onForget = vi.fn();
@@ -87,26 +87,22 @@ describe('erasure jobs', () => {
 		expect(seen[0].status).toBe('pending');
 	});
 
-	it('reuses one job for a repeated or concurrent erasure of the same user', async () => {
+	it('records a repeated erasure of the same user as a new job', async () => {
 		configureForget({ store: durable(), jobs: true });
 		const first = await live.forget('alice', { tenantId: null });
 		const second = await live.forget('alice', { tenantId: null });
-		await Promise.all([live.forget('alice', { tenantId: null }), live.forget('alice', { tenantId: null })]);
-		expect(second.job).toBe(first.job);
+		expect(second.job).not.toBe(first.job);
 		const all = await listForgetJobs();
-		expect(all).toHaveLength(1);
-		expect(all[0]).toMatchObject({ id: first.job, status: 'completed', attempts: 4 });
-		// A different tenant is a different erasure.
-		await live.forget('alice', { tenantId: 'acme' });
-		expect(await listForgetJobs()).toHaveLength(2);
+		expect(all.map((j) => j.id)).toEqual([first.job, second.job]);
+		expect(all.every((j) => j.status === 'completed' && j.attempts === 1)).toBe(true);
 	});
 
 	it('records a failure against the hashed reference only', async () => {
 		const user = 'alice@example.test';
 		configureForget({ store: partial(), jobs: true, hashKey: KEY });
 		const err = await live.forget(user, { tenantId: 'acme' }).catch((e) => e);
-		const id = hmac(JSON.stringify(['acme', user]));
-		expect(err).toMatchObject({ code: 'FORGET_STORE_FAILED', details: { job: id } });
+		const id = err.job;
+		expect(err.code).toBe('FORGET_STORE_FAILED');
 		const failed = await listForgetJobs({ status: 'failed' });
 		expect(failed).toEqual([{
 			id, userIdHash: hmac(user), tenantId: 'acme', status: 'failed', attempts: 1,
@@ -203,5 +199,38 @@ describe('createForgetJobStore', () => {
 		s.begin(intent({ id: 'p', runId: 'r', at: 0 }));
 		expect(s.list().map((j) => j.id)).toEqual(['p', 'c2', 'c3']);
 		expect(s.list({ limit: 1 }).map((j) => j.id)).toEqual(['p']);
+	});
+});
+
+describe('erasure job identity', () => {
+	it('gives every call its own job, so a failed run is not hidden by a concurrent success', async () => {
+		// Two workers erase the same user at once (aggregates are per worker);
+		// the dead-letter purge fails for the first and succeeds for the second.
+		let purges = 0;
+		configureWebhooks({ deadLetter: { add() { return null; }, purgeUser() { if (purges++ === 0) throw new Error('offline'); return 0; } } });
+		configureForget({ store: durable(), jobs: true });
+		const [a, b] = await Promise.allSettled([live.forget('alice', { tenantId: null }), live.forget('alice', { tenantId: null })]);
+		expect(a.status).toBe('rejected');
+		expect(b.status).toBe('fulfilled');
+		const failed = await listForgetJobs({ status: 'failed' });
+		expect(failed).toHaveLength(1);
+		expect(failed[0].id).toBe(a.reason.job);
+		expect((await listForgetJobs({ status: 'completed' })).map((j) => j.id)).toEqual([b.value.job]);
+		configureWebhooks({ deadLetter: false });
+	});
+
+	it('uses an unguessable job id and keeps it out of client-visible error details', async () => {
+		configureForget({ store: partial(), jobs: true, hashKey: KEY });
+		const first = await live.forget('alice', { tenantId: 'acme' }).catch((e) => e);
+		const second = await live.forget('alice', { tenantId: 'acme' }).catch((e) => e);
+		expect(first.code).toBe('FORGET_STORE_FAILED');
+		expect(typeof first.job).toBe('string');
+		expect(first.job).not.toBe(second.job);
+		for (const derived of [sha(JSON.stringify(['acme', 'alice'])), hmac(JSON.stringify(['acme', 'alice']))]) {
+			expect(first.job).not.toBe(derived);
+		}
+		expect(first.details).toBeUndefined();
+		expect(JSON.stringify(first)).not.toContain(first.job);
+		expect(Object.keys(first)).not.toContain('job');
 	});
 });

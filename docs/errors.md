@@ -253,7 +253,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 
 - Cause: `live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed.
 - Consequence: `live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.
-- Automatic recovery: None. The erasure is not retried by itself. With a job store the job is recorded as failed under the reference in `details.job`.
+- Automatic recovery: None. The erasure is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.
 - Next action: Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.
 - Message patterns: <code>Erasure is incomplete; resolve failed cleanup surfaces and retry</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
@@ -262,7 +262,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 ### `FORGET_JOB_FAILED`
 
 - Cause: The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it.
-- Consequence: From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in `details.job`. A listing or resume rejects without running anything.
+- Consequence: From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.
 - Automatic recovery: None. The erasure does not start without its job record.
 - Next action: Fix the job store (connectivity, permissions, schema), then call `live.forget` or `resumeForgetJobs()` again.
 - Message patterns: <code>listForgetJobs: the erasure job store could not be read</code>; <code>live.forget: the erasure job could not be recorded; nothing was erased</code>; <code>resumeForgetJobs: the erasure job store could not be read</code>
@@ -273,7 +273,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 
 - Cause: The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`.
 - Consequence: `live.forget` rejects with a FORGET_STORE_FAILED LiveError and the erasure is incomplete. Owner successions the store already committed are still announced, and a `forget.incomplete` event names the durable surface.
-- Automatic recovery: None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in `details.job`.
+- Automatic recovery: None. The durable purge is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.
 - Next action: Fix the store (connectivity, permissions, schema), then call `live.forget` again, or `resumeForgetJobs()` with a job store. A repeat call only reprocesses the rooms that failed.
 - Message patterns: <code>live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
