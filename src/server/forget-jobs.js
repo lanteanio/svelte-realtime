@@ -137,14 +137,17 @@ export function createForgetJobStore(options = {}) {
 		},
 
 		/**
-		 * Extend the lease of the run that holds it.
+		 * Extend the lease of the run that holds it and return true. Returns
+		 * `'cancelled'` to the holder of a job whose cancellation was asked for,
+		 * which stops and abandons it, and false to a run that holds no lease
+		 * (another run took the job over, or it finished), which just stops.
 		 * @param {{ id: string, runId: string, leaseMs: number }} req
+		 * @returns {boolean | 'cancelled'}
 		 */
 		renew(req) {
 			const j = _held(req.id, req.runId);
-			// A job whose cancellation was asked for is not renewed: its run
-			// stops and abandons it.
-			if (j === undefined || j.cancelRequested) return false;
+			if (j === undefined) return false;
+			if (j.cancelRequested) return 'cancelled';
 			j.leaseUntil = wallEpoch() + req.leaseMs;
 			return true;
 		},
@@ -220,8 +223,9 @@ export function createForgetJobStore(options = {}) {
 		 * Give up an open job. When no unexpired lease holds it, or `runId`
 		 * does, mark it abandoned, drop everything user-derived and return
 		 * true. When another run holds it, record a cancellation and return
-		 * `'cancelled'`: that run's next renewal is refused, it stops, and it
-		 * abandons the job. Returns false for an unknown or finished job.
+		 * `'cancelled'`: that run's next renewal answers `'cancelled'`, it stops,
+		 * and it abandons the job (or completes it, had it finished every step).
+		 * Returns false for an unknown or finished job.
 		 * @param {{ id: string, runId?: string }} req
 		 * @returns {boolean | 'cancelled'}
 		 */
@@ -230,8 +234,8 @@ export function createForgetJobStore(options = {}) {
 			const now = wallEpoch();
 			if (j === undefined || _FINISHED.has(j.status)) return false;
 			if (_leased(j, now) && j.leaseRunId !== req.runId) {
-				// A run holds it: ask that run to stop. Its next renewal is
-				// refused, and it abandons the job when it stops.
+				// A run holds it: ask that run to stop. Its next renewal answers
+				// that it was cancelled, and it abandons the job when it stops.
 				j.cancelRequested = true;
 				j.updatedAt = now;
 				return 'cancelled';
@@ -266,14 +270,19 @@ export function createForgetJobStore(options = {}) {
 		/**
 		 * Jobs a resume may claim now, at most `limit`: pending or failed ones
 		 * past their retry time with no unexpired lease, earliest due first; or,
-		 * with `exhausted`, the exhausted ones, oldest first.
+		 * with `exhausted`, the exhausted ones, oldest first. A cancelled job
+		 * whose lease ran out (its run died) is abandoned here, not returned.
 		 * @param {{ limit: number, exhausted?: boolean }} req
 		 */
 		due(req) {
 			const now = wallEpoch();
 			const out = [];
 			for (const j of jobs.values()) {
-				if (_leased(j, now) || j.cancelRequested) continue;
+				if (_leased(j, now)) continue;
+				if (j.cancelRequested) {
+					if (!_FINISHED.has(j.status)) _abandon(j, now);
+					continue;
+				}
 				if (req.exhausted === true ? j.status === 'exhausted' : (j.status === 'pending' || (j.status === 'failed' && j.retryAt <= now))) out.push(j);
 			}
 			/** @param {any} j */

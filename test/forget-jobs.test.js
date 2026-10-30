@@ -244,8 +244,10 @@ describe('createForgetJobStore', () => {
 		s.begin(intent());
 		expect(s.abandon({ id: 'j1' })).toBe('cancelled');
 		expect(s.due({ limit: 10 })).toEqual([]);
-		// The holder's next renewal is refused; it stops and abandons the job.
-		expect(s.renew({ id: 'j1', runId: 'r1', leaseMs: 100 })).toBe(false);
+		// The holder's next renewal answers that it was cancelled; it stops and
+		// abandons the job. Another run is told only that it holds no lease.
+		expect(s.renew({ id: 'j1', runId: 'r9', leaseMs: 100 })).toBe(false);
+		expect(s.renew({ id: 'j1', runId: 'r1', leaseMs: 100 })).toBe('cancelled');
 		expect(s.abandon({ id: 'j1', runId: 'r1' })).toBe(true);
 		expect(s.list()[0]).toMatchObject({ status: 'abandoned', userIdHash: null });
 		expect(s.abandon({ id: 'j1', runId: 'r1' })).toBe(false);
@@ -257,6 +259,16 @@ describe('createForgetJobStore', () => {
 		expect(s.claim({ id: 'j2', runId: 'r3', leaseMs: 100 })).toBeNull();
 		expect(s.get({ id: 'j2' })).toMatchObject({ status: 'abandoned' });
 		expect(s.get({ id: 'nope' })).toBeNull();
+	});
+
+	it('abandons a cancelled job whose holder died when due runs, so it does not stay pending', () => {
+		const s = createForgetJobStore();
+		s.begin(intent());
+		expect(s.abandon({ id: 'j1' })).toBe('cancelled');
+		t = 1200;
+		expect(s.due({ limit: 10 })).toEqual([]);
+		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'abandoned', userIdHash: null });
+		expect(s.list({ status: 'pending' })).toEqual([]);
 	});
 
 	it('orders due jobs by how long they have been due', () => {
@@ -887,6 +899,7 @@ describe('abandoning a job a run is working on', () => {
 		expect(await abandonForgetJob(job.id)).toBe(true);
 		const err = await run;
 		expect(err.job).toBe(job.id);
+		expect(err.code).toBe('FORGET_CANCELLED');
 		expect(store.calls[0].aborted).toBe(true);
 		expect((await listForgetJobs())[0]).toMatchObject({ id: job.id, status: 'abandoned', userIdHash: null });
 		later();
@@ -910,9 +923,90 @@ describe('abandoning a job a run is working on', () => {
 		expect(await other.abandonForgetJob(job.id)).toBe(true);
 		const err = await run;
 		expect(err.job).toBe(job.id);
+		expect(err.code).toBe('FORGET_CANCELLED');
 		expect((await listForgetJobs())[0]).toMatchObject({ id: job.id, status: 'abandoned' });
 		await new Promise((r) => setTimeout(r, 30));
 		expect(store.calls).toHaveLength(1);
+		other.configureForget(null);
+	});
+
+	it('runs no further step once the run is cancelled, the durable purge included', async () => {
+		const dl = createDeadLetterStore();
+		let entered = false;
+		vi.spyOn(dl, 'purgeUser').mockImplementation(() => { entered = true; return new Promise(() => {}); });
+		configureWebhooks({ deadLetter: dl });
+		const purge = vi.fn(async () => 0);
+		configureForget({ store: { purgeUser: purge }, jobs: true });
+		const run = live.forget('alice', { tenantId: null }).catch((e) => e);
+		await vi.waitFor(() => expect(entered).toBe(true));
+		const [job] = await listForgetJobs();
+		expect(await abandonForgetJob(job.id)).toBe(true);
+		expect((await run).code).toBe('FORGET_CANCELLED');
+		expect(purge).not.toHaveBeenCalled();
+		expect((await listForgetJobs())[0]).toMatchObject({ id: job.id, status: 'abandoned' });
+	});
+
+	it('completes a run its own process abandons after the last step, as a run in another process would', async () => {
+		const jobs = createForgetJobStore();
+		configureForget({
+			store: durable(),
+			jobs: { ...jobs, complete(outcome) { void abandonForgetJob(outcome.id); return jobs.complete(outcome); } }
+		});
+		const res = await live.forget('alice', { tenantId: null });
+		expect(res.ok).toBe(true);
+		expect(jobs.get({ id: res.job })).toMatchObject({ status: 'completed' });
+		expect(events.some((e) => e.event === 'forget.job-unrecorded')).toBe(false);
+	});
+
+	it('lets a stalled run whose lease another run took over stop without cancelling that run', async () => {
+		let wall = 0;
+		setRuntimeEnv({
+			clock: { wallEpoch: () => Date.now() + wall },
+			timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) }
+		});
+		const jobs = createForgetJobStore();
+		// The first process stalls: its renewals stop answering until released.
+		let stalled = false;
+		/** @type {(() => void) | null} */
+		let unstall = null;
+		const stalling = {
+			...jobs,
+			renew(req) {
+				if (!stalled) return jobs.renew(req);
+				return new Promise((resolve) => { unstall = () => resolve(jobs.renew(req)); });
+			}
+		};
+		const firstSignals = [];
+		configureForget({ store: { purgeUser: (_t, _u, _c, opts) => { firstSignals.push(opts.signal); return new Promise(() => {}); } }, jobs: stalling });
+		const run = live.forget('alice', { tenantId: null }).catch((e) => e);
+		await vi.waitFor(() => expect(firstSignals).toHaveLength(1));
+		stalled = true;
+		await vi.waitFor(() => expect(unstall).not.toBeNull());
+		wall = 5 * 60_000; // past the lease the stalled run last renewed
+
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		(await import('../src/shared/runtime.js')).setRuntimeEnv({
+			clock: { wallEpoch: () => Date.now() + wall },
+			timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) }
+		});
+		let release;
+		let secondPurges = 0;
+		other.configureForget({ store: { purgeUser: () => { secondPurges++; return new Promise((r) => { release = r; }); } }, jobs });
+		const resumed = other.resumeForgetJobs();
+		await vi.waitFor(() => expect(secondPurges).toBe(1));
+
+		// The stalled process wakes up and learns it no longer holds the lease.
+		/** @type {() => void} */ (unstall)();
+		const err = await run;
+		expect(err.code).toBe('FORGET_INCOMPLETE');
+		expect(err.job).toBeDefined();
+		expect(firstSignals[0].aborted).toBe(true);
+		// The new holder keeps renewing and finishes the job.
+		await new Promise((r) => setTimeout(r, 30));
+		release(1);
+		expect((await resumed).results).toEqual([{ id: err.job, steps: 'shared', status: 'completed' }]);
+		expect(jobs.get({ id: err.job })).toMatchObject({ status: 'completed', attempts: 2 });
 		other.configureForget(null);
 	});
 });
@@ -984,6 +1078,68 @@ describe('listing owed in-memory work', () => {
 		const all = await listForgetJobs();
 		expect(all.map((j) => j.id)).toEqual([first.job, owed.job]);
 		expect(all[1]).toMatchObject({ status: 'completed', local: { open: ['webhookDeadLetter'] } });
+	});
+
+	/** A job store that lost every record, whose `get` answers only when released. */
+	function forgetfulStore() {
+		const releases = [];
+		let inFlight = 0;
+		let most = 0;
+		const jobs = createForgetJobStore();
+		return {
+			releases,
+			get most() { return most; },
+			jobs: {
+				...jobs,
+				list: () => [],
+				get: () => {
+					inFlight++;
+					most = Math.max(most, inFlight);
+					return new Promise((resolve) => { releases.push(() => { inFlight--; resolve(null); }); });
+				}
+			}
+		};
+	}
+
+	it('asks the store about owed jobs concurrently', async () => {
+		const store = forgetfulStore();
+		configureForget({ jobs: store.jobs });
+		flakyMemoryDeadLetter(Infinity);
+		const a = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		const b = await live.forget('bob', { tenantId: null }).catch((e) => e);
+		const listing = listForgetJobs();
+		await vi.waitFor(() => expect(store.releases).toHaveLength(2));
+		expect(store.most).toBe(2);
+		for (const release of store.releases) release();
+		expect((await listing).map((j) => j.id)).toEqual([a.job, b.job]);
+	});
+
+	it('leaves out owed work that finishes while the store is asked about it', async () => {
+		const store = forgetfulStore();
+		configureForget({ jobs: store.jobs });
+		flakyMemoryDeadLetter(1);
+		const owed = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(owed.code).toBe('FORGET_INCOMPLETE');
+		const listing = listForgetJobs();
+		await vi.waitFor(() => expect(store.releases).toHaveLength(1));
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ results: [{ id: owed.job, steps: 'local', status: 'completed' }] });
+		store.releases[0]();
+		expect(await listing).toEqual([]);
+	});
+
+	it('lists owed work the store has no record of ahead of the store rows, without comparing their clocks', async () => {
+		const jobs = createForgetJobStore({ max: 1 });
+		configureForget({ jobs });
+		flakyMemoryDeadLetter(1);
+		const owed = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		configureWebhooks({ deadLetter: false });
+		// The store's clock runs far behind this process: its rows look older.
+		setRuntimeEnv({ clock: { wallEpoch: () => Date.now() - 3_600_000 } });
+		const stored = await live.forget('bob', { tenantId: null });
+		resetRuntimeEnv();
+		expect((await listForgetJobs()).map((j) => [j.id, j.status])).toEqual([[owed.job, null], [stored.job, 'completed']]);
+		expect((await listForgetJobs({ limit: 1 })).map((j) => j.id)).toEqual([owed.job]);
 	});
 
 	it('reports exhausted in-memory work dropped when the configuration is cleared', async () => {

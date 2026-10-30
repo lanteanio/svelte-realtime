@@ -2331,7 +2331,8 @@ export namespace live {
 	 * With `configureForget({ jobs })` every erasure is also a job: its intent
 	 * is recorded before any surface is touched (a failure to record it rejects
 	 * with FORGET_JOB_FAILED and erases nothing), its outcome afterwards, and
-	 * `resumeForgetJobs()` runs unfinished jobs again. Each call is its own job;
+	 * `resumeForgetJobs()` runs unfinished jobs again. A run whose job is
+	 * abandoned while it works rejects with FORGET_CANCELLED. Each call is its own job;
 	 * the result carries its reference as `job`, and a rejection as a
 	 * non-enumerable `job` property that is never part of `details`.
 	 * The forget.incomplete operator event names failed surfaces without user
@@ -4726,11 +4727,14 @@ export interface ForgetJobStore {
 	 */
 	begin(intent: ForgetJobIntent): void | Promise<void>;
 	/**
-	 * Extend the lease of `runId` to `leaseMs` from now and resolve true. Resolve
-	 * false, changing nothing, when `runId` no longer holds the lease or the
-	 * job's cancellation was asked for; the run then stops.
+	 * Extend the lease of `runId` to `leaseMs` from now and resolve true.
+	 * Resolve `'cancelled'`, changing nothing, when `runId` holds the lease
+	 * and the job's cancellation was asked for: the run stops and abandons the
+	 * job. Resolve false, changing nothing, when `runId` does not hold the
+	 * lease (another run claimed the job, or it is finished or unknown): the
+	 * run stops its shared steps and records nothing.
 	 */
-	renew(req: { id: string; runId: string; leaseMs: number }): boolean | Promise<boolean>;
+	renew(req: { id: string; runId: string; leaseMs: number }): boolean | 'cancelled' | Promise<boolean | 'cancelled'>;
 	/**
 	 * When the job is `pending` or `failed` (or `exhausted` and `exhausted` is
 	 * true) and no unexpired lease holds it: give the lease to `runId` for
@@ -4761,8 +4765,9 @@ export interface ForgetJobStore {
 	 * delete `userId`, `userIdHash`, `cascade` and the step list, and resolve
 	 * true. When another run's unexpired lease holds it: record a
 	 * cancellation and resolve `'cancelled'`; that run's next `renew` resolves
-	 * false, the run stops and abandons the job, and a cancelled job whose
-	 * lease runs out is abandoned instead of claimed or listed as due. Resolve
+	 * `'cancelled'`, the run stops and abandons the job, and a cancelled job
+	 * whose lease runs out is abandoned by the next `claim` or `due` instead
+	 * of being claimed or listed as due. Resolve
 	 * false for an unknown or finished job. An abandoned job is never claimed.
 	 */
 	abandon(req: { id: string; runId?: string }): boolean | 'cancelled' | Promise<boolean | 'cancelled'>;
@@ -4774,7 +4779,8 @@ export interface ForgetJobStore {
 	 * Jobs a resume may claim now, at most `limit`: pending ones whose lease
 	 * expired and failed ones past `retryAt`, earliest due first, then
 	 * `createdAt`; with `exhausted`, the exhausted ones with no unexpired lease
-	 * instead, oldest first.
+	 * instead, oldest first. A cancelled job with no unexpired lease is
+	 * abandoned, not returned.
 	 */
 	due(req: { limit: number; exhausted?: boolean }): Array<Omit<ForgetJob, 'local'>> | Promise<Array<Omit<ForgetJob, 'local'>>>;
 }
@@ -4782,7 +4788,7 @@ export interface ForgetJobStore {
 /** The in-memory job store; every method is synchronous. */
 export interface MemoryForgetJobStore extends ForgetJobStore {
 	begin(intent: ForgetJobIntent): void;
-	renew(req: { id: string; runId: string; leaseMs: number }): boolean;
+	renew(req: { id: string; runId: string; leaseMs: number }): boolean | 'cancelled';
 	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null;
 	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean;
 	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean;
@@ -4809,10 +4815,11 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
  * Give up an open erasure job: the store marks it `abandoned` and drops its
  * user id, and this process drops the in-memory steps it still owes for it. A
  * run of this process working on the job is cancelled at once; a run in
- * another process is asked to stop through the store, stops at its next lease
- * renewal (within 20 seconds), and the job ends abandoned - or completed, had
- * the run already finished every step. Resolves whether anything was given up
- * or cancelled. Rejects with INVALID_REQUEST on a bad
+ * another process is asked to stop through the store and stops at its next
+ * lease renewal (within 20 seconds). A cancelled run rejects with
+ * FORGET_CANCELLED and the job ends abandoned - or completed, had the run
+ * already finished every step, whichever process asked. Resolves whether
+ * anything was given up or cancelled. Rejects with INVALID_REQUEST on a bad
  * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;
@@ -4821,8 +4828,10 @@ export function abandonForgetJob(id: string): Promise<boolean>;
  * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100),
  * each with the in-memory steps this process still owes for it. Without a
  * status filter, jobs this process owes in-memory steps for of which the store
- * holds no record (checked with `get`) are merged in by `createdAt` with
- * `status: null`, within `limit`; also after the job store is cleared. Rejects with INVALID_REQUEST on a bad filter and
+ * holds no record (checked with `get`) come first with `status: null`, in
+ * the order this process recorded them, within `limit`; also after the job
+ * store is cleared. Their times come from the process clock, so they are not
+ * sorted among the store's rows. Rejects with INVALID_REQUEST on a bad filter and
  * FORGET_JOB_FAILED when the store cannot be read.
  */
 export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
@@ -4884,8 +4893,8 @@ export interface ForgetOwnerSuccession {
  * `{ rowsAffected?, ownerSuccessions? }` carrying the `:owner` changes the
  * store's cluster-wide owner eviction produced for rooms the forgetting
  * instance could not resolve locally. With a job store, a fourth argument
- * carries an `AbortSignal` that fires when the erasure job is abandoned; a
- * store may stop early on it. It must tolerate concurrent calls for the same
+ * carries an `AbortSignal` that fires when the erasure job is abandoned or
+ * the run loses its lease to another run; a store may stop early on it. It must tolerate concurrent calls for the same
  * user.
  */
 export interface ForgetStore {

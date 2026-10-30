@@ -45,8 +45,14 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. A denied stream or call is not retried.',
 		nextAction: 'Check the caller\'s permissions and the access rule. After a scope or access change, subscribe again. A message ending in `subscribe denied: RATE_LIMITED` means the adapter rate-limited the topic subscribe; retry later.'
 	}),
+	FORGET_CANCELLED: Object.freeze({
+		cause: '`abandonForgetJob(id)` gave up an erasure job while a run of `live.forget` or `resumeForgetJobs()` was working on it, on this process or another one.',
+		consequence: 'The run starts no further step, its pending store calls are abandoned (the durable `purgeUser` sees its `signal` fire), and it rejects with a FORGET_CANCELLED LiveError carrying the job reference in its non-enumerable `job` property. The job ends `abandoned`, and the process that abandoned it drops the in-memory steps it owed for it. Steps that finished stay erased. A run that had already finished every step completes instead.',
+		automaticRecovery: 'None. An abandoned job never runs again.',
+		nextAction: 'Nothing, if giving the erasure up was intended. To erase the user after all, call `live.forget` again; it records a new job.'
+	}),
 	FORGET_INCOMPLETE: Object.freeze({
-		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed.',
+		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed. With a job store, a run also ends with it when another run took its job over after this process stalled past its lease; that run finishes the shared steps.',
 		consequence: '`live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.',
 		automaticRecovery: 'Without a job store, none. With one, this process keeps the failed in-memory steps under the reference in the `job` property of the error and retries them by itself, and a failed shared step is recorded on the job.',
 		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.'
