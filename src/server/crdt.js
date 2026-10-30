@@ -180,17 +180,26 @@ function _crdtRelease(rec, ws, name) {
  * again (a re-opened document holds other users' edits by then), one whose
  * declaration has no `drop` goes to `never` and is not tried again, and one
  * whose drop threw goes to `failed`, the only kind a later call retries.
+ * The first call records the holders it finds in `known`; later calls touch
+ * no other holder, since one that appeared since (a declaration whose
+ * authority loaded later) holds only data written after the erasure. A
+ * failed holder whose declaration is gone moves to `never`.
  * @param {string[]} names bare document topic names
- * @param {{ done: Set<string>, failed: Set<string>, never: Set<string> }} [holders]
+ * @param {{ done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }} [holders]
  * @returns {number}
  */
 export function _purgeCrdtDocs(names, holders) {
 	let count = 0;
 	let failed = false;
+	/** @type {Set<string>} */
+	const present = new Set();
 	for (const [declKey, rec] of _crdtDecls) {
 		if (!rec.authority) continue;
 		for (const name of names) {
 			const key = declKey + '\0' + name;
+			present.add(key);
+			if (holders && !holders.scoped) holders.known.add(key);
+			if (holders && holders.scoped && !holders.known.has(key)) continue;
 			if (holders && (holders.done.has(key) || holders.never.has(key))) continue;
 			if (typeof rec.authority.drop !== 'function') {
 				failed = true;
@@ -207,7 +216,15 @@ export function _purgeCrdtDocs(names, holders) {
 			}
 		}
 	}
-	if (failed || (holders && holders.never.size > 0)) throw new Error('Some loaded document replicas could not be erased');
+	if (holders) {
+		for (const key of holders.failed) {
+			if (present.has(key)) continue;
+			holders.failed.delete(key);
+			holders.never.add(key);
+		}
+		holders.scoped = true;
+	}
+	if (failed || (holders && (holders.never.size > 0 || holders.failed.size > 0))) throw new Error('Some loaded document replicas could not be erased');
 	return count;
 }
 

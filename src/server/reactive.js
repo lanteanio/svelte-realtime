@@ -843,19 +843,39 @@ async function _recomputeDerived(entry, platform) {
  * keyed by its output topic: one handled before is in `done` and never reset
  * again (it holds other users' data by then), one of an aggregate without an
  * erasure policy goes to `never` and is not tried again, and one whose reset
- * failed goes to `failed`, the only kind a later call retries.
+ * failed goes to `failed`, the only kind a later call retries. The first call
+ * records the holders it finds in `known`; later calls touch no other holder,
+ * since one registered since (a new or renamed aggregate after a reload) holds
+ * only data written after the erasure. A failed holder that is gone moves to
+ * `never`.
  * @param {string} contributorId
  * @param {any} [platform]
- * @param {{ done: Set<string>, failed: Set<string>, never: Set<string> }} [holders]
+ * @param {{ done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }} [holders]
  * @returns {number}
  */
 export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform, holders) {
 	/** @param {any} entry @param {any} holder */
 	const keyOf = (entry, holder) => holder.outputTopic || entry.topic;
 	/** @param {any} entry */
-	const pendingHolders = (entry) => (entry.windowStates ? [...entry.windowStates.values()] : [entry])
-		.filter((holder) => !holders || (!holders.done.has(keyOf(entry, holder)) && !holders.never.has(keyOf(entry, holder))));
-	const entries = new Set([..._aggregateBySource.values()].flatMap(group => [...group]).filter((entry) => pendingHolders(entry).length > 0));
+	const allHolders = (entry) => (entry.windowStates ? [...entry.windowStates.values()] : [entry]);
+	const all = [..._aggregateBySource.values()].flatMap(group => [...group]);
+	if (holders) {
+		const present = new Set(all.flatMap((entry) => allHolders(entry).map((holder) => keyOf(entry, holder))));
+		if (!holders.scoped) for (const key of present) holders.known.add(key);
+		for (const key of holders.failed) {
+			if (present.has(key)) continue;
+			holders.failed.delete(key);
+			holders.never.add(key);
+		}
+		holders.scoped = true;
+	}
+	/** @param {any} entry */
+	const pendingHolders = (entry) => allHolders(entry).filter((holder) => {
+		if (!holders) return true;
+		const key = keyOf(entry, holder);
+		return holders.known.has(key) && !holders.done.has(key) && !holders.never.has(key);
+	});
+	const entries = new Set(all.filter((entry) => pendingHolders(entry).length > 0));
 	const memberships = [];
 	const failures = [];
 	const resets = [];

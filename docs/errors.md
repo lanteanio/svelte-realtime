@@ -800,7 +800,7 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 
 - Severity: error
 - Message patterns: <code>This process no longer keeps the open in-memory erasure steps of a job.</code>
-- Cause: A process stopped keeping the open in-memory erasure steps of a job. The `reason` attribute says why: `full` (it already owes 10,000 jobs, none of them exhausted, so the new job is not kept), `evicted` (an exhausted job made room for a new one) or `expired` (an exhausted job reached a day without being resumed). The `job` attribute names the job.
+- Cause: A process stopped keeping the open in-memory erasure steps of a job. The `reason` attribute says why: `full` (it already owes 10,000 jobs, none of them exhausted, so the new job is not kept), `evicted` (an exhausted job made room for a new one) or `expired` (an exhausted job reached a day without being resumed) or `reset` (`configureForget(null)` dropped an exhausted job). The `job` attribute names the job.
 - Consequence: This process no longer retries those in-memory steps, so its in-memory state may still hold the user data.
 - Automatic recovery: None.
 - Next action: Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without an erasure policy, a document declaration without `drop`) and fix it, then call `live.forget` again on this process for the affected user.
@@ -838,7 +838,7 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Cause: An erasure run has been going for 15 minutes, and again for every further 15 minutes, usually because a store call is slow or never returns and no `timeoutMs` is configured. The `job` attribute is the job reference and `runningMs` how long the run has gone on.
 - Consequence: The run keeps its job, renewing the lease, so no other run starts on it while it lasts.
 - Automatic recovery: None. The run goes on until its store calls return.
-- Next action: Find the store call that is slow or hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run. Abandon the job with `abandonForgetJob(id)` if the run is stuck for good.
+- Next action: Find the store call that is slow or hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run. If the run is stuck, `abandonForgetJob(id)` cancels it: at once on its own process, and from any other process at its next lease renewal; the job then ends abandoned.
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 
 <a id="diagnostic-invariant.violated"></a>

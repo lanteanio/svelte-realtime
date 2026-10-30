@@ -69,14 +69,14 @@ let _forgetHashKey = null;
 
 /**
  * Optional erasure job store (default null = no job records). Duck-typed:
- * `begin`, `renew`, `claim`, `complete`, `fail`, `abandon`, `list` and `due`,
+ * `begin`, `renew`, `claim`, `complete`, `fail`, `abandon`, `get`, `list` and `due`,
  * each sync or async. `createForgetJobStore()` is the in-memory reference;
  * durable stores implement the same methods. Set via `configureForget({ jobs })`.
  * @type {any}
  */
 let _forgetJobs = null;
 
-const _JOB_METHODS = ['begin', 'renew', 'claim', 'complete', 'fail', 'abandon', 'list', 'due'];
+const _JOB_METHODS = ['begin', 'renew', 'claim', 'complete', 'fail', 'abandon', 'get', 'list', 'due'];
 
 // After this many runs a job (or a process's in-memory retry of it) that still
 // fails stops running by itself and is reported, so work that cannot finish
@@ -101,8 +101,13 @@ const _LOCAL_EXHAUSTED_TTL_MS = 24 * 60 * 60_000;
 // Longer waits are re-armed in steps, below the platform timer limit.
 const _MAX_TIMER_MS = 2_147_000_000;
 
-/** Jobs a run of this process is working on. */
-const _running = new Set();
+/**
+ * Jobs a run of this process is working on, with the controller that cancels
+ * the run and the run id that holds the job's lease (null for an in-memory
+ * retry, which holds no lease).
+ * @type {Map<string, { controller: AbortController, runId: string | null }>}
+ */
+const _running = new Map();
 
 /**
  * Jobs whose `begin` failed, so their caller was told nothing was erased, but
@@ -120,7 +125,7 @@ const _REFUSED_TRIES = 3;
  * running them needs, per-holder progress, and when to try again. Only this
  * process can finish them, and a holder it finished is never run again here;
  * a process that exits takes this state, and the data it describes, with it.
- * @type {Map<string, { userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, open: Set<string>, blocked: Set<string>, holders: Map<string, { done: Set<string>, failed: Set<string>, never: Set<string> }>, attempts: number, createdAt: number, updatedAt: number, retryAt: number, exhausted: boolean, exhaustedAt: number }>}
+ * @type {Map<string, { userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, open: Set<string>, blocked: Set<string>, holders: Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }>, attempts: number, createdAt: number, updatedAt: number, retryAt: number, exhausted: boolean, exhaustedAt: number }>}
  */
 const _localJobs = new Map();
 
@@ -191,27 +196,43 @@ function _readHashKey(key) {
  * plain value passes through; a call that does not settle in time rejects,
  * while the call itself keeps running, so every erasure surface is idempotent
  * under a late finish. `late` receives the outcome of a call that settles
- * after its timeout, for side effects the caller must not lose.
+ * after its timeout, for side effects the caller must not lose. With a
+ * `signal`, the wait also ends when the run is cancelled.
  * @template T
  * @param {T | Promise<T>} value
  * @param {{ resolved?: (v: T) => void, rejected?: (e: unknown) => void }} [late]
+ * @param {AbortSignal} [signal]
  * @returns {T | Promise<T>}
  */
-function _bounded(value, late) {
+function _bounded(value, late, signal) {
 	const ms = _forgetTimeoutMs;
-	if (ms === null || value === null || (typeof value !== 'object' && typeof value !== 'function') || typeof (/** @type {any} */ (value)).then !== 'function') return value;
+	if (value === null || (typeof value !== 'object' && typeof value !== 'function') || typeof (/** @type {any} */ (value)).then !== 'function') return value;
+	if (ms === null && signal === undefined) return value;
 	return new Promise((resolve, reject) => {
-		let timedOut = false;
-		const timer = setTimer(() => { timedOut = true; reject(new Error('store call timed out')); }, ms);
+		let gaveUp = false;
+		/** @type {any} */
+		let timer = null;
+		const onAbort = () => giveUp(new Error('erasure run cancelled'));
+		/** @param {Error} err */
+		function giveUp(err) {
+			if (gaveUp) return;
+			gaveUp = true;
+			if (timer !== null) clearTimer(timer);
+			signal?.removeEventListener('abort', onAbort);
+			reject(err);
+		}
+		if (ms !== null) timer = setTimer(() => giveUp(new Error('store call timed out')), ms);
+		if (signal !== undefined) {
+			if (signal.aborted) { onAbort(); }
+			else signal.addEventListener('abort', onAbort, { once: true });
+		}
 		/** @type {Promise<T>} */ (value).then(
 			(v) => {
-				clearTimer(timer);
-				if (!timedOut) resolve(v);
+				if (!gaveUp) { gaveUp = true; if (timer !== null) clearTimer(timer); signal?.removeEventListener('abort', onAbort); resolve(v); }
 				else if (late?.resolved) { try { late.resolved(v); } catch { /* late side effects are best-effort */ } }
 			},
 			(e) => {
-				clearTimer(timer);
-				if (!timedOut) reject(e);
+				if (!gaveUp) { gaveUp = true; if (timer !== null) clearTimer(timer); signal?.removeEventListener('abort', onAbort); reject(e); }
 				else if (late?.rejected) { try { late.rejected(e); } catch { /* late side effects are best-effort */ } }
 			}
 		);
@@ -325,7 +346,7 @@ function _hashUserId(userId, key) {
  * count it removed (sync or async). Adding a new user-keyed in-memory store
  * without a descriptor here trips the completeness test. Durable stores are NOT
  * listed here - they ride the `store.purgeUser` seam.
- * @type {Array<{ name: string, run: (tenantId: string | null, userId: string, cascade: any, holders?: { done: Set<string>, failed: Set<string>, never: Set<string> }) => number | Promise<number> }>}
+ * @type {Array<{ name: string, run: (tenantId: string | null, userId: string, cascade: any, holders?: { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }) => number | Promise<number> }>}
  */
 const _descriptors = [
 	{ name: 'push', run: (t, u) => _purgePushUser(t, u) },
@@ -576,7 +597,8 @@ async function _runErasure(jobs, job, run, onForget) {
 	// erasure rather than tearing it down half-applied (same contract as a cron
 	// tick / an alarm fire). The `finally` drains exactly once on every exit.
 	_enterInFlight();
-	if (jobId !== null) _running.add(jobId);
+	const controller = new AbortController();
+	if (jobId !== null && job !== null) _running.set(jobId, { controller, runId: job.runId });
 	/** @type {(() => void) | null} */
 	let stopRenewing = null;
 	try {
@@ -597,7 +619,7 @@ async function _runErasure(jobs, job, run, onForget) {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
 		}
-		if (job !== null) stopRenewing = _keepLease(jobs, job.id, job.runId);
+		if (job !== null) stopRenewing = _keepLease(jobs, job.id, job.runId, controller);
 		/** @type {{ failedSurfaces: string[], doneSurfaces: string[], blockedSurfaces: string[], rowsAffected: number }} */
 		const failure = { failedSurfaces: [], doneSurfaces: [], blockedSurfaces: [], rowsAffected: 0 };
 		const holders = job !== null && job.local.length > 0 ? _newHolders() : null;
@@ -616,9 +638,18 @@ async function _runErasure(jobs, job, run, onForget) {
 		/** @type {any} */
 		let error = null;
 		try {
-			erased = await _erase(userId, tenantId, cascade, jobId, failure, plan, holders);
+			erased = await _erase(userId, tenantId, cascade, jobId, failure, plan, holders, job === null ? undefined : controller.signal);
 		} catch (err) {
 			error = err;
+		}
+		if (job !== null && error !== null && controller.signal.aborted) {
+			// Cancelled (abandoned, or the job was taken over after this
+			// process stalled): stop here and leave the job abandoned, without
+			// recording an outcome or keeping in-memory work for it.
+			stopRenewing?.();
+			stopRenewing = null;
+			try { await _bounded(jobs.abandon({ id: job.id, runId: job.runId })); } catch { /* The store finishes the cancellation when the lease expires. */ }
+			throw _withJob(error, jobId);
 		}
 		if (job !== null) {
 			stopRenewing?.();
@@ -666,7 +697,7 @@ async function _runErasure(jobs, job, run, onForget) {
 		return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
 	} finally {
 		stopRenewing?.();
-		if (jobId !== null) _running.delete(jobId);
+		if (jobId !== null && _running.get(jobId)?.controller === controller) _running.delete(jobId);
 		_exitInFlight();
 	}
 }
@@ -678,10 +709,13 @@ async function _runErasure(jobs, job, run, onForget) {
  * a time. A run past `_OVERDUE_MS` (by the monotonic clock) is reported, and
  * again every `_OVERDUE_MS` after; an operator can abandon it. Returns the stop
  * function.
+ * A refused renewal (the job was abandoned, or another run took it after this
+ * process stalled) cancels the run through `controller`.
  * @param {any} jobs @param {string} id @param {string} runId
+ * @param {AbortController} controller
  * @returns {() => void}
  */
-function _keepLease(jobs, id, runId) {
+function _keepLease(jobs, id, runId, controller) {
 	const started = monotonicNow();
 	let nextOverdue = started + _OVERDUE_MS;
 	let stopped = false;
@@ -700,7 +734,11 @@ function _keepLease(jobs, id, runId) {
 			// Not the holder any more: another run took the job after this
 			// process stalled, so renewing is over and this run's outcome will
 			// be refused.
-			.then((held) => { if (held === false) stop(); })
+			.then((held) => {
+				if (held !== false) return;
+				stop();
+				controller.abort();
+			})
 			.catch(() => { /* The next tick tries again. */ })
 			.finally(() => { inFlight = false; });
 	}, _RENEW_MS);
@@ -768,16 +806,20 @@ function _retryDelay(attempts) {
 	return Math.min(_RETRY_BASE_MS * 2 ** Math.min(n - 1, 30), _RETRY_MAX_MS);
 }
 
-/** @returns {{ done: Set<string>, failed: Set<string>, never: Set<string> }} */
+/**
+ * Progress of one step's holders. The first run records the holders it finds
+ * in `known` and sets `scoped`; retries touch only those.
+ * @returns {{ done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }}
+ */
 function _holderProgress() {
-	return { done: new Set(), failed: new Set(), never: new Set() };
+	return { done: new Set(), failed: new Set(), never: new Set(), known: new Set(), scoped: false };
 }
 
 /**
  * Per-holder progress for the in-memory steps that reach other users' data
  * (each aggregate holder, each document of each declaration), so a retry runs
  * only the holders that failed.
- * @returns {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string> }>}
+ * @returns {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }>}
  */
 function _newHolders() {
 	return new Map([['aggregateCohorts', _holderProgress()], ['crdtDocs', _holderProgress()]]);
@@ -791,7 +833,7 @@ function _newHolders() {
  * @param {string} id
  * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
  * @param {string[]} open @param {string[]} blocked
- * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string> }>} holders
+ * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }>} holders
  */
 function _keepLocal(id, run, open, blocked, holders) {
 	_expireLocal();
@@ -879,6 +921,7 @@ async function _retryLocalDue(id, includeExhausted = false) {
 			results.push({ id: jobId, status: 'skipped' });
 			continue;
 		}
+		const controller = new AbortController();
 		if (id !== undefined || includeExhausted) {
 			// Asked for explicitly: blocked holders get another try.
 			for (const step of entry.blocked) {
@@ -888,16 +931,21 @@ async function _retryLocalDue(id, includeExhausted = false) {
 			entry.blocked.clear();
 			entry.exhausted = false;
 		}
-		_running.add(jobId);
+		_running.set(jobId, { controller, runId: null });
 		_enterInFlight();
 		try {
 			/** @type {{ failedSurfaces: string[], doneSurfaces: string[], blockedSurfaces: string[], rowsAffected: number }} */
 			const failure = { failedSurfaces: [], doneSurfaces: [], blockedSurfaces: [], rowsAffected: 0 };
 			let code = null;
 			try {
-				await _erase(entry.userId, entry.tenantId, entry.cascade, jobId, failure, new Set(entry.open), entry.holders);
+				await _erase(entry.userId, entry.tenantId, entry.cascade, jobId, failure, new Set(entry.open), entry.holders, controller.signal);
 			} catch (err) {
 				code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
+			}
+			if (controller.signal.aborted) {
+				// Abandoned while it ran: the work is given up.
+				results.push({ id: jobId, status: 'skipped' });
+				continue;
 			}
 			for (const step of failure.doneSurfaces) entry.open.delete(step);
 			for (const step of failure.blockedSurfaces) {
@@ -919,7 +967,7 @@ async function _retryLocalDue(id, includeExhausted = false) {
 			}
 			results.push({ id: jobId, status: 'failed', code: code ?? 'FORGET_INCOMPLETE' });
 		} finally {
-			_running.delete(jobId);
+			if (_running.get(jobId)?.controller === controller) _running.delete(jobId);
 			_exitInFlight();
 		}
 	}
@@ -930,7 +978,7 @@ async function _retryLocalDue(id, includeExhausted = false) {
 /**
  * @param {'forget.local-exhausted' | 'forget.local-dropped'} event
  * @param {string} job @param {number} attempts
- * @param {'attempts' | 'blocked' | 'full' | 'evicted' | 'expired'} reason
+ * @param {'attempts' | 'blocked' | 'full' | 'evicted' | 'expired' | 'reset'} reason
  */
 function _reportLocal(event, job, attempts, reason) {
 	try {
@@ -969,7 +1017,7 @@ function _reportRunOverdue(job, runningMs) {
  * A failed step whose holders all either finished or cannot succeed as
  * configured is blocked: retrying it could only repeat finished holders.
  * @param {{ blockedSurfaces?: string[] }} failure @param {string} step
- * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string> }> | null} holders
+ * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }> | null} holders
  */
 function _noteBlocked(failure, step, holders) {
 	const progress = holders?.get(step);
@@ -985,12 +1033,13 @@ function _noteBlocked(failure, step, holders) {
  * @param {string | null} jobId
  * @param {{ failedSurfaces: string[], doneSurfaces: string[], blockedSurfaces?: string[], rowsAffected: number }} failure
  * @param {ReadonlySet<string> | null} plan
- * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string> }> | null} [holders]
+ * @param {Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }> | null} [holders]
  *   per-holder progress of the steps that reach other users' data; holders
  *   done or never possible are skipped
+ * @param {AbortSignal} [signal] ends the waits on store calls when the run is cancelled
  * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
  */
-async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders = null) {
+async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders = null, signal = undefined) {
 	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
 	/** @type {Record<string, number>} */
 	const surfaces = {};
@@ -1003,7 +1052,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders =
 		if (plan !== null && !plan.has(d.name)) continue;
 		let count = 0;
 		try {
-			count = await _bounded(d.run(tenantId, userId, cascade, holders?.get(d.name)));
+			count = await _bounded(d.run(tenantId, userId, cascade, holders?.get(d.name)), undefined, signal);
 			if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
 			doneSurfaces.push(d.name);
 		} catch {
@@ -1043,14 +1092,17 @@ async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders =
 			// A purge that commits after its timeout still announces the owner
 			// changes it made: a retry finds those rooms already handed over and
 			// reports nothing for them, so this is their only announcement.
-			const durable = await _bounded(_forgetStore.purgeUser(tenantId, userId, cascade), {
+			const purge = signal === undefined
+				? _forgetStore.purgeUser(tenantId, userId, cascade)
+				: _forgetStore.purgeUser(tenantId, userId, cascade, { signal });
+			const durable = await _bounded(purge, {
 				resolved: (v) => {
 					if (v && typeof v === 'object' && Array.isArray(/** @type {any} */ (v).ownerSuccessions)) _publishOwnerSuccessions(tenantId, /** @type {any} */ (v).ownerSuccessions);
 				},
 				rejected: (e) => {
 					if (e && Array.isArray(/** @type {any} */ (e).ownerSuccessions)) _publishOwnerSuccessions(tenantId, /** @type {any} */ (e).ownerSuccessions);
 				}
-			});
+			}, signal);
 			// The store may return a total (number), a per-store count
 			// breakdown (object), or the owner-succession envelope
 			// `{ rowsAffected?, ownerSuccessions? }` - detected by an
@@ -1156,7 +1208,11 @@ function _clearForgetConfig() {
 	_forgetJobs = null;
 	_forgetTimeoutMs = null;
 	_resumeIntervalMs = null;
-	for (const [key, entry] of _localJobs) if (entry.exhausted) _localJobs.delete(key);
+	for (const [key, entry] of _localJobs) {
+		if (!entry.exhausted) continue;
+		_localJobs.delete(key);
+		_reportLocal('forget.local-dropped', key, entry.attempts, 'reset');
+	}
 	_restartForgetTimers();
 }
 
@@ -1261,9 +1317,21 @@ export async function listForgetJobs(filter = {}) {
 	if (status === undefined) {
 		_expireLocal();
 		const listed = new Set(out.map((j) => j.id));
-		for (const key of _localJobs.keys()) if (!listed.has(key)) out.push(_localOnlyJob(key));
+		for (const key of _localJobs.keys()) {
+			if (listed.has(key)) continue;
+			// Listed with `status: null` only when the store has no record of
+			// the job; a job on a later page of the store is not repeated here.
+			let known = null;
+			if (jobs !== null) {
+				try { known = await _bounded(jobs.get({ id: key })); } catch {
+					throw new LiveError('FORGET_JOB_FAILED', 'listForgetJobs: the erasure job store could not be read');
+				}
+			}
+			if (known == null) out.push(_localOnlyJob(key));
+		}
+		out.sort((a, b) => a.createdAt - b.createdAt);
 	}
-	return out;
+	return out.slice(0, limit);
 }
 
 /**
@@ -1385,20 +1453,24 @@ export async function resumeForgetJobs(opts = {}) {
 /**
  * Give up an open erasure job: the store marks it `abandoned` and drops its
  * user id, and this process drops the in-memory steps it still owes for it.
- * A job a live run is working on is not abandoned. Resolves whether anything
- * was given up; false without a job store.
+ * A run of this process working on the job is cancelled at once. A run in
+ * another process is asked to stop: the store refuses its next lease renewal,
+ * the run stops, and the job ends abandoned (or completed, had the run already
+ * finished every step). Resolves whether anything was given up or cancelled.
  * @param {string} id
  * @returns {Promise<boolean>}
  */
 export async function abandonForgetJob(id) {
 	_jobId(id, 'abandonForgetJob');
-	if (_running.has(id)) return false;
+	const running = _running.get(id);
+	if (running !== undefined) running.controller.abort();
 	const local = _localJobs.delete(id);
 	if (local) _armLocalTimer();
 	const jobs = _forgetJobs;
-	if (jobs === null) return local;
+	if (jobs === null) return local || running !== undefined;
 	try {
-		return (await _bounded(jobs.abandon({ id }))) === true || local;
+		const result = await _bounded(jobs.abandon(running?.runId ? { id, runId: running.runId } : { id }));
+		return result === true || result === 'cancelled' || local || running !== undefined;
 	} catch {
 		throw new LiveError('FORGET_JOB_FAILED', 'abandonForgetJob: the erasure job store could not be written');
 	}

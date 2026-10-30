@@ -80,6 +80,15 @@ export function createForgetJobStore(options = {}) {
 		return Array.isArray(list) ? list.filter((n) => typeof n === 'string') : [];
 	}
 
+	/** @param {any} j @param {number} now */
+	function _abandon(j, now) {
+		Object.assign(j, {
+			status: 'abandoned', updatedAt: now, retryAt: null, cancelRequested: false,
+			userId: null, userIdHash: null, cascade: null, shared: [], leaseRunId: null, leaseUntil: 0
+		});
+		_settle(j);
+	}
+
 	/** @param {any} j */
 	function _settle(j) {
 		settled.delete(j.id);
@@ -122,7 +131,7 @@ export function createForgetJobStore(options = {}) {
 				// cannot change what a later resume runs.
 				userId: intent.userId, cascade: JSON.parse(JSON.stringify(intent.cascade)), shared: _names(intent.shared),
 				status: 'pending', attempts: 1, createdAt: now, updatedAt: now, completedAt: null,
-				retryAt: null, rowsAffected: 0, error: null,
+				retryAt: null, rowsAffected: 0, error: null, cancelRequested: false,
 				leaseRunId: intent.runId, leaseUntil: now + intent.leaseMs
 			});
 		},
@@ -133,7 +142,9 @@ export function createForgetJobStore(options = {}) {
 		 */
 		renew(req) {
 			const j = _held(req.id, req.runId);
-			if (j === undefined) return false;
+			// A job whose cancellation was asked for is not renewed: its run
+			// stops and abandons it.
+			if (j === undefined || j.cancelRequested) return false;
 			j.leaseUntil = wallEpoch() + req.leaseMs;
 			return true;
 		},
@@ -148,6 +159,11 @@ export function createForgetJobStore(options = {}) {
 			const j = jobs.get(req.id);
 			const now = wallEpoch();
 			if (j === undefined || _FINISHED.has(j.status) || (j.status === 'exhausted' && req.exhausted !== true) || _leased(j, now)) return null;
+			if (j.cancelRequested) {
+				// Its run stopped without abandoning it (the process died).
+				_abandon(j, now);
+				return null;
+			}
 			settled.delete(j.id);
 			Object.assign(j, { status: 'pending', attempts: j.attempts + 1, updatedAt: now, leaseRunId: req.runId, leaseUntil: now + req.leaseMs });
 			return {
@@ -201,22 +217,36 @@ export function createForgetJobStore(options = {}) {
 		},
 
 		/**
-		 * Give up an open job whose lease has expired or is held by `runId`:
-		 * mark it abandoned and drop everything user-derived. Returns whether
-		 * it did.
+		 * Give up an open job. When no unexpired lease holds it, or `runId`
+		 * does, mark it abandoned, drop everything user-derived and return
+		 * true. When another run holds it, record a cancellation and return
+		 * `'cancelled'`: that run's next renewal is refused, it stops, and it
+		 * abandons the job. Returns false for an unknown or finished job.
 		 * @param {{ id: string, runId?: string }} req
+		 * @returns {boolean | 'cancelled'}
 		 */
 		abandon(req) {
 			const j = jobs.get(req.id);
 			const now = wallEpoch();
 			if (j === undefined || _FINISHED.has(j.status)) return false;
-			if (_leased(j, now) && j.leaseRunId !== req.runId) return false;
-			Object.assign(j, {
-				status: 'abandoned', updatedAt: now, retryAt: null,
-				userId: null, userIdHash: null, cascade: null, shared: [], leaseRunId: null, leaseUntil: 0
-			});
-			_settle(j);
+			if (_leased(j, now) && j.leaseRunId !== req.runId) {
+				// A run holds it: ask that run to stop. Its next renewal is
+				// refused, and it abandons the job when it stops.
+				j.cancelRequested = true;
+				j.updatedAt = now;
+				return 'cancelled';
+			}
+			_abandon(j, now);
 			return true;
+		},
+
+		/**
+		 * One job without the raw user id, or null when the store holds none.
+		 * @param {{ id: string }} req
+		 */
+		get(req) {
+			const j = jobs.get(req.id);
+			return j === undefined ? null : _public(j);
 		},
 
 		/**
@@ -243,7 +273,7 @@ export function createForgetJobStore(options = {}) {
 			const now = wallEpoch();
 			const out = [];
 			for (const j of jobs.values()) {
-				if (_leased(j, now)) continue;
+				if (_leased(j, now) || j.cancelRequested) continue;
 				if (req.exhausted === true ? j.status === 'exhausted' : (j.status === 'pending' || (j.status === 'failed' && j.retryAt <= now))) out.push(j);
 			}
 			/** @param {any} j */

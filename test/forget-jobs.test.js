@@ -239,14 +239,24 @@ describe('createForgetJobStore', () => {
 		expect(s.claim({ id: 'j1', runId: 'r2', leaseMs: 100, exhausted: true })).toMatchObject({ attempts: 2 });
 	});
 
-	it('abandons only a job no live lease holds, unless the holder asks', () => {
+	it('cancels a job a run holds and abandons it when the holder stops or its lease runs out', () => {
 		const s = createForgetJobStore();
 		s.begin(intent());
-		expect(s.abandon({ id: 'j1' })).toBe(false);
+		expect(s.abandon({ id: 'j1' })).toBe('cancelled');
+		expect(s.due({ limit: 10 })).toEqual([]);
+		// The holder's next renewal is refused; it stops and abandons the job.
+		expect(s.renew({ id: 'j1', runId: 'r1', leaseMs: 100 })).toBe(false);
 		expect(s.abandon({ id: 'j1', runId: 'r1' })).toBe(true);
 		expect(s.list()[0]).toMatchObject({ status: 'abandoned', userIdHash: null });
 		expect(s.abandon({ id: 'j1', runId: 'r1' })).toBe(false);
 		expect(s.claim({ id: 'j1', runId: 'r2', leaseMs: 100, exhausted: true })).toBeNull();
+		// A holder that died: the cancelled job ends abandoned once its lease runs out.
+		s.begin(intent({ id: 'j2' }));
+		expect(s.abandon({ id: 'j2' })).toBe('cancelled');
+		t = 1200;
+		expect(s.claim({ id: 'j2', runId: 'r3', leaseMs: 100 })).toBeNull();
+		expect(s.get({ id: 'j2' })).toMatchObject({ status: 'abandoned' });
+		expect(s.get({ id: 'nope' })).toBeNull();
 	});
 
 	it('orders due jobs by how long they have been due', () => {
@@ -850,5 +860,137 @@ describe('in-memory work without a job store', () => {
 		expect((await listForgetJobs()).filter((j) => j.local !== null).map((j) => j.id)).toEqual([blocked.job, retried.job]);
 		configureForget(null);
 		expect((await listForgetJobs()).map((j) => j.id)).toEqual([retried.job]);
+	});
+});
+
+describe('abandoning a job a run is working on', () => {
+	afterEach(() => { vi.resetModules(); });
+
+	/** A durable purge that never finishes by itself, but ends when its run is cancelled. */
+	function hungStore() {
+		const calls = [];
+		return {
+			calls,
+			purgeUser: (_t, _u, _c, opts) => {
+				calls.push(opts?.signal);
+				return new Promise(() => {});
+			}
+		};
+	}
+
+	it('cancels the run when the owning process abandons it', async () => {
+		const store = hungStore();
+		configureForget({ store, jobs: true });
+		const run = live.forget('alice', { tenantId: null }).catch((e) => e);
+		await vi.waitFor(() => expect(store.calls).toHaveLength(1));
+		const [job] = await listForgetJobs();
+		expect(await abandonForgetJob(job.id)).toBe(true);
+		const err = await run;
+		expect(err.job).toBe(job.id);
+		expect(store.calls[0].aborted).toBe(true);
+		expect((await listForgetJobs())[0]).toMatchObject({ id: job.id, status: 'abandoned', userIdHash: null });
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		expect(store.calls).toHaveLength(1);
+	});
+
+	it('cancels the run through the store when another process abandons it', async () => {
+		setRuntimeEnv({ timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) } });
+		const store = hungStore();
+		const jobs = createForgetJobStore();
+		configureForget({ store, jobs });
+		const run = live.forget('alice', { tenantId: null }).catch((e) => e);
+		await vi.waitFor(() => expect(store.calls).toHaveLength(1));
+		const [job] = await listForgetJobs();
+
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		(await import('../src/shared/runtime.js')).setRuntimeEnv({ timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) } });
+		other.configureForget({ store, jobs, resumeIntervalMs: 1000 });
+		expect(await other.abandonForgetJob(job.id)).toBe(true);
+		const err = await run;
+		expect(err.job).toBe(job.id);
+		expect((await listForgetJobs())[0]).toMatchObject({ id: job.id, status: 'abandoned' });
+		await new Promise((r) => setTimeout(r, 30));
+		expect(store.calls).toHaveLength(1);
+		other.configureForget(null);
+	});
+});
+
+describe('retries touch only the holders of the first run', () => {
+	afterEach(() => { _resetAggregates(); });
+
+	it('does not reset an aggregate registered after the first run', async () => {
+		const platform = mockPlatform();
+		let broken = false;
+		const flaky = live.aggregate('source', { total: { init: () => { if (broken) throw new Error('busy'); return 0; }, reduce: (n) => n + 1 } }, { topic: 'flaky', forget: 'reset' });
+		__registerAggregate('erasure/flaky', flaky);
+		_activateDerived(platform);
+		configureForget({ jobs: true });
+		broken = true;
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		broken = false;
+		expect(err.code).toBe('FORGET_INCOMPLETE');
+		// Registered after the erasure: holds only later data.
+		const fresh = live.aggregate('source', { total: { init: () => 0, reduce: (n) => n + 1 } }, { topic: 'fresh', forget: 'reset' });
+		__registerAggregate('erasure/fresh', fresh);
+		_activateDerived(platform);
+		platform.publish('source', 'added', { id: 'bob' });
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
+		expect(aggregateRegistry.get('erasure/fresh').state.total).toBe(1);
+	});
+
+	it('does not drop documents of a declaration that loaded after the first run', async () => {
+		let fail = true;
+		const drop = vi.fn(() => { if (fail) { fail = false; throw new Error('busy'); } return true; });
+		_crdtDecls.set('notes', { authority: { drop } });
+		const late = { authority: null };
+		_crdtDecls.set('late', late);
+		configureForget({ jobs: true });
+		await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch(() => {});
+		const lateDrop = vi.fn(() => true);
+		late.authority = { drop: lateDrop };
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
+		expect(drop).toHaveBeenCalledTimes(2);
+		expect(lateDrop).not.toHaveBeenCalled();
+	});
+
+	it('sets aside a failed holder whose aggregate is gone instead of retrying it', async () => {
+		const platform = mockPlatform();
+		let broken = false;
+		const flaky = live.aggregate('source', { total: { init: () => { if (broken) throw new Error('busy'); return 0; }, reduce: (n) => n + 1 } }, { topic: 'flaky', forget: 'reset' });
+		__registerAggregate('erasure/flaky', flaky);
+		_activateDerived(platform);
+		configureForget({ jobs: true });
+		broken = true;
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		_resetAggregates();
+		later();
+		await resumeForgetJobs();
+		expect(events.filter((e) => e.event === 'forget.local-exhausted').map((e) => e.attributes)).toEqual([{ job: err.job, attempts: 2, reason: 'blocked' }]);
+	});
+});
+
+describe('listing owed in-memory work', () => {
+	it('respects the limit and does not repeat a job the store lists on a later page', async () => {
+		configureForget({ jobs: true });
+		const first = await live.forget('alice', { tenantId: null });
+		flakyMemoryDeadLetter(Infinity);
+		const owed = await live.forget('bob', { tenantId: null }).catch((e) => e);
+		const page = await listForgetJobs({ limit: 1 });
+		expect(page.map((j) => j.id)).toEqual([first.job]);
+		const all = await listForgetJobs();
+		expect(all.map((j) => j.id)).toEqual([first.job, owed.job]);
+		expect(all[1]).toMatchObject({ status: 'completed', local: { open: ['webhookDeadLetter'] } });
+	});
+
+	it('reports exhausted in-memory work dropped when the configuration is cleared', async () => {
+		_crdtDecls.set('legacy', { authority: {} });
+		configureForget({ jobs: true });
+		const err = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		configureForget(null);
+		expect(events.filter((e) => e.event === 'forget.local-dropped').map((e) => e.attributes)).toEqual([{ job: err.job, reason: 'reset' }]);
 	});
 });

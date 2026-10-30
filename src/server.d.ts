@@ -4725,7 +4725,11 @@ export interface ForgetJobStore {
 	 * `leaseMs` - durably, before resolving. Rejects when `id` exists.
 	 */
 	begin(intent: ForgetJobIntent): void | Promise<void>;
-	/** Extend the lease of `runId` to `leaseMs` from now; resolve whether it holds it. */
+	/**
+	 * Extend the lease of `runId` to `leaseMs` from now and resolve true. Resolve
+	 * false, changing nothing, when `runId` no longer holds the lease or the
+	 * job's cancellation was asked for; the run then stops.
+	 */
 	renew(req: { id: string; runId: string; leaseMs: number }): boolean | Promise<boolean>;
 	/**
 	 * When the job is `pending` or `failed` (or `exhausted` and `exhausted` is
@@ -4755,9 +4759,15 @@ export interface ForgetJobStore {
 	 * When the job is pending, failed or exhausted and no unexpired lease
 	 * holds it (or `runId` does): mark it `abandoned`, release the lease,
 	 * delete `userId`, `userIdHash`, `cascade` and the step list, and resolve
-	 * true. Otherwise resolve false. An abandoned job is never claimed.
+	 * true. When another run's unexpired lease holds it: record a
+	 * cancellation and resolve `'cancelled'`; that run's next `renew` resolves
+	 * false, the run stops and abandons the job, and a cancelled job whose
+	 * lease runs out is abandoned instead of claimed or listed as due. Resolve
+	 * false for an unknown or finished job. An abandoned job is never claimed.
 	 */
-	abandon(req: { id: string; runId?: string }): boolean | Promise<boolean>;
+	abandon(req: { id: string; runId?: string }): boolean | 'cancelled' | Promise<boolean | 'cancelled'>;
+	/** One job as `list` shows it, or null when the store holds no record of it. */
+	get(req: { id: string }): Omit<ForgetJob, 'local'> | null | Promise<Omit<ForgetJob, 'local'> | null>;
 	/** Jobs oldest `createdAt` first, optionally one status, at most `limit` (default 100). */
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): Array<Omit<ForgetJob, 'local'>> | Promise<Array<Omit<ForgetJob, 'local'>>>;
 	/**
@@ -4776,7 +4786,8 @@ export interface MemoryForgetJobStore extends ForgetJobStore {
 	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null;
 	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean;
 	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean;
-	abandon(req: { id: string; runId?: string }): boolean;
+	abandon(req: { id: string; runId?: string }): boolean | 'cancelled';
+	get(req: { id: string }): Omit<ForgetJob, 'local'> | null;
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): Array<Omit<ForgetJob, 'local'>>;
 	due(req: { limit: number; exhausted?: boolean }): Array<Omit<ForgetJob, 'local'>>;
 	clear(): void;
@@ -4797,8 +4808,11 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
 /**
  * Give up an open erasure job: the store marks it `abandoned` and drops its
  * user id, and this process drops the in-memory steps it still owes for it. A
- * job a live run is working on is not abandoned. Resolves whether anything was
- * given up. Rejects with INVALID_REQUEST on a bad
+ * run of this process working on the job is cancelled at once; a run in
+ * another process is asked to stop through the store, stops at its next lease
+ * renewal (within 20 seconds), and the job ends abandoned - or completed, had
+ * the run already finished every step. Resolves whether anything was given up
+ * or cancelled. Rejects with INVALID_REQUEST on a bad
  * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;
@@ -4806,8 +4820,9 @@ export function abandonForgetJob(id: string): Promise<boolean>;
 /**
  * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100),
  * each with the in-memory steps this process still owes for it. Without a
- * status filter, jobs this process owes in-memory steps for that the store
- * does not list follow with `status: null`, also without a job store. Rejects with INVALID_REQUEST on a bad filter and
+ * status filter, jobs this process owes in-memory steps for of which the store
+ * holds no record (checked with `get`) are merged in by `createdAt` with
+ * `status: null`, within `limit`; also after the job store is cleared. Rejects with INVALID_REQUEST on a bad filter and
  * FORGET_JOB_FAILED when the store cannot be read.
  */
 export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
@@ -4815,8 +4830,8 @@ export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: numb
 /**
  * Run open erasure work again. First the in-memory steps this process still
  * owes whose retry time has come (results with `steps: 'local'`; only this
- * process can do them, it also retries them by itself, and it does so with or
- * without a job store; an explicit `id` or `exhausted` also gives blocked
+ * process can do them, it retries them by itself, and keeps doing so after the
+ * job store is cleared; an explicit `id` or `exhausted` also gives blocked
  * holders another try), then jobs whose
  * shared steps are due (`steps: 'shared'`): failed ones past their `retryAt`
  * and pending ones whose run let its lease expire, earliest due first, at most
@@ -4868,10 +4883,13 @@ export interface ForgetOwnerSuccession {
  * (number), a per-store count breakdown, or the owner-succession envelope
  * `{ rowsAffected?, ownerSuccessions? }` carrying the `:owner` changes the
  * store's cluster-wide owner eviction produced for rooms the forgetting
- * instance could not resolve locally.
+ * instance could not resolve locally. With a job store, a fourth argument
+ * carries an `AbortSignal` that fires when the erasure job is abandoned; a
+ * store may stop early on it. It must tolerate concurrent calls for the same
+ * user.
  */
 export interface ForgetStore {
-	purgeUser(tenantId: string | null, userId: string, cascade: any): Promise<number | Record<string, number> | { rowsAffected?: number | Record<string, number>, ownerSuccessions?: ForgetOwnerSuccession[] }>;
+	purgeUser(tenantId: string | null, userId: string, cascade: any, options?: { signal: AbortSignal }): Promise<number | Record<string, number> | { rowsAffected?: number | Record<string, number>, ownerSuccessions?: ForgetOwnerSuccession[] }>;
 }
 
 /**
