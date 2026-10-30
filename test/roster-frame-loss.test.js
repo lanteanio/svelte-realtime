@@ -179,6 +179,7 @@ describe('roster views over streams that lose, repeat or reorder frames', () => 
 		await tick();
 		const again = subscribes(ws, 'board/__cursors');
 		expect(again).toHaveLength(2);
+		expect(again[1].seq).toBeUndefined();
 		answer(ws, again[1], { ok: true, data: [{ key: 'bob', x: 6, y: 6, _p: 'pb', _n: 2 }], topic: 'board:cursors', merge: 'cursor' });
 		await tick();
 		expect(room.cursors.map((c) => [c.key, c.x])).toEqual([['bob', 6]]);
