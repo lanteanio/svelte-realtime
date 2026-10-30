@@ -622,9 +622,36 @@ export function _rerunCtx(ctx, kind) {
 	return out;
 }
 
+/**
+ * Which server-scheduled work a context runs: 'cron' or 'alarm'. An own
+ * enumerable property under a module-private symbol, so a handler's
+ * `{ ...ctx, extra }` copy keeps it and nothing outside this module can set it.
+ */
+const _WORK_ORIGIN = Symbol('svelte-realtime.workOrigin');
+
+/**
+ * Mark a context as work the server scheduled itself.
+ * @template T
+ * @param {T} ctx
+ * @param {'cron' | 'alarm'} origin
+ * @returns {T}
+ */
+export function _markWorkOrigin(ctx, origin) {
+	/** @type {any} */ (ctx)[_WORK_ORIGIN] = origin;
+	return ctx;
+}
+
+/**
+ * @param {any} ctx
+ * @returns {'cron' | 'alarm' | undefined}
+ */
+export function _workOrigin(ctx) {
+	return ctx !== null && typeof ctx === 'object' ? ctx[_WORK_ORIGIN] : undefined;
+}
+
 /** Build background work without resolving a missing user's tenant. */
 export function _buildPersistedCtx(platform, helpers, tenantId) {
-	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
+	return _markWorkOrigin(_buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId)), 'alarm');
 }
 
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId) {
@@ -700,6 +727,8 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		setAlarm: _alarmUnavailable,
 		getAlarm: _alarmGetUnavailable,
 		deleteAlarm: _alarmUnavailable,
+		// Set only on cron and alarm contexts (see _markWorkOrigin).
+		[_WORK_ORIGIN]: undefined,
 		_idempotencyKey: idempotencyKey || null,
 		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
 		// null). `_publishWire` is the raw, non-prefixing publish for framework

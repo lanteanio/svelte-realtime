@@ -1691,7 +1691,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "bd4a527072ac1e7c72320caa04187bcd66017576c39fd81160135138ce148d4f",
+			"fingerprint": "921313b77f266d3fd6bc7f1d4a472b4d6e3dcd53379cf68d809f5343234b320c",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Streaming uploads",

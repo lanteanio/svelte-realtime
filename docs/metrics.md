@@ -7,6 +7,8 @@
 - `svelte_realtime_rpc_total` - RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
 - `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
+- `svelte_realtime_upload_limits_total` - upload starts and chunks refused by a limit, by `limit`: `session`, `user`, `process`, `tenant`, `process_bytes` or `tenant_bytes` (no user or tenant ids)
+- `svelte_realtime_idempotency_capacity_total` - in-process `live.idempotent` admissions at a capacity limit, by `outcome`: `replaced` (a caller at its own share gave up its oldest result) or `rejected` (`IDEMPOTENCY_CAPACITY`); no caller ids
 - `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status

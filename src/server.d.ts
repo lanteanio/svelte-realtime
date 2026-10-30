@@ -1604,17 +1604,64 @@ export interface UploadOptions extends LiveOptions {
 
 	/**
 	 * Maximum concurrent uploads per WebSocket connection. Excess upload
-	 * starts reject with `LiveError('OVERLOADED')`.
+	 * starts reject with `LiveError('TOO_MANY_UPLOADS')`. A cancelled upload
+	 * keeps counting until its handler has returned.
 	 * @default 4
 	 */
 	maxConcurrentPerSession?: number;
 
 	/**
-	 * Global cap on concurrent uploads across the worker. Default unset
-	 * (unbounded); set a value to enable capacity protection at the
-	 * worker scope.
+	 * Maximum uploads one authenticated user (`ctx.user` id, within its
+	 * tenant) may have admitted at once, across every session and upload
+	 * endpoint in the process. An anonymous upload is charged to its
+	 * connection, the only boundary it carries. Excess starts reject with
+	 * `LiveError('TOO_MANY_UPLOADS')`. An upload occupies its slot until it
+	 * has ended and its handler has returned. A positive integer, or
+	 * `Infinity` to lift the limit.
+	 * @default 16
+	 */
+	maxConcurrentPerUser?: number;
+
+	/**
+	 * Maximum uploads one tenant (`ctx.tenantId`) may have admitted at once,
+	 * across every session and upload endpoint in the process. Excess starts
+	 * reject with `LiveError('TOO_MANY_UPLOADS')`. Applies only with a tenant
+	 * resolver; uploads it leaves unscoped share one quota. An upload occupies
+	 * its slot until it has ended and its handler has returned. A positive
+	 * integer, or `Infinity` to lift the limit.
+	 * @default 100
+	 */
+	maxConcurrentPerTenant?: number;
+
+	/**
+	 * Maximum uploads admitted at once across the process, every session and
+	 * upload endpoint counted. Excess starts reject with
+	 * `LiveError('TOO_MANY_UPLOADS')`. An upload occupies its slot until it has
+	 * ended and its handler has returned, so a handler that ignores
+	 * `ctx.abortSignal` keeps it. A positive integer, or `Infinity` to lift
+	 * the limit.
+	 * @default 1000
 	 */
 	maxConcurrentTotal?: number;
+
+	/**
+	 * Maximum bytes queued in `ctx.stream` and not yet read, summed over one
+	 * tenant's uploads across sessions and endpoints. A chunk that would pass
+	 * it fails its upload with `LiveError('OVERLOADED')`, and a start whose
+	 * queued chunks would pass it rejects with it before its handler runs. Chunks a
+	 * handler is already waiting for are never queued. Applies only with a
+	 * tenant resolver. A positive integer, or `Infinity` to lift the limit.
+	 * @default 268435456 (256 MiB)
+	 */
+	maxBufferedBytesPerTenant?: number;
+
+	/**
+	 * Maximum bytes queued in `ctx.stream` and not yet read across the
+	 * process. Enforced like `maxBufferedBytesPerTenant`. A positive integer,
+	 * or `Infinity` to lift the limit.
+	 * @default 1073741824 (1 GiB)
+	 */
+	maxBufferedBytesTotal?: number;
 
 	/**
 	 * Receiver window, a positive integer. At most this many chunks queue
@@ -2108,13 +2155,25 @@ export namespace live {
 	 * the first call's result (a genuine idempotent retry must carry the same
 	 * body); the framework fingerprints the request args to detect the mismatch.
 	 *
-	 * The default in-process store reserves up to 10,000 running keys and cached
+	 * The default in-process store holds up to 10,000 running keys and cached
 	 * results, with at most 1,000 per tenant. Without a tenant resolver, calls may
 	 * use all of them; with one, calls it leaves unscoped share one 1,000-slot
-	 * bucket. The final 1,000 global slots admit only tenants holding fewer than
-	 * 100 entries. These are
-	 * process-local bounds, not per-user quotas. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
-	 * before the handler runs; cached retries remain available until their TTL.
+	 * bucket. Inside that share each identity (each connection, for anonymous
+	 * callers) may hold a tenth of it: 100 per identity in a tenant, 1,000 without
+	 * tenants. The last tenth of each level admits only holders below a hundredth
+	 * of it. A caller holding its whole identity share replaces its own oldest
+	 * result for a client envelope key, so a retry of that key runs again; a
+	 * `keyFrom` key may be shared by design and is never replaced. At every other
+	 * limit (the store, the tenant, a reserve), or with nothing of its own to give
+	 * up, a new key gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler
+	 * runs and every cached result stays, so no caller's traffic evicts another
+	 * caller's result. A refusal at the caller's own share carries `retryAfter`,
+	 * the milliseconds until the earliest of its results can expire, counting a
+	 * running call as committed now, and none while a call on a key of its own
+	 * still runs. Server-side calls without a user (`.load()`, form
+	 * actions) share one identity-sized bucket per tenant that never replaces.
+	 * Cron jobs and alarms have pools of 1,000 of their own that callers cannot
+	 * fill; with a tenant resolver each tenant's alarms may hold 100 of theirs.
 	 * Pending durable slots are polled for up to five seconds, then return
 	 * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
 	 * Waiting never cancels the original owner.

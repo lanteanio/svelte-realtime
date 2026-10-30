@@ -70,10 +70,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the store (connectivity, permissions, schema), then call `live.forget` again, or `resumeForgetJobs()` with a job store. A repeat call only reprocesses the rooms that failed.'
 	}),
 	IDEMPOTENCY_CAPACITY: Object.freeze({
-		cause: 'A `live.idempotent` call brings a new key while the default in-process store is full: 10,000 running and cached entries overall. With a tenant resolver configured, each tenant and the unscoped bucket are also capped at 1,000 and the last 1,000 slots are kept for small tenants; without one, unscoped callers may use the whole store.',
-		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Cached results for keys already stored can still be returned.',
-		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.',
-		nextAction: 'Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.'
+		cause: 'A `live.idempotent` call brings a new key while the default in-process store is at a limit. Either the store is full for it (10,000 entries overall, 1,000 per tenant, the reserves kept for small holders, or the 1,000-slot cron and alarm pools), or the caller holds its whole share (a tenth of its tenant share per identity, anonymous connection or server-side bucket, or a tenth of the alarm pool per tenant) and has nothing of its own to give up: only running keys, results for `keyFrom` keys, or a bucket shared by callers that cannot be told apart.',
+		consequence: 'The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Every cached result stays and can still be returned. A refusal at the caller\'s own share says so and carries `retryAfter`, the milliseconds until the earliest of its results can expire, counting a running call as committed now, and none while a call on a key of its own still runs, since that one can be replaced once it finishes. A hint can be as long as the TTL. A caller holding its whole share with a result for a client envelope key replaces its own oldest one instead of being refused.',
+		automaticRecovery: 'Offline-queue replays pause and retry after `retryAfter`, at least one second, or without one after a backoff that doubles from one second. Once a call would hold the queue past 30 seconds in all it is set aside, reported through `onReplayError` but kept queued with its stored row until then, and replay moves on to the calls behind it; a call whose wait would outlast its retention is dropped as STALE instead. Other callers are not retried, and slots free up as entries expire.',
+		nextAction: 'For a full store, retry with the same key and payload after a short backoff. For a refusal at the caller\'s own share, retry after `retryAfter` or not at all, and keep fewer results per caller: a shorter TTL, client envelope keys instead of a per-user `keyFrom`, or a durable idempotency store.'
 	}),
 	IDEMPOTENCY_COMMIT_UNKNOWN: Object.freeze({
 		cause: 'The handler wrapped by `live.idempotent` finished successfully, but the store\'s `commit` threw, so the runtime cannot tell whether the result was recorded.',
@@ -84,7 +84,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	IDEMPOTENCY_IN_PROGRESS: Object.freeze({
 		cause: 'A call arrives with an idempotency key that a durable store still lists as pending for an earlier request, and that request does not finish within five seconds of polling.',
 		consequence: 'The call rejects with an IDEMPOTENCY_IN_PROGRESS LiveError (RpcError on the client). The original request keeps running and is not cancelled.',
-		automaticRecovery: 'Offline-queue replays pause and try again about one second later. Other callers are not retried.',
+		automaticRecovery: 'Offline-queue replays pause and try again after a backoff that doubles from one second; once a call would hold the queue past 30 seconds in all it is set aside, reported through `onReplayError` but kept queued, and the calls behind it replay. Other callers are not retried.',
 		nextAction: 'Retry with the same key and payload after a short backoff. If it keeps happening, look for slow handlers or pending entries that never clear in the store.'
 	}),
 	IDEMPOTENCY_KEY_REUSED: Object.freeze({
@@ -184,8 +184,8 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Settle or clear the queue before switching identity or storage. Treat these rejections as expected during an account or storage switch.'
 	}),
 	OVERLOADED: Object.freeze({
-		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
-		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure`, without a dead-letter record.',
+		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, unread upload bytes would pass the endpoint\x27s `maxBufferedBytesPerTenant` (default 256 MiB) or `maxBufferedBytesTotal` (default 1 GiB) limit, or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
+		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending or running one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure`, without a dead-letter record.',
 		automaticRecovery: 'None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers. An effect or webhook takes new publishes again as soon as its queue has room.',
 		nextAction: 'Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules. For an effect or webhook, find why its calls are slow, then raise `maxConcurrent` or `maxQueued` only if the work can keep up.'
 	}),
@@ -226,7 +226,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check the file or stream source the app passed in, then start a new upload. Show the user that the file could not be read.'
 	}),
 	STALE: Object.freeze({
-		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
+		cause: 'During offline replay a queued mutation is older than `offline.maxAge` or its retention, is told by an idempotency refusal to wait past them, is refused by `beforeReplay` or the `replay` function, or has arguments that cannot be serialized.',
 		consequence: 'The mutation is dropped without being sent. Its promise rejects with a STALE RpcError, sometimes with a `cause`, and `offline.onReplayError` is notified.',
 		automaticRecovery: 'None. Dropped mutations are not re-queued.',
 		nextAction: 'Check `maxAge`, retention, `beforeReplay` and `replay` logic. Make `beforeReplay` synchronous and non-throwing, and surface dropped edits to the user via `onReplayError`.'
@@ -244,7 +244,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key. For an effect, find the call that never settles (an awaited promise without a timeout of its own) or raise `timeoutMs` for work that is legitimately slow.'
 	}),
 	TOO_MANY_UPLOADS: Object.freeze({
-		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession` or `maxConcurrentTotal` limit.',
+		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession`, `maxConcurrentPerUser` (default 16 per signed-in user across sessions), `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads, cancelled ones included, hold their slot until their handler returns.',
 		consequence: 'The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.',
 		automaticRecovery: 'None. The refused upload is not queued or retried.',
 		nextAction: 'Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.'
