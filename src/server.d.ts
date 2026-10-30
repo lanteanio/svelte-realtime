@@ -233,6 +233,12 @@ export interface Register {}
 /** Registered upgrade user data; unregistered apps keep permissive callback types. */
 export type RegisteredUser = Register extends { user: infer User } ? User : any;
 
+/**
+ * The context of one operation. At runtime it is an instance of the internal
+ * `LiveCallContext` class, not a plain object: pass `ctx` itself to
+ * helpers. Spreading it (`{ ...ctx }`) copies only its own data fields, not
+ * `abortSignal` or any accessor added later.
+ */
 export interface LiveContext<UserData = RegisteredUser> {
 	/** Cooperative execution deadline from live.lock({ maxExecutionMs }); pass to abort-aware work. */
 	lockSignal?: AbortSignal;

@@ -93,7 +93,9 @@ The deadline does not answer the call by itself, and a handler's place goes back
 
 The signal's controller is created when the handler first reads `ctx.abortSignal`, so a handler that never reads it allocates nothing for it. A handler that first reads it after its deadline or its connection's close gets a signal that has already fired. Deadlines are checked on a 250 ms tick that runs only while calls run, wait or hold a deadline.
 
-Work that is not a wire call gets a `ctx.abortSignal` that never fires, so code can pass it unconditionally. A loader that runs again for `invalidateOn` or `staleAfterMs` gets such a signal too, since the subscribe's deadline does not bound it. `ctx.abortSignal` is an accessor: a copy made with `{ ...ctx }` does not carry it.
+Work that is not a wire call gets a `ctx.abortSignal` that never fires, so code can pass it unconditionally. A loader that runs again for `invalidateOn` or `staleAfterMs` gets such a signal too, since the subscribe's deadline does not bound it.
+
+`ctx` is an instance of the internal `LiveCallContext` class, not a plain object, and `abortSignal` is an accessor on it. Pass `ctx` itself to helpers. Spreading it (`{ ...ctx }`) copies only its own data fields, not `abortSignal` or any accessor added later; a copy that needs the signal sets it explicitly. `live.lock` hands its handler such a copy with the signal carried over.
 
 When a connection closes, its queued calls are dropped (they end as `CONNECTION_CLOSED`, which nobody receives) and its running calls see their signal fire. Running calls keep their places until their handlers settle.
 
