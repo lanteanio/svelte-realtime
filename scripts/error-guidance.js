@@ -350,22 +350,22 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Find the cause from the error surfaces of the job (a store outage, a dead-letter store without `purgeUser`, an aggregate without a reset policy), fix it, and run `resumeForgetJobs({ id })`, or `resumeForgetJobs({ exhausted: true })` for every exhausted job. If the erasure cannot be finished, record why and call `abandonForgetJob(id)`.'
 	}),
 	'forget.local-dropped': Object.freeze({
-		cause: 'A process already owed in-memory erasure steps for 10,000 jobs and dropped those of its oldest job to track a new erasure. The `job` attribute is the dropped job reference.',
-		consequence: 'This process no longer retries the in-memory steps of that job, so its in-memory state may still hold the user data.',
+		cause: 'A process stopped keeping the open in-memory erasure steps of a job. The `reason` attribute says why: `full` (it already owes 10,000 jobs, none of them exhausted, so the new job is not kept), `evicted` (an exhausted job made room for a new one) or `expired` (an exhausted job reached a day without being resumed). The `job` attribute names the job.',
+		consequence: 'This process no longer retries those in-memory steps, so its in-memory state may still hold the user data.',
 		automaticRecovery: 'None.',
-		nextAction: 'Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without a reset policy) and fix it, then call `live.forget` again on this process for the affected user.'
+		nextAction: 'Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without an erasure policy, a document declaration without `drop`) and fix it, then call `live.forget` again on this process for the affected user.'
 	}),
 	'forget.local-exhausted': Object.freeze({
-		cause: 'The in-memory erasure steps a process owes for a job failed on 24 tries. The `job` attribute is the job reference and `attempts` the tries made.',
-		consequence: 'The process no longer retries them by itself; they stay listed in the `local` field of the job on that process. Its in-memory state may still hold the user data.',
+		cause: 'The in-memory erasure steps a process owes for a job are no longer retried by themselves. The `reason` attribute is `attempts` (they failed on 24 tries) or `blocked` (what is left can never succeed as configured: an aggregate without an erasure policy, a document declaration without `drop`); the holders that did succeed are never run again. `job` names the job and `attempts` the tries made.',
+		consequence: 'The steps stay listed in the `local` field of the job on that process for up to a day. Its in-memory state may still hold the user data.',
 		automaticRecovery: 'None. The steps only run again on request.',
 		nextAction: 'Fix the cause shown by the `forget.incomplete` events of the job, then call `resumeForgetJobs({ exhausted: true })` or `resumeForgetJobs({ id })` on the same process, or `abandonForgetJob(id)`.'
 	}),
 	'forget.run-overdue': Object.freeze({
-		cause: 'An erasure run was still going after 15 minutes, usually because a store call never returned and no `timeoutMs` is configured. The `job` attribute is the job reference.',
-		consequence: 'The run stops renewing its lease, so after the lease runs out another run may take the job and repeat its shared steps. The hung call may still finish later.',
-		automaticRecovery: 'Another run takes the job once the lease expires.',
-		nextAction: 'Find the store call that hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run.'
+		cause: 'An erasure run has been going for 15 minutes, and again for every further 15 minutes, usually because a store call is slow or never returns and no `timeoutMs` is configured. The `job` attribute is the job reference and `runningMs` how long the run has gone on.',
+		consequence: 'The run keeps its job, renewing the lease, so no other run starts on it while it lasts.',
+		automaticRecovery: 'None. The run goes on until its store calls return.',
+		nextAction: 'Find the store call that is slow or hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run. Abandon the job with `abandonForgetJob(id)` if the run is stuck for good.'
 	}),
 	'forget.job-unrecorded': Object.freeze({
 		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',

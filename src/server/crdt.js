@@ -174,24 +174,40 @@ function _crdtRelease(rec, ws, name) {
  * Returns the number of replicas dropped. Missing or failed drop methods
  * reject after all named replicas are attempted, so an incomplete cascade
  * cannot be reported as a completed erasure.
+ *
+ * With `holders`, each document of each declaration is one holder, keyed
+ * `declaration NUL name`: one dropped before is in `done` and never dropped
+ * again (a re-opened document holds other users' edits by then), one whose
+ * declaration has no `drop` goes to `never` and is not tried again, and one
+ * whose drop threw goes to `failed`, the only kind a later call retries.
  * @param {string[]} names bare document topic names
+ * @param {{ done: Set<string>, failed: Set<string>, never: Set<string> }} [holders]
  * @returns {number}
  */
-export function _purgeCrdtDocs(names) {
+export function _purgeCrdtDocs(names, holders) {
 	let count = 0;
 	let failed = false;
-	for (const rec of _crdtDecls.values()) {
+	for (const [declKey, rec] of _crdtDecls) {
 		if (!rec.authority) continue;
-		if (typeof rec.authority.drop !== 'function') {
-			if (names.length) failed = true;
-			continue;
-		}
 		for (const name of names) {
-			try { if (rec.authority.drop(name)) count++; }
-			catch { failed = true; }
+			const key = declKey + '\0' + name;
+			if (holders && (holders.done.has(key) || holders.never.has(key))) continue;
+			if (typeof rec.authority.drop !== 'function') {
+				failed = true;
+				holders?.never.add(key);
+				continue;
+			}
+			try {
+				if (rec.authority.drop(name)) count++;
+				holders?.done.add(key);
+				holders?.failed.delete(key);
+			} catch {
+				failed = true;
+				holders?.failed.add(key);
+			}
 		}
 	}
-	if (failed) throw new Error('Some loaded document replicas could not be erased');
+	if (failed || (holders && holders.never.size > 0)) throw new Error('Some loaded document replicas could not be erased');
 	return count;
 }
 

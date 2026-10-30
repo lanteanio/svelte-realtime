@@ -4645,9 +4645,11 @@ export interface ForgetJob {
 	 * `resumeForgetJobs({ id })` or `resumeForgetJobs({ exhausted: true })`
 	 * runs it, or `abandonForgetJob` gives it up. `completed`: every shared
 	 * step confirmed. `abandoned`: given up on request. The last two keep
-	 * nothing user-derived. In-memory steps are reported in `local`.
+	 * nothing user-derived. In-memory steps are reported in `local`. Null for
+	 * a job this process owes in-memory steps for that the store does not
+	 * list.
 	 */
-	status: ForgetJobStatus;
+	status: ForgetJobStatus | null;
 	/** Runs started, including the current one. */
 	attempts: number;
 	/** Store-clock ms the job was first recorded. */
@@ -4662,12 +4664,15 @@ export interface ForgetJob {
 	/** The last failure of a shared step, cleared on completion. Surface names only, never store errors. */
 	error: { code: string; failedSurfaces: string[] } | null;
 	/**
-	 * In-memory steps this process still owes for the job, which it retries
-	 * itself; null when it owes none. Other processes report their own.
-	 * `exhausted`: they failed on 24 tries and are no longer retried by
-	 * themselves.
+	 * In-memory steps this process still owes for the job; null when it owes
+	 * none. Other processes report their own. `open` steps are retried by
+	 * this process; `blocked` ones only hold holders that cannot succeed as
+	 * configured (an aggregate without an erasure policy, a document
+	 * declaration without `drop`). A holder that succeeded is never run again.
+	 * `exhausted`: no longer retried by themselves (24 failed tries, or only
+	 * blocked steps left); dropped after a day.
 	 */
-	local: { open: string[]; attempts: number; retryAt: number | null; exhausted: boolean } | null;
+	local: { open: string[]; blocked: string[]; attempts: number; retryAt: number | null; exhausted: boolean } | null;
 }
 
 /** What `ForgetJobStore.begin` receives. */
@@ -4707,8 +4712,11 @@ export interface ForgetJobClaim {
  * has the full contract). Every method may return a promise and must be atomic
  * per job `id`. Times come from the store's own clock (Redis `TIME`,
  * PostgreSQL `now()`), never from the caller. A run's lease lasts until the
- * store-clock time `leaseMs` after it was granted or last renewed; `renew`,
- * `complete` and `fail` change nothing unless their `runId` holds the lease.
+ * store-clock time `leaseMs` after it was granted or last renewed, and the
+ * run renews it for as long as it goes on; `renew`, `complete` and `fail`
+ * change nothing unless their `runId` holds the lease. The shared steps
+ * themselves (`purgeUser`, a shared dead-letter `purgeUser`) must tolerate
+ * concurrent calls for the same user: each worker's job runs them.
  */
 export interface ForgetJobStore {
 	/**
@@ -4790,15 +4798,16 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
  * Give up an open erasure job: the store marks it `abandoned` and drops its
  * user id, and this process drops the in-memory steps it still owes for it. A
  * job a live run is working on is not abandoned. Resolves whether anything was
- * given up; false without a job store. Rejects with INVALID_REQUEST on a bad
+ * given up. Rejects with INVALID_REQUEST on a bad
  * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;
 
 /**
  * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100),
- * each with the in-memory steps this process still owes for it. Resolves `[]`
- * without a job store. Rejects with INVALID_REQUEST on a bad filter and
+ * each with the in-memory steps this process still owes for it. Without a
+ * status filter, jobs this process owes in-memory steps for that the store
+ * does not list follow with `status: null`, also without a job store. Rejects with INVALID_REQUEST on a bad filter and
  * FORGET_JOB_FAILED when the store cannot be read.
  */
 export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
@@ -4806,7 +4815,9 @@ export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: numb
 /**
  * Run open erasure work again. First the in-memory steps this process still
  * owes whose retry time has come (results with `steps: 'local'`; only this
- * process can do them, and it also retries them by itself), then jobs whose
+ * process can do them, it also retries them by itself, and it does so with or
+ * without a job store; an explicit `id` or `exhausted` also gives blocked
+ * holders another try), then jobs whose
  * shared steps are due (`steps: 'shared'`): failed ones past their `retryAt`
  * and pending ones whose run let its lease expire, earliest due first, at most
  * `limit` (1 to 1000, default 100). With `id`, only that job, regardless of

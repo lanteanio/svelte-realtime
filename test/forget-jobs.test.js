@@ -14,6 +14,9 @@ import { _pushRegistry } from '../src/server/push.js';
 import { _crdtDecls } from '../src/server/crdt.js';
 import { _resetReplayRouting } from '../src/server/replay-routing.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
+import { __registerAggregate, _activateDerived, _resetAggregates } from '../src/server.js';
+import { aggregateRegistry } from '../src/server/state.js';
+import { mockPlatform } from './helpers/mock-platform.js';
 
 const KEY = 'k'.repeat(32);
 /** Move the wall clock past every lease and retry delay, as a later resume sees it. */
@@ -361,24 +364,55 @@ describe('shared steps across processes', () => {
 		expect(after.retryAt - after.updatedAt).toBeGreaterThan(alice.retryAt - alice.updatedAt);
 	});
 
-	it('lets a hung run go after the longest run time so another run can take the job', async () => {
-		let offset = 0;
+	it('keeps a long run on its job while it runs, so a resume elsewhere never starts a second run', async () => {
+		let wall = 0;
+		let mono = 0;
 		setRuntimeEnv({
-			clock: { wallEpoch: () => Date.now() + offset },
+			clock: { wallEpoch: () => Date.now() + wall, monotonic: () => performance.now() + mono },
 			timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) }
 		});
 		const jobs = createForgetJobStore();
-		const renew = vi.spyOn(jobs, 'renew');
-		configureForget({ store: { purgeUser: () => new Promise(() => {}) }, jobs });
-		void live.forget('alice', { tenantId: null });
-		await vi.waitFor(() => expect(renew).toHaveBeenCalled());
-		const [job] = await listForgetJobs();
-		offset = 16 * 60_000; // past the longest run time
-		await vi.waitFor(() => expect(events.filter((e) => e.event === 'forget.run-overdue').map((e) => e.attributes)).toEqual([{ job: job.id }]));
-		const calls = renew.mock.calls.length;
-		await new Promise((r) => setTimeout(r, 30));
-		expect(renew.mock.calls.length).toBe(calls);
-		expect(jobs.claim({ id: job.id, runId: 'other', leaseMs: 1000 })).toMatchObject({ attempts: 2 });
+		const complete = vi.spyOn(jobs, 'complete');
+		let release;
+		let purges = 0;
+		const slow = { purgeUser: () => { purges++; return new Promise((r) => { release = r; }); } };
+		configureForget({ store: slow, jobs });
+		const run = live.forget('alice', { tenantId: null });
+		await vi.waitFor(() => expect(purges).toBe(1));
+
+		// Another process resumes on an interval with the same store.
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		(await import('../src/shared/runtime.js')).setRuntimeEnv({ timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) } });
+		other.configureForget({ store: slow, jobs, resumeIntervalMs: 1000 });
+
+		// The run goes on for 40 minutes, the clocks moving 30 s at a time; its
+		// renewals keep the lease ahead of the store clock throughout.
+		for (let step = 1; step <= 80; step++) {
+			wall = mono = step * 30_000;
+			await new Promise((r) => setTimeout(r, 12));
+		}
+		expect(purges).toBe(1);
+		const overdue = events.filter((e) => e.event === 'forget.run-overdue');
+		expect(overdue.length).toBe(2);
+		release(1);
+		await expect(run).resolves.toMatchObject({ ok: true });
+		expect(complete).toHaveReturnedWith(true);
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'completed', attempts: 1 });
+		other.configureForget(null);
+	});
+
+	it('keeps one renewal in flight when renew hangs', async () => {
+		setRuntimeEnv({ timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) } });
+		const jobs = createForgetJobStore();
+		let renews = 0;
+		let release;
+		configureForget({ store: { purgeUser: () => new Promise((r) => { release = r; }) }, jobs: { ...jobs, renew: () => { renews++; return new Promise(() => {}); } } });
+		const run = live.forget('alice', { tenantId: null });
+		await new Promise((r) => setTimeout(r, 60));
+		expect(renews).toBe(1);
+		release(0);
+		await run;
 	});
 });
 
@@ -434,19 +468,21 @@ describe('in-memory steps stay with their process', () => {
 
 	it('keeps a failed in-memory step in this process, shows it, and retries it here only', async () => {
 		const purge = flakyMemoryDeadLetter(1);
-		configureForget({ store: durable(), jobs: true });
+		const sharedJobs = createForgetJobStore();
+		configureForget({ store: durable(), jobs: sharedJobs });
 		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
 		expect(err.code).toBe('FORGET_INCOMPLETE');
 		// The shared steps are done, so the job is complete in the store; this
 		// process still owes its own in-memory step and says so.
 		const [job] = await listForgetJobs();
-		expect(job).toMatchObject({ id: err.job, status: 'completed', local: { open: ['webhookDeadLetter'], attempts: 1, exhausted: false } });
+		expect(job).toMatchObject({ id: err.job, status: 'completed', local: { open: ['webhookDeadLetter'], blocked: [], attempts: 1, exhausted: false } });
 
 		// Another process cannot do it and does not try.
 		vi.resetModules();
 		const other = await import('../src/server.js');
-		other.configureForget({ jobs: createForgetJobStore() });
+		other.configureForget({ store: durable(), jobs: sharedJobs });
 		expect(await other.resumeForgetJobs({ id: err.job })).toMatchObject({ results: [{ steps: 'shared', status: 'skipped' }] });
+		expect(purge).toHaveBeenCalledTimes(1);
 		other.configureForget(null);
 
 		later();
@@ -474,7 +510,7 @@ describe('in-memory steps stay with their process', () => {
 		configureForget({ jobs: true });
 		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
 		for (let i = 1; i < 24; i++) await resumeForgetJobs({ id: err.job });
-		expect(events.filter((e) => e.event === 'forget.local-exhausted').map((e) => e.attributes)).toEqual([{ job: err.job, attempts: 24 }]);
+		expect(events.filter((e) => e.event === 'forget.local-exhausted').map((e) => e.attributes)).toEqual([{ job: err.job, attempts: 24, reason: 'attempts' }]);
 		expect((await listForgetJobs())[0].local).toMatchObject({ exhausted: true, retryAt: null });
 		later();
 		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
@@ -725,5 +761,94 @@ describe('reconfiguring jobs', () => {
 		const calls = due.mock.calls.length;
 		await new Promise((r) => setTimeout(r, 30));
 		expect(due.mock.calls.length).toBe(calls);
+	});
+});
+
+describe('in-memory steps that reach other users data', () => {
+	afterEach(() => { _resetAggregates(); });
+
+	function aggregates() {
+		const platform = mockPlatform();
+		const counted = live.aggregate('source', { total: { init: () => 0, reduce: (n) => n + 1 } }, { topic: 'counted', forget: 'reset' });
+		const unmanaged = live.aggregate('source', { total: { init: () => 0, reduce: (n) => n + 1 } }, { topic: 'unmanaged' });
+		__registerAggregate('erasure/counted', counted);
+		__registerAggregate('erasure/unmanaged', unmanaged);
+		_activateDerived(platform);
+		return { platform, total: () => aggregateRegistry.get('erasure/counted').state.total };
+	}
+
+	it('never resets an aggregate again that a partly run step already reset', async () => {
+		const { platform, total } = aggregates();
+		platform.publish('source', 'added', { id: 'alice' });
+		configureForget({ jobs: true });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(err.code).toBe('FORGET_INCOMPLETE');
+		expect(total()).toBe(0);
+		// Other users keep counting.
+		platform.publish('source', 'added', { id: 'bob' });
+		platform.publish('source', 'added', { id: 'carol' });
+		later();
+		await resumeForgetJobs();
+		await resumeForgetJobs();
+		expect(total()).toBe(2);
+		// The aggregate without a policy can never succeed: reported once, kept blocked.
+		expect(events.filter((e) => e.event === 'forget.local-exhausted').map((e) => e.attributes)).toEqual([{ job: err.job, attempts: 1, reason: 'blocked' }]);
+		expect((await listForgetJobs())[0].local).toMatchObject({ open: [], blocked: ['aggregateCohorts'], exhausted: true });
+	});
+
+	it('never drops a document again that a partly run step already dropped', async () => {
+		const drop = vi.fn(() => true);
+		_crdtDecls.set('notes', { authority: { drop } });
+		_crdtDecls.set('legacy', { authority: {} }); // no drop: can never succeed
+		configureForget({ jobs: true });
+		const err = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		expect(err.code).toBe('FORGET_INCOMPLETE');
+		later();
+		await resumeForgetJobs();
+		await resumeForgetJobs({ id: err.job });
+		expect(drop).toHaveBeenCalledTimes(1);
+	});
+
+	it('retries only the documents whose drop failed', async () => {
+		let fail = true;
+		const drop = vi.fn((name) => { if (name === 'notes:a' && fail) { fail = false; throw new Error('busy'); } return true; });
+		_crdtDecls.set('notes', { authority: { drop } });
+		configureForget({ jobs: true });
+		await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:a', 'notes:b'] } }).catch(() => {});
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1, results: [{ steps: 'local', status: 'completed' }] });
+		expect(drop.mock.calls.map(([name]) => name)).toEqual(['notes:a', 'notes:b', 'notes:a']);
+	});
+});
+
+describe('in-memory work without a job store', () => {
+	it('lists and retries owed in-memory steps after the job store is cleared or the record is gone', async () => {
+		const purge = flakyMemoryDeadLetter(1);
+		const jobs = createForgetJobStore({ max: 1 });
+		configureForget({ jobs });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		// The completed record is evicted by the next erasure; the owed work still shows.
+		configureWebhooks({ deadLetter: false });
+		await live.forget('bob', { tenantId: null });
+		expect((await listForgetJobs()).find((j) => j.id === err.job)).toMatchObject({ status: null, local: { open: ['webhookDeadLetter'] } });
+		flakyMemoryDeadLetter(0);
+		configureForget(null);
+		expect((await listForgetJobs()).map((j) => j.id)).toEqual([err.job]);
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1, results: [{ id: err.job, steps: 'local', status: 'completed' }] });
+		expect(await listForgetJobs()).toEqual([]);
+		expect(purge).toHaveBeenCalledTimes(1);
+	});
+
+	it('drops exhausted in-memory work when the configuration is cleared, and keeps work still retried', async () => {
+		_crdtDecls.set('legacy', { authority: {} }); // can never drop: the job is exhausted at once
+		configureForget({ jobs: true });
+		const blocked = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		_crdtDecls.clear();
+		flakyMemoryDeadLetter(Infinity);
+		const retried = await live.forget('bob', { tenantId: null }).catch((e) => e);
+		expect((await listForgetJobs()).filter((j) => j.local !== null).map((j) => j.id)).toEqual([blocked.job, retried.job]);
+		configureForget(null);
+		expect((await listForgetJobs()).map((j) => j.id)).toEqual([retried.job]);
 	});
 });

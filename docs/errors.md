@@ -799,20 +799,20 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 ### `forget.local-dropped`
 
 - Severity: error
-- Message patterns: <code>This process dropped the open in-memory erasure steps of its oldest job to track a new erasure.</code>
-- Cause: A process already owed in-memory erasure steps for 10,000 jobs and dropped those of its oldest job to track a new erasure. The `job` attribute is the dropped job reference.
-- Consequence: This process no longer retries the in-memory steps of that job, so its in-memory state may still hold the user data.
+- Message patterns: <code>This process no longer keeps the open in-memory erasure steps of a job.</code>
+- Cause: A process stopped keeping the open in-memory erasure steps of a job. The `reason` attribute says why: `full` (it already owes 10,000 jobs, none of them exhausted, so the new job is not kept), `evicted` (an exhausted job made room for a new one) or `expired` (an exhausted job reached a day without being resumed). The `job` attribute names the job.
+- Consequence: This process no longer retries those in-memory steps, so its in-memory state may still hold the user data.
 - Automatic recovery: None.
-- Next action: Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without a reset policy) and fix it, then call `live.forget` again on this process for the affected user.
+- Next action: Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without an erasure policy, a document declaration without `drop`) and fix it, then call `live.forget` again on this process for the affected user.
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 
 <a id="diagnostic-forget.local-exhausted"></a>
 ### `forget.local-exhausted`
 
 - Severity: error
-- Message patterns: <code>In-memory erasure steps failed on every retry in this process and are no longer retried by themselves.</code>
-- Cause: The in-memory erasure steps a process owes for a job failed on 24 tries. The `job` attribute is the job reference and `attempts` the tries made.
-- Consequence: The process no longer retries them by itself; they stay listed in the `local` field of the job on that process. Its in-memory state may still hold the user data.
+- Message patterns: <code>In-memory erasure steps of a job cannot finish in this process as configured and are no longer retried by themselves.</code>
+- Cause: The in-memory erasure steps a process owes for a job are no longer retried by themselves. The `reason` attribute is `attempts` (they failed on 24 tries) or `blocked` (what is left can never succeed as configured: an aggregate without an erasure policy, a document declaration without `drop`); the holders that did succeed are never run again. `job` names the job and `attempts` the tries made.
+- Consequence: The steps stay listed in the `local` field of the job on that process for up to a day. Its in-memory state may still hold the user data.
 - Automatic recovery: None. The steps only run again on request.
 - Next action: Fix the cause shown by the `forget.incomplete` events of the job, then call `resumeForgetJobs({ exhausted: true })` or `resumeForgetJobs({ id })` on the same process, or `abandonForgetJob(id)`.
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
@@ -832,13 +832,13 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 <a id="diagnostic-forget.run-overdue"></a>
 ### `forget.run-overdue`
 
-- Severity: error
+- Severity: warn
 - Delivered to: operational event sink
-- Message patterns: <code>An erasure run is still going after the longest a run may hold its job; its lease is no longer renewed, so another run can take the job.</code>
-- Cause: An erasure run was still going after 15 minutes, usually because a store call never returned and no `timeoutMs` is configured. The `job` attribute is the job reference.
-- Consequence: The run stops renewing its lease, so after the lease runs out another run may take the job and repeat its shared steps. The hung call may still finish later.
-- Automatic recovery: Another run takes the job once the lease expires.
-- Next action: Find the store call that hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run.
+- Message patterns: <code>An erasure run has been going for a long time; it keeps its job while it runs. Abandon the job if the run is stuck.</code>
+- Cause: An erasure run has been going for 15 minutes, and again for every further 15 minutes, usually because a store call is slow or never returns and no `timeoutMs` is configured. The `job` attribute is the job reference and `runningMs` how long the run has gone on.
+- Consequence: The run keeps its job, renewing the lease, so no other run starts on it while it lasts.
+- Automatic recovery: None. The run goes on until its store calls return.
+- Next action: Find the store call that is slow or hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run. Abandon the job with `abandonForgetJob(id)` if the run is stuck for good.
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 
 <a id="diagnostic-invariant.violated"></a>
