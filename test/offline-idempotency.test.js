@@ -488,7 +488,8 @@ describe('offline backoff around the hold and retention', () => {
 		const { calls } = await queued(['a'], { maxAge: 20000 });
 		await vi.advanceTimersByTimeAsync(19500);
 		refuse(last('a'), 400); await turn();
-		await vi.advanceTimersByTimeAsync(249); expect(sent('a')).toBe(1);
+		// The last try still waits out the server's hint.
+		await vi.advanceTimersByTimeAsync(399); expect(sent('a')).toBe(1);
 		await vi.advanceTimersByTimeAsync(1); expect(sent('a')).toBe(2);
 		answer(last('a'), { ok: true, data: 'a' }); await turn();
 		expect(await calls[0]).toBe('a');
@@ -615,6 +616,41 @@ describe('offline backoff around the hold and retention', () => {
 		answer(last('a'), { ok: true, data: 'a' }); await turn();
 		expect(stored()).toEqual([]);
 		expect(client.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('drops a held call that expired while the drain ran, reporting it once', async () => {
+		const at = Date.now();
+		const row = (seq, value, expiresAt) => ({ seq, path: 'work/run', args: [{ value }], queuedAt: at, expiresAt, idempotencyKey: 'key-' + value, timeout: 600000 });
+		rows.set('q:default:000000000001', row(1, 'h', at + 5000));
+		rows.set('q:default:000000000002', row(2, 'b', at + 600000));
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persist(), onReplayError, replay: 'concurrent' } });
+		status('disconnected'); await turn(); status('open'); await turn();
+		refuse(last('h')); await turn();
+		await vi.advanceTimersByTimeAsync(10000);
+		answer(last('b'), { ok: true, data: 'b' }); await turn();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(onReplayError.mock.calls[0][1]).toMatchObject({ code: 'STALE', message: 'Offline mutation expired' });
+		expect(stored()).toEqual([]);
+		expect(sent('h')).toBe(1);
+	});
+
+	it('leaves a held call queued as it was when the connection drops', async () => {
+		const at = Date.now();
+		const row = (seq, value, expiresAt) => ({ seq, path: 'work/run', args: [{ value }], queuedAt: at, expiresAt, idempotencyKey: 'key-' + value, timeout: 600000 });
+		rows.set('q:default:000000000001', row(1, 'h', at + 600000));
+		rows.set('q:default:000000000002', row(2, 'y', at + 10000));
+		rows.set('q:default:000000000003', row(3, 'b', at + 600000));
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persist(), onReplayError, replay: 'concurrent' } });
+		status('disconnected'); await turn(); status('open'); await turn();
+		refuse(last('h'), 25000); refuse(last('y')); await turn();
+		status('disconnected'); await turn();
+		expect(rows.get('q:default:000000000002').retryAt).toBeUndefined();
+		status('open'); await turn();
+		expect(sent('y')).toBe(2);
+		expect(onReplayError).not.toHaveBeenCalled();
 	});
 
 	it('does not count a hold that a lost connection cut short', async () => {

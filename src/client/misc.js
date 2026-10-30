@@ -431,7 +431,8 @@ async function _drainOfflineQueue() {
 						// minimum on a hint) is cut to one last try within it.
 						if (expiredAt(entry, refusedAt + wait)) {
 							entry.idempotencyLastTry = true;
-							wait = Math.max(0, _lastTryAt(entry, maxAge, refusedAt) - refusedAt);
+							// Never before the server's hint, which fits (it is not late).
+							wait = Math.max(hinted ? err.retryAfter : 0, _lastTryAt(entry, maxAge, refusedAt) - refusedAt);
 						}
 						// A call sent ahead of the held head is set aside again: a
 						// hold would keep it until the head's backoff ends.
@@ -635,8 +636,10 @@ async function _drainOfflineQueue() {
 		}
 
 		// A held call whose retention ends before the queue goes again is set
-		// aside instead, so its own wake still gives it its try.
-		if (held.size) {
+		// aside instead, so its own wake still gives it its try; one that has
+		// expired already is dropped. Not when the connection went: the next
+		// open replays the queue as it was.
+		if (held.size && !closed() && !clientState.isOffline) {
 			const redrainAt = Math.max(now(), heldUntil);
 			heldUntil = 0;
 			for (const [entry, hold] of held) {
@@ -646,6 +649,13 @@ async function _drainOfflineQueue() {
 				}
 				held.delete(entry);
 				entry.idempotencyHeld = 0;
+				if (expiredAt(entry, now())) {
+					/** @type {any} */
+					const stale = new RpcError('STALE', 'Offline mutation expired');
+					stale.cause = hold.err;
+					settleFail(entry, stale);
+					continue;
+				}
 				let retryAt = hold.until;
 				const lastTry = _lastTryAt(entry, maxAge, hold.refusedAt);
 				if (retryAt > lastTry) {
