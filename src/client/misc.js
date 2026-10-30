@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _deferPersist } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _setRetryAt } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, restored?: boolean }} OfflineEntry
@@ -21,22 +21,28 @@ const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
 /** A queued call set aside until its `retryAt`. */
 const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
 
-/** @type {{ handle: any, at: number } | null} The drain that wakes the next call set aside. */
+// The longest delay a timer can take; a later wake re-arms in steps.
+const _MAX_TIMER_MS = 2147483647;
+
+/** @type {any} The timer that drains when the first call set aside is due. */
 let _wakeTimer = null;
 
-/** Drain again when the first call set aside is due. */
+/**
+ * Drain again when the first call set aside in the current queue is due. Not
+ * while offline or closed for good: the next open drains anyway.
+ */
 function _wakeForWaiting() {
-	let at = Infinity;
-	for (const entry of _offlineQueue) if (entry.retryAt !== undefined && entry.retryAt < at) at = entry.retryAt;
-	if (_wakeTimer && _wakeTimer.at <= at) return;
-	if (_wakeTimer) clearTimer(_wakeTimer.handle);
+	if (_wakeTimer !== null) clearTimer(_wakeTimer);
 	_wakeTimer = null;
-	if (at === Infinity) return;
-	const scope = _offlineScope();
-	_wakeTimer = { at, handle: setTimer(() => {
+	if (clientState.isOffline || clientState.terminated) return;
+	const at = now();
+	let first = Infinity;
+	for (const entry of _offlineQueue) if (_waiting(entry, at) && entry.retryAt < first) first = entry.retryAt;
+	if (first === Infinity) return;
+	_wakeTimer = setTimer(() => {
 		_wakeTimer = null;
-		if (scope === _offlineScope()) void _drainOfflineQueue();
-	}, Math.max(0, at - now())) };
+		void _drainOfflineQueue();
+	}, Math.min(_MAX_TIMER_MS, first - at));
 }
 
 /** @type {boolean} */
@@ -259,11 +265,21 @@ async function _drainOfflineQueue() {
 		 */
 		function defer(entry, err, wait) {
 			if (scope !== _offlineScope()) return;
+			const retryAt = now() + wait;
+			// Held past its retention it could only expire: drop it now.
+			const keptUntil = Math.min(entry.expiresAt ?? Infinity, maxAge > 0 ? entry.queuedAt + maxAge : Infinity);
+			if (retryAt >= keptUntil) {
+				/** @type {any} */
+				const stale = new RpcError('STALE', 'Offline mutation expired: the server asked to retry it after its retention ends');
+				stale.cause = err;
+				settleFail(entry, stale);
+				return;
+			}
 			deferred.add(entry);
 			clean = false;
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
 			if (typeof entry.seq === 'number') _noteBatchFailure(entry.seq);
-			_deferPersist(entry, now() + wait);
+			_setRetryAt(entry, retryAt);
 			const over = overrides.get(entry);
 			_notifyReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err);
 		}
@@ -373,11 +389,13 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry) && !_waiting(entry, nowMs)));
+		const expired = (/** @type {OfflineEntry} */ entry) => (maxAge > 0 && nowMs - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= nowMs);
+		// A call set aside stays queued until it is due, unless it expired.
+		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry) && (!_waiting(entry, nowMs) || expired(entry))));
 		for (const entry of captured) {
 			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
-			if ((maxAge > 0 && nowMs - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= nowMs)) {
+			if (expired(entry)) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
 				continue;
 			}
@@ -418,6 +436,8 @@ async function _drainOfflineQueue() {
 					continue;
 				}
 			}
+			// Picked up: it is held back no longer, here and in its stored copy.
+			if (entry.retryAt !== undefined) _setRetryAt(entry, undefined);
 			queue.push(entry);
 		}
 		if (scope !== _offlineScope()) return;
@@ -547,9 +567,16 @@ async function _drainOfflineQueue() {
 			// app to act on. The next drain starts a new batch.
 			if (clean) _clearGapIfClean();
 			if (scope !== _offlineScope()) return;
-			_endBatch();
-			// Calls set aside go back to the front of the queue, in seq order.
-			if (deferred.size) _offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
+			if (deferred.size) {
+				// Calls set aside go back to the front of the queue, in seq order,
+				// and the batch carries on: one of them going up after calls queued
+				// behind it is an upload-order hole the next drain must not close.
+				_carryBatch(lowestFailedSeq);
+				if (scope !== _offlineScope()) return;
+				_offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
+			} else {
+				_endBatch();
+			}
 		}
 	} finally {
 		// First, so nothing that runs app code below can leave every later

@@ -595,13 +595,15 @@ function _rowValue(entry) {
 }
 
 /**
- * @internal Hold a queued call back until `retryAt` (wall-clock ms), and record
- * that in its stored copy so a page load honours it too. The call stays queued.
+ * @internal Hold a queued call back until `retryAt` (wall-clock ms), or with
+ * `undefined` stop holding it, and record that in its stored copy so a page
+ * load honours it too. The call stays queued.
  * @param {any} entry
- * @param {number} retryAt
+ * @param {number | undefined} retryAt
  */
-export function _deferPersist(entry, retryAt) {
-	entry.retryAt = retryAt;
+export function _setRetryAt(entry, retryAt) {
+	if (retryAt === undefined) delete entry.retryAt;
+	else entry.retryAt = retryAt;
 	const scope = _entryScopes.get(entry) || _scope;
 	if (scope.erased || !scope.store || typeof entry.seq !== 'number' || entry.seq <= 0) return;
 	const store = scope.store;

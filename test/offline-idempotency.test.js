@@ -178,3 +178,90 @@ describe('offline replay of an idempotency refusal that names a wait', () => {
 		expect(stored()).toEqual([]); expect(onReplayError).not.toHaveBeenCalled();
 	});
 });
+
+describe('offline calls set aside by an idempotency refusal', () => {
+	const rpcFrames = () => wire.filter(frame => frame.rpc);
+	const persistTo = () => ({
+		async getAll(prefix) { return [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })); },
+		async put(key, value) { rows.set(key, value); }, async delete(key) { rows.delete(key); },
+		async clear(prefix) { for (const key of rows.keys()) if (key.startsWith(prefix)) rows.delete(key); }
+	});
+
+	async function setAside(retryAfter, offline = {}, calls = 1) {
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persistTo(), onReplayError, ...offline } });
+		status('disconnected');
+		const pending = [];
+		for (let i = 1; i <= calls; i++) { const call = client.__rpc('work/run')({ value: i }); call.catch(() => {}); pending.push(call); }
+		await turn(); status('open'); await turn();
+		const first = rpcFrames()[0];
+		answer(first, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter }); await turn();
+		return { onReplayError, pending, first };
+	}
+
+	it('arms no wake while offline and replays on the next open', async () => {
+		const { first } = await setAside(31000);
+		status('disconnected'); await turn();
+		const timers = vi.getTimerCount();
+		await vi.advanceTimersByTimeAsync(120000);
+		expect(vi.getTimerCount()).toBeLessThanOrEqual(timers);
+		expect(rpcFrames()).toHaveLength(1);
+		status('open'); await turn();
+		const again = rpcFrames()[1]; expect(again.idempotencyKey).toBe(first.idempotencyKey);
+		expect(rows.get(stored()[0]).retryAt).toBeUndefined();
+	});
+
+	it('honours the next refusal\'s wait after a set-aside call is retried', async () => {
+		await setAside(31000);
+		await vi.advanceTimersByTimeAsync(31000);
+		const retried = rpcFrames()[1]; expect(retried).toBeTruthy();
+		answer(retried, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter: 5000 }); await turn();
+		await vi.advanceTimersByTimeAsync(4999); expect(rpcFrames()).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1); expect(rpcFrames()).toHaveLength(3);
+		answer(rpcFrames()[2], { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later' }); await turn();
+		await vi.advanceTimersByTimeAsync(999); expect(rpcFrames()).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(1); expect(rpcFrames()).toHaveLength(4);
+	});
+
+	it('drops a call as STALE when the wait reaches past its retention', async () => {
+		const { onReplayError, pending } = await setAside(3600000, { maxAge: 60000 });
+		await expect(pending[0]).rejects.toMatchObject({ code: 'STALE', cause: { code: 'IDEMPOTENCY_CAPACITY' } });
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(stored()).toEqual([]);
+	});
+
+	it('waits out a hint longer than one timer can take', async () => {
+		const wait = 3000000000;
+		const { pending, first } = await setAside(wait, { retentionMs: 10 * wait });
+		await vi.advanceTimersByTimeAsync(wait - 1); expect(rpcFrames()).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		const again = rpcFrames()[1]; expect(again.idempotencyKey).toBe(first.idempotencyKey);
+		answer(again, { ok: true, data: 'late' }); await turn();
+		expect(await pending[0]).toBe('late');
+	});
+
+	it('keeps waking the current queue after its scope changes', async () => {
+		await setAside(31000);
+		client.configure({ offline: { queue: true, persist: persistTo(), persistKey: 'other' } }); await turn();
+		status('disconnected');
+		const call = client.__rpc('work/run')({ value: 'other' }); call.catch(() => {});
+		await turn(); status('open'); await turn();
+		const sent = rpcFrames().find(frame => frame.args[0].value === 'other');
+		answer(sent, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter: 60000 }); await turn();
+		const before = rpcFrames().length;
+		await vi.advanceTimersByTimeAsync(60000);
+		const again = rpcFrames().slice(before).find(frame => frame.args[0].value === 'other');
+		expect(again?.idempotencyKey).toBe(sent.idempotencyKey);
+	});
+
+	it('keeps the upload-order gap when a set-aside call goes up after the calls behind it', async () => {
+		const { pending } = await setAside(31000, {}, 2);
+		answer(rpcFrames()[1], { ok: true, data: 'second' }); await turn();
+		expect(await pending[1]).toBe('second');
+		expect(client.offlineCheckpoint().gapDetected).toBe(true);
+		await vi.advanceTimersByTimeAsync(31000);
+		answer(rpcFrames()[2], { ok: true, data: 'first' }); await turn();
+		expect(await pending[0]).toBe('first');
+		expect(client.offlineCheckpoint()).toMatchObject({ lastUploadedSeq: 2, gapDetected: true });
+	});
+});
