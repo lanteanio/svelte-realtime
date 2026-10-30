@@ -64,38 +64,42 @@ const _deliverySlot = new AsyncLocalStorage();
 
 /**
  * One wrapped config per registered config, so the adapter's per-config caches
- * (DNS pins) keep working. The wrapped config is a snapshot: the adapter signs
- * with it and the key is derived from it, so the two cannot disagree. Its
- * wrappers record the transformed payload and the idempotency key of the
- * delivery running in `_deliverySlot`.
- * @type {WeakMap<object, { wrapped: any, snapshot: any }>}
+ * (DNS pins) keep working. The wrapper is a live view of the registered
+ * config: every other field, the secret included, is read from it at the
+ * moment the adapter needs it, exactly as an unkeyed delivery reads it, and
+ * the key is derived from the same object, so signing and keying never see
+ * different settings. Its own two fields record the transformed payload and
+ * the idempotency key of the delivery running in `_deliverySlot`.
+ * @type {WeakMap<object, any>}
  */
 const _keyedConfigs = new WeakMap();
 
-/** @param {any} config @returns {{ wrapped: any, snapshot: any }} */
+/** @param {any} config */
 function _keyedConfig(config) {
-	let keyed = _keyedConfigs.get(config);
-	if (keyed !== undefined) return keyed;
-	const snapshot = { ...config };
-	const transform = snapshot.transform;
-	const wrapped = {
-		...snapshot,
-		transform: async (/** @type {string} */ event, /** @type {unknown} */ data) => {
-			const payload = transform ? await transform(event, data) : { event, data };
-			const slot = _deliverySlot.getStore();
-			if (slot !== undefined) slot.payload = payload;
-			return payload;
+	let wrapped = _keyedConfigs.get(config);
+	if (wrapped !== undefined) return wrapped;
+	wrapped = Object.create(config, {
+		transform: {
+			enumerable: true,
+			value: async (/** @type {string} */ event, /** @type {unknown} */ data) => {
+				const payload = config.transform ? await config.transform(event, data) : { event, data };
+				const slot = _deliverySlot.getStore();
+				if (slot !== undefined) slot.payload = payload;
+				return payload;
+			}
 		},
-		idempotencyKey: (/** @type {string} */ event, /** @type {unknown} */ data) => {
-			const slot = _deliverySlot.getStore();
-			if (slot === undefined) return null;
-			slot.key = _idempotencyKey(snapshot, slot.topic, event, data, slot.payload);
-			return slot.key;
+		idempotencyKey: {
+			enumerable: true,
+			value: (/** @type {string} */ event, /** @type {unknown} */ data) => {
+				const slot = _deliverySlot.getStore();
+				if (slot === undefined) return null;
+				slot.key = _idempotencyKey(config, slot.topic, event, data, slot.payload);
+				return slot.key;
+			}
 		}
-	};
-	keyed = { wrapped, snapshot };
-	_keyedConfigs.set(config, keyed);
-	return keyed;
+	});
+	_keyedConfigs.set(config, wrapped);
+	return wrapped;
 }
 /**
  * The delivery's idempotency key: the configured callback's value, otherwise
@@ -118,7 +122,7 @@ function _idempotencyKey(config, topic, event, data, payload) {
  * Either wait is bounded like the adapter bounds callbacks. Resolves the key,
  * null for a delivery without one (capture unkeyed), or `unavailable` when the
  * key could not be had (a callback that threw or never settled).
- * @param {any} config the snapshot the delivery used
+ * @param {any} config the registered config the delivery read
  * @param {{ topic: string, payload: unknown, key: unknown }} slot
  * @param {string} event @param {unknown} data
  * @returns {Promise<string | null | typeof _KEY_UNAVAILABLE>}
@@ -190,7 +194,7 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	const slot = keyStore && keyStore.keyedAdd === true ? { topic, payload: undefined, key: undefined } : null;
 	const r = slot === null
 		? await deliverWebhook(entry.config, topic, event, data, hooks)
-		: await _deliverySlot.run(slot, () => deliverWebhook(_keyedConfig(entry.config).wrapped, topic, event, data, hooks));
+		: await _deliverySlot.run(slot, () => deliverWebhook(_keyedConfig(entry.config), topic, event, data, hooks));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	const store = state.webhookDeadLetter;
@@ -212,7 +216,7 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	// can be sent again without creating a second record. Only a store that
 	// declares `keyedAdd` gets a key; any other store, and a delivery without a
 	// usable key, get one unkeyed write, which is all that can safely be repeated.
-	let key = slot !== null && store.keyedAdd === true ? await _captureKey(_keyedConfig(entry.config).snapshot, slot, event, data) : null;
+	let key = slot !== null && store.keyedAdd === true ? await _captureKey(entry.config, slot, event, data) : null;
 	if (key === _KEY_UNAVAILABLE) {
 		_reportKeyUnavailable(entry);
 		key = null;

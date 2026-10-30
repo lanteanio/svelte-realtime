@@ -224,14 +224,16 @@ describe('dead-letter capture key', () => {
 		expect(events.filter((e) => e.event === 'webhook.dead-letter.key-unavailable')).toHaveLength(1);
 	});
 
-	it('keys with the config the delivery signed with', async () => {
+	it('keys with the secret the delivery signed with, also after the secret changes', async () => {
 		configureWebhooks({ deadLetter: true });
 		const config = { ...failingEntry.config, secret: 'a'.repeat(32) };
 		const entry = { id: 'test/rotating', config };
+		const material = 'orders\0created\0' + JSON.stringify({ event: 'created', data: { id: 1 } });
+		const keyWith = (secret) => createHmac('sha256', secret).update('idem\0' + material).digest('hex');
 		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
-		config.secret = 'b'.repeat(32); // a later change to the registered object
+		config.secret = 'b'.repeat(32); // a rotation on the registered object
 		await _fireWebhookOut(entry, 'orders', 'created', { id: 1 }, null);
-		expect(getDeadLetter().count()).toBe(1);
+		expect(getDeadLetter().list().map((r) => r.key).sort()).toEqual([keyWith('a'.repeat(32)), keyWith('b'.repeat(32))].sort());
 	});
 
 	it('keeps one record for the same failed delivery captured twice', async () => {
