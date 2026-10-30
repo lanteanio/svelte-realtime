@@ -18,7 +18,7 @@
 // store, it only duck-types `store.purgeUser`.
 
 import { _IS_DEV } from './env.js';
-import { wallEpoch, randomUuid, setTimer, clearTimer } from '../shared/runtime.js';
+import { wallEpoch, randomUuid, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _validTenantId, _tenantKey, _isTenancyEnabled } from './tenant.js';
@@ -35,6 +35,7 @@ import { _purgeCrdtDocs } from './crdt.js';
 import { _ownerEmit } from './room-owner.js';
 import { state } from './state.js';
 import { createForgetJobStore } from './forget-jobs.js';
+import { _isMemoryDeadLetterStore } from './dead-letter.js';
 
 /**
  * Optional durable forget store (default null = in-memory state only). A wired
@@ -68,17 +69,97 @@ let _forgetHashKey = null;
 
 /**
  * Optional erasure job store (default null = no job records). Duck-typed:
- * `begin`, `claim`, `complete`, `fail`, `list` and `due`, each sync or async.
+ * `beat`, `begin`, `claim`, `complete`, `fail`, `list` and `due`, each sync or
+ * async.
  * `createForgetJobStore()` is the in-memory reference; durable stores implement
  * the same methods. Set via `configureForget({ jobs })`.
  * @type {any}
  */
 let _forgetJobs = null;
 
-const _JOB_METHODS = ['begin', 'claim', 'complete', 'fail', 'list', 'due'];
+const _JOB_METHODS = ['beat', 'begin', 'claim', 'complete', 'fail', 'list', 'due'];
 
 const _MAX_TIMEOUT_MS = 600_000;
-const _UNBOUNDED_LEASE_MS = 5 * 60_000;
+
+// A process with a job store beats every `_BEAT_MS`; one whose last beat is
+// older than `_PROCESS_TTL_MS` is gone, and its in-memory state with it.
+const _BEAT_MS = 10_000;
+const _PROCESS_TTL_MS = 30_000;
+
+/** @type {string | null} */
+let _processIdValue = null;
+/** @type {any} */
+let _beatTimer = null;
+
+/** This process's identity in the job store, drawn once. */
+function _processId() {
+	if (_processIdValue === null) _processIdValue = randomUuid();
+	return _processIdValue;
+}
+
+/** Jobs a run of this process is working on. */
+const _running = new Set();
+
+/**
+ * In-memory steps this process finished for jobs it owns whose outcome the
+ * store has not recorded yet, so a later run of the same job does not repeat
+ * them (a document dropped then may hold new edits by now).
+ * @type {Map<string, Set<string>>}
+ */
+const _localDone = new Map();
+
+/** Beat now and every `_BEAT_MS` while a job store is configured. */
+function _startBeat() {
+	_stopBeat();
+	const beat = () => {
+		const jobs = _forgetJobs;
+		if (jobs === null) return;
+		const at = wallEpoch();
+		Promise.resolve()
+			.then(() => jobs.beat({ processId: _processId(), at, aliveUntil: at + _PROCESS_TTL_MS }))
+			.catch(() => { /* A missed beat only shortens how long others see this process alive. */ });
+	};
+	beat();
+	_beatTimer = setIntervalTimer(beat, _BEAT_MS);
+	if (_beatTimer && typeof _beatTimer.unref === 'function') _beatTimer.unref();
+}
+
+function _stopBeat() {
+	if (_beatTimer !== null) clearIntervalTimer(_beatTimer);
+	_beatTimer = null;
+}
+
+/**
+ * Steps of an erasure any process can finish: the durable store and a
+ * dead-letter store other than the built-in in-memory one.
+ * @returns {string[]}
+ */
+function _sharedSteps() {
+	/** @type {string[]} */
+	const steps = [];
+	const dl = state.webhookDeadLetter;
+	if (dl && !_isMemoryDeadLetterStore(dl)) steps.push('webhookDeadLetter');
+	if (_forgetStore) steps.push('durable');
+	return steps;
+}
+
+/**
+ * In-memory steps of an erasure, which only the calling process can finish.
+ * @param {any} cascade @param {string[]} shared
+ * @returns {string[]}
+ */
+function _localSteps(cascade, shared) {
+	const steps = _descriptors.map((d) => d.name).filter((name) => !shared.includes(name));
+	if (cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt)) steps.push('crdtDocs');
+	return steps;
+}
+
+/** @param {string} step */
+function _sharedStoreMissing(step) {
+	if (step === 'durable') return _forgetStore === null;
+	if (step === 'webhookDeadLetter') return !state.webhookDeadLetter;
+	return false;
+}
 
 /**
  * The longest an erasure waits on any one store call (the job record, each
@@ -91,8 +172,6 @@ let _forgetTimeoutMs = null;
 
 const _RETRY_BASE_MS = 1000;
 const _RETRY_MAX_MS = 60 * 60_000;
-/** @type {ReadonlySet<string>} */
-const _NO_SKIP = new Set();
 const _JOB_STATUSES = ['pending', 'failed', 'completed'];
 const _MAX_JOB_LIMIT = 1000;
 
@@ -105,16 +184,6 @@ function _readHashKey(key) {
 	}
 	// KeyObject owns its bytes, so caller mutation cannot rotate a configured key.
 	return createSecretKey(key);
-}
-
-/**
- * A run's lease on its job: longer than every bounded wait of one run (the job
- * record, each in-memory surface, the durable store, the outcome) plus one
- * more, so a live run always records its outcome while it holds the lease and
- * only a run whose process died lets its job fall due.
- */
-function _leaseMs() {
-	return _forgetTimeoutMs === null ? _UNBOUNDED_LEASE_MS : (_descriptors.length + 4) * _forgetTimeoutMs;
 }
 
 /**
@@ -159,7 +228,7 @@ function _bounded(value, late) {
  * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null, timeoutMs?: number } | null} config
  */
 export function configureForget(config) {
-	if (config === null) { _resetForget(); return; }
+	if (config === null) { _clearForgetConfig(); return; }
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
 	}
@@ -182,7 +251,11 @@ export function configureForget(config) {
 	if (store !== undefined) _forgetStore = store;
 	if (platform !== undefined) _forgetPlatform = platform;
 	_forgetHashKey = nextHashKey;
-	if (jobs !== undefined) _forgetJobs = jobs === true ? createForgetJobStore() : (jobs || null);
+	if (jobs !== undefined) {
+		_forgetJobs = jobs === true ? createForgetJobStore() : (jobs || null);
+		if (_forgetJobs === null) _stopBeat();
+		else _startBeat();
+	}
 	if (timeoutMs !== undefined) _forgetTimeoutMs = timeoutMs;
 }
 
@@ -417,20 +490,26 @@ const _liveForget = async function forget(userId, opts) {
 	// Every call is its own job under a random reference: two workers erasing
 	// the same user each record their own outcome, and the reference reveals
 	// nothing about the user.
-	const job = jobs === null ? null : { id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false, skip: _NO_SKIP };
+	const shared = jobs === null ? [] : _sharedSteps();
+	const job = jobs === null ? null : {
+		id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false,
+		owner: true, ownerAlive: true, shared, local: _localSteps(cascade, shared)
+	};
 	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade }, onForget);
 };
 
 /**
  * One erasure run with its job bookkeeping. With a job store, a new call
- * records the job before any surface is touched (a failure to record it erases
- * nothing); a resumed run has already claimed it. Either way the run holds the
- * job's lease and records the outcome after. An outcome that cannot be recorded
- * leaves the job unfinished, so it becomes due again when the lease ends and a
- * resume runs the idempotent cascade again.
+ * records the job, owned by this process, before any surface is touched (a
+ * failure to record it erases nothing); a resumed run has already claimed it.
+ * The run does the job's shared steps that are still open and, in the owning
+ * process only, the owner's in-memory steps that are still open. The job
+ * completes once no shared step is open and its owner has nothing left or is
+ * gone; while a live owner still has in-memory steps, a run elsewhere records
+ * its progress and leaves them to the owner (`run.waiting`).
  * @param {any} jobs
- * @param {{ id: string, runId: string, attempts: number, claimed: boolean, skip: ReadonlySet<string> } | null} job
- * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
+ * @param {{ id: string, runId: string, attempts: number, claimed: boolean, owner: boolean, ownerAlive: boolean, shared: string[], local: string[] } | null} job
+ * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, waiting?: boolean }} run
  * @param {Function | undefined} onForget
  * @returns {Promise<ForgetResult>}
  */
@@ -441,37 +520,84 @@ async function _runErasure(jobs, job, run, onForget) {
 	// erasure rather than tearing it down half-applied (same contract as a cron
 	// tick / an alarm fire). The `finally` drains exactly once on every exit.
 	_enterInFlight();
+	if (jobId !== null) _running.add(jobId);
 	try {
 		if (job !== null && !job.claimed) {
 			const at = wallEpoch();
 			try {
-				await _bounded(jobs.begin({ id: job.id, runId: job.runId, userIdHash, tenantId, userId, cascade, at, leaseUntil: at + _leaseMs() }));
+				await _bounded(jobs.begin({
+					id: job.id, runId: job.runId, processId: _processId(), aliveUntil: at + _PROCESS_TTL_MS,
+					userIdHash, tenantId, userId, cascade, shared: job.shared, local: job.local, at
+				}));
 			} catch {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
 		}
-		/** @type {{ failedSurfaces: string[], doneSurfaces: string[] }} */
-		const failure = { failedSurfaces: [], doneSurfaces: [] };
-		/** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */
-		let erased;
-		try {
-			erased = await _erase(userId, tenantId, cascade, jobId, failure, job === null ? _NO_SKIP : job.skip);
-		} catch (err) {
-			if (job !== null) {
-				const at = wallEpoch();
-				await _recordOutcome(jobs, 'fail', {
-					id: job.id, runId: job.runId, at, code: /** @type {any} */ (err)?.code || 'INTERNAL_ERROR',
-					failedSurfaces: failure.failedSurfaces, doneSurfaces: failure.doneSurfaces,
-					retryAt: at + _retryDelay(job.attempts)
-				});
-			}
-			throw _withJob(err, jobId);
-		}
-		const { surfaces, rowsAffected } = erased;
-		const at = wallEpoch();
+		/** @type {{ failedSurfaces: string[], doneSurfaces: string[], rowsAffected: number }} */
+		const failure = { failedSurfaces: [], doneSurfaces: [], rowsAffected: 0 };
+		/** @type {Set<string> | null} */
+		let plan = null;
+		/** @type {Set<string>} */
+		let localDone = new Set();
 		if (job !== null) {
-			await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, at, rowsAffected, surfaces: { ...surfaces } });
+			// In-memory steps this process finished for its own job are not run
+			// again, even when the store never heard of them.
+			localDone = job.owner ? new Set(_localDone.get(job.id)) : localDone;
+			plan = new Set();
+			for (const step of job.shared) {
+				// A shared step whose store is no longer configured cannot be done here.
+				if (_sharedStoreMissing(step)) failure.failedSurfaces.push(step);
+				else plan.add(step);
+			}
+			if (job.owner) for (const step of job.local) if (!localDone.has(step)) plan.add(step);
 		}
+		/** @type {{ surfaces: Record<string, number>, rowsAffected: number } | null} */
+		let erased = null;
+		/** @type {any} */
+		let error = null;
+		try {
+			erased = await _erase(userId, tenantId, cascade, jobId, failure, plan);
+		} catch (err) {
+			error = err;
+		}
+		if (job === null) {
+			if (error !== null) throw error;
+		} else {
+			const done = new Set(failure.doneSurfaces);
+			const sharedDone = job.shared.filter((step) => done.has(step));
+			if (job.owner) {
+				for (const step of job.local) if (done.has(step)) localDone.add(step);
+				_localDone.set(job.id, localDone);
+			}
+			const sharedOpen = job.shared.filter((step) => !done.has(step));
+			const localOpen = job.owner ? job.local.filter((step) => !localDone.has(step)) : (job.ownerAlive ? job.local : []);
+			const at = wallEpoch();
+			if (error !== null || sharedOpen.length > 0 || localOpen.length > 0) {
+				// Left for the owner when this run did its part and only a live
+				// owner's in-memory steps remain: due again at once for it.
+				const waiting = error === null;
+				const recorded = await _recordOutcome(jobs, 'fail', {
+					id: job.id, runId: job.runId, at,
+					code: waiting ? 'FORGET_INCOMPLETE' : /** @type {any} */ (error)?.code || 'INTERNAL_ERROR',
+					failedSurfaces: waiting ? localOpen : failure.failedSurfaces,
+					sharedDone, localDone: job.owner ? [...localDone] : [],
+					rowsAffected: failure.rowsAffected,
+					retryAt: waiting ? at : at + _retryDelay(job.attempts)
+				});
+				if (recorded && job.owner) _localDone.delete(job.id);
+				if (error !== null) throw _withJob(error, jobId);
+				run.waiting = true;
+			} else {
+				await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, at, rowsAffected: failure.rowsAffected });
+				_localDone.delete(job.id);
+			}
+			if (error === null && run.waiting) {
+				const result = /** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */ (erased);
+				return { ok: true, at, rowsAffected: result.rowsAffected, surfaces: result.surfaces, job: job.id };
+			}
+		}
+		const { surfaces, rowsAffected } = /** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */ (erased);
+		const at = wallEpoch();
 
 		// Optional erasure hook: receives a stable pseudonymous hash of the
 		// userId, the tenant, the cascade flag, and the counts.
@@ -488,6 +614,7 @@ async function _runErasure(jobs, job, run, onForget) {
 
 		return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
 	} finally {
+		if (jobId !== null) _running.delete(jobId);
 		_exitInFlight();
 	}
 }
@@ -497,6 +624,7 @@ async function _runErasure(jobs, job, run, onForget) {
  * run no longer holds the lease, leaves the job unfinished; that is reported,
  * never thrown, so the caller still gets the erasure's own result.
  * @param {any} jobs @param {'complete' | 'fail'} method @param {any} outcome
+ * @returns {Promise<boolean>} whether the store recorded it
  */
 async function _recordOutcome(jobs, method, outcome) {
 	let recorded;
@@ -506,6 +634,7 @@ async function _recordOutcome(jobs, method, outcome) {
 		recorded = false;
 	}
 	if (recorded === false) _reportJobUnrecorded(outcome.id, method === 'complete' ? 'completed' : 'failed');
+	return recorded !== false;
 }
 
 /**
@@ -520,16 +649,16 @@ function _retryDelay(attempts) {
 
 /**
  * The cascade itself: every in-memory surface, named documents, then the
- * durable store, leaving out the surfaces in `skip`. Resolves the counts or
- * throws the erasure's LiveError; either way `failure` holds the names of the
- * surfaces that failed and of those that finished.
+ * durable store; with a `plan`, only the steps it names. Resolves the counts
+ * or throws the erasure's LiveError; either way `failure` holds the names of
+ * the surfaces that failed and of those that finished, and the rows removed.
  * @param {string} userId @param {string | null} tenantId @param {any} cascade
  * @param {string | null} jobId
- * @param {{ failedSurfaces: string[], doneSurfaces: string[] }} failure
- * @param {ReadonlySet<string>} skip
+ * @param {{ failedSurfaces: string[], doneSurfaces: string[], rowsAffected: number }} failure
+ * @param {ReadonlySet<string> | null} plan
  * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
  */
-async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
+async function _erase(userId, tenantId, cascade, jobId, failure, plan) {
 	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
 	/** @type {Record<string, number>} */
 	const surfaces = {};
@@ -539,7 +668,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	// In-memory descriptors run sequentially: the surface is small, the work
 	// is local, and a deterministic order keeps the cascade auditable.
 	for (const d of _descriptors) {
-		if (skip.has(d.name)) continue;
+		if (plan !== null && !plan.has(d.name)) continue;
 		let count = 0;
 		try {
 			count = await _bounded(d.run(tenantId, userId, cascade));
@@ -558,7 +687,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	// Whole-document CRDT drops (cascade.crdt): erase the named documents'
 	// loaded replicas. Deleting the durably persisted copies is the app's
 	// half, in its own persist store.
-	if (crdtDocs !== null && !skip.has('crdtDocs')) {
+	if (crdtDocs !== null && (plan === null || plan.has('crdtDocs'))) {
 		let dropped = 0;
 		try {
 			dropped = _purgeCrdtDocs(crdtDocs);
@@ -574,7 +703,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	// resolving before the durable delete confirms would be a compliance lie
 	// (GDPR must wait for durable confirmation). The return shapes are handled
 	// below (count, breakdown, or the owner-succession envelope).
-	if (_forgetStore && !skip.has('durable')) {
+	if (_forgetStore && (plan === null || plan.has('durable'))) {
 		let successions = null;
 		try {
 			// A purge that commits after its timeout still announces the owner
@@ -638,6 +767,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 					if (_IS_DEV) console.error('[svelte-realtime] live.forget announce-on-failure threw:', pubErr);
 				}
 			}
+			failure.rowsAffected = rowsAffected;
 			throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried');
 		}
 		// Publish the store's owner successions AFTER the durable try/catch:
@@ -651,6 +781,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 		}
 	}
 
+	failure.rowsAffected = rowsAffected;
 	if (failedSurfaces.length) {
 		_reportIncomplete(failedSurfaces, rowsAffected, jobId);
 		throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry');
@@ -672,11 +803,21 @@ export function installForget(live) {
  * @internal
  */
 export function _resetForget() {
+	_clearForgetConfig();
+	// Tests use this to stand for a new process: a fresh identity and no memory
+	// of earlier runs.
+	_processIdValue = null;
+	_localDone.clear();
+}
+
+/** Clear every forget setting and stop beating. */
+function _clearForgetConfig() {
 	_forgetStore = null;
 	_forgetPlatform = null;
 	_forgetHashKey = null;
 	_forgetJobs = null;
 	_forgetTimeoutMs = null;
+	_stopBeat();
 }
 
 /** @param {string} message */
@@ -704,6 +845,7 @@ function _publicJob(j) {
 		: null;
 	return {
 		id: String(j.id),
+		processId: typeof j.processId === 'string' ? j.processId : null,
 		userIdHash: String(j.userIdHash),
 		tenantId: typeof j.tenantId === 'string' ? j.tenantId : null,
 		status: j.status,
@@ -712,7 +854,7 @@ function _publicJob(j) {
 		updatedAt: Number(j.updatedAt),
 		completedAt: typeof j.completedAt === 'number' ? j.completedAt : null,
 		retryAt: j.status === 'failed' && typeof j.retryAt === 'number' ? j.retryAt : null,
-		rowsAffected: typeof j.rowsAffected === 'number' ? j.rowsAffected : null,
+		rowsAffected: typeof j.rowsAffected === 'number' ? j.rowsAffected : 0,
 		error
 	};
 }
@@ -760,7 +902,7 @@ export async function resumeForgetJobs(opts = {}) {
 	if (onForget !== undefined && typeof onForget !== 'function') {
 		throw _invalidJobRequest('resumeForgetJobs: onForget must be a function');
 	}
-	/** @type {{ total: number, completed: number, failed: number, results: Array<{ id: string, status: 'completed' | 'failed' | 'skipped', code?: string }> }} */
+	/** @type {{ total: number, completed: number, failed: number, results: Array<{ id: string, status: 'completed' | 'failed' | 'skipped' | 'waiting', code?: string }> }} */
 	const out = { total: 0, completed: 0, failed: 0, results: [] };
 	const jobs = _forgetJobs;
 	if (jobs === null) return out;
@@ -770,7 +912,7 @@ export async function resumeForgetJobs(opts = {}) {
 		ids = [id];
 	} else {
 		try {
-			const due = await _bounded(jobs.due({ at: wallEpoch(), limit }));
+			const due = await _bounded(jobs.due({ at: wallEpoch(), limit, processId: _processId() }));
 			ids = (Array.isArray(due) ? due : []).slice(0, limit).map((j) => String(j.id));
 		} catch {
 			throw new LiveError('FORGET_JOB_FAILED', 'resumeForgetJobs: the erasure job store could not be read');
@@ -778,11 +920,16 @@ export async function resumeForgetJobs(opts = {}) {
 	}
 	for (const jobId of ids) {
 		out.total++;
+		// A job a run of this process is still working on is not started twice.
+		if (_running.has(jobId)) {
+			out.results.push({ id: jobId, status: 'skipped' });
+			continue;
+		}
 		const runId = randomUuid();
 		const at = wallEpoch();
 		let claim;
 		try {
-			claim = await _bounded(jobs.claim({ id: jobId, runId, at, leaseUntil: at + _leaseMs() }));
+			claim = await _bounded(jobs.claim({ id: jobId, runId, processId: _processId(), aliveUntil: at + _PROCESS_TTL_MS, at }));
 		} catch {
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code: 'FORGET_JOB_FAILED' });
@@ -792,11 +939,16 @@ export async function resumeForgetJobs(opts = {}) {
 			out.results.push({ id: jobId, status: 'skipped' });
 			continue;
 		}
-		// Surfaces an earlier run of the job finished are not run again: a
-		// document dropped then may be in use again, and an aggregate reset then
-		// may hold other users' data by now.
-		const done = Array.isArray(claim.doneSurfaces) ? claim.doneSurfaces.filter((n) => typeof n === 'string') : [];
-		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true, skip: new Set(done) };
+		// The steps still open: shared ones any process can finish, and the
+		// owner's in-memory ones, which only the owner runs. A step finished by
+		// an earlier run is not open and does not run again.
+		/** @param {unknown} list */
+		const names = (list) => Array.isArray(list) ? list.filter((n) => typeof n === 'string') : [];
+		const job = {
+			id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true,
+			owner: claim.owner === _processId(), ownerAlive: claim.ownerAlive !== false,
+			shared: names(claim.shared), local: names(claim.local)
+		};
 		let started = false;
 		try {
 			const { userId, tenantId, cascade } = claim;
@@ -812,16 +964,22 @@ export async function resumeForgetJobs(opts = {}) {
 			}
 			const userIdHash = typeof claim.userIdHash === 'string' ? claim.userIdHash : _hashUserId(userId, _forgetHashKey);
 			started = true;
-			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: stored }, onForget);
-			out.completed++;
-			out.results.push({ id: jobId, status: 'completed' });
+			/** @type {{ userId: string, userIdHash: string, tenantId: string | null, cascade: any, waiting?: boolean }} */
+			const run = { userId, userIdHash, tenantId: scope, cascade: stored };
+			await _runErasure(jobs, job, run, onForget);
+			if (run.waiting) {
+				out.results.push({ id: jobId, status: 'waiting' });
+			} else {
+				out.completed++;
+				out.results.push({ id: jobId, status: 'completed' });
+			}
 		} catch (err) {
 			const code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
 			// A stored job this run cannot even start still releases its lease
 			// with a failure, so it stays listed and backs off like any other.
 			if (!started) {
 				const failedAt = wallEpoch();
-				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], doneSurfaces: [], retryAt: failedAt + _retryDelay(job.attempts) });
+				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], sharedDone: [], localDone: [], rowsAffected: 0, retryAt: failedAt + _retryDelay(job.attempts) });
 			}
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code });

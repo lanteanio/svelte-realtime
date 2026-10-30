@@ -85,6 +85,21 @@ function _validKey(key) {
  *   records (oldest evicted first; default 1000); `ttlMs` drops records older
  *   than the TTL on access (default 0 = no TTL).
  */
+/**
+ * Stores built by `createDeadLetterStore`. They live in one process, so an
+ * erasure treats their purge as that process's own in-memory step.
+ * @type {WeakSet<object>}
+ */
+const _memoryStores = new WeakSet();
+
+/**
+ * Whether a dead-letter store is the built-in in-memory store.
+ * @param {unknown} store
+ */
+export function _isMemoryDeadLetterStore(store) {
+	return store !== null && typeof store === 'object' && _memoryStores.has(store);
+}
+
 export function createDeadLetterStore(options = {}) {
 	const max = Number.isInteger(options.max) && options.max > 0 ? options.max : 1000;
 	const ttlMs = Number.isInteger(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : 0;
@@ -148,7 +163,7 @@ export function createDeadLetterStore(options = {}) {
 		}
 	}
 
-	return {
+	const store = {
 		/** `add` honors `key`, so a capture may repeat a write whose reply was lost. */
 		keyedAdd: true,
 
@@ -340,4 +355,6 @@ export function createDeadLetterStore(options = {}) {
 			purgedAt.clear();
 		}
 	};
+	_memoryStores.add(store);
+	return store;
 }

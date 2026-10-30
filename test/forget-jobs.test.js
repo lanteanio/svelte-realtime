@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import {
-	live, configureForget, configureWebhooks, createForgetJobStore, listForgetJobs, resumeForgetJobs,
+	live, configureForget, configureWebhooks, createForgetJobStore, createDeadLetterStore, listForgetJobs, resumeForgetJobs,
 	_resetForget, setOperationalEventSink
 } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
@@ -112,8 +112,8 @@ describe('erasure jobs', () => {
 		expect(err.code).toBe('FORGET_STORE_FAILED');
 		const failed = await listForgetJobs({ status: 'failed' });
 		expect(failed).toEqual([{
-			id, userIdHash: hmac(user), tenantId: 'acme', status: 'failed', attempts: 1,
-			createdAt: expect.any(Number), updatedAt: expect.any(Number), completedAt: null, retryAt: expect.any(Number), rowsAffected: null,
+			id, processId: expect.any(String), userIdHash: hmac(user), tenantId: 'acme', status: 'failed', attempts: 1,
+			createdAt: expect.any(Number), updatedAt: expect.any(Number), completedAt: null, retryAt: expect.any(Number), rowsAffected: 0,
 			error: { code: 'FORGET_STORE_FAILED', failedSurfaces: ['durable'] }
 		}]);
 		const incomplete = events.filter((e) => e.event === 'forget.incomplete');
@@ -151,10 +151,9 @@ describe('erasure jobs', () => {
 		expect(events.filter((e) => e.event === 'forget.job-unrecorded')).toHaveLength(1);
 		expect((await listForgetJobs())[0].status).toBe('pending');
 		configureForget({ jobs });
-		// Its run still holds the lease until it expires.
-		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
-		later();
+		// No run of this process holds it any more, so this process finishes it.
 		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'completed' });
 	});
 
 	it('requires a tenant scope once a job store is configured', async () => {
@@ -181,51 +180,71 @@ describe('erasure jobs', () => {
 });
 
 describe('createForgetJobStore', () => {
-	const intent = (over = {}) => ({ id: 'j1', runId: 'r1', userIdHash: 'h', tenantId: null, userId: 'alice', cascade: { crdt: ['doc'] }, at: 10, leaseUntil: 100, ...over });
-	const claim = (over = {}) => ({ id: 'j1', runId: 'r2', at: 100, leaseUntil: 200, ...over });
+	const intent = (over = {}) => ({
+		id: 'j1', runId: 'r1', processId: 'A', aliveUntil: 100, userIdHash: 'h', tenantId: null, userId: 'alice',
+		cascade: { crdt: ['doc'] }, shared: ['durable'], local: ['push', 'crdtDocs'], at: 10, ...over
+	});
+	const claim = (over = {}) => ({ id: 'j1', runId: 'r2', processId: 'B', aliveUntil: 1000, at: 50, ...over });
+	const fail = (over = {}) => ({ id: 'j1', runId: 'r1', at: 20, code: 'FORGET_STORE_FAILED', failedSurfaces: ['durable'], sharedDone: [], localDone: ['push', 'crdtDocs'], rowsAffected: 2, retryAt: 30, ...over });
 
-	it('leases a job to one run at a time and fences outcomes of other runs', () => {
+	it('leases a job to one run while its process lives and fences outcomes of other runs', () => {
 		const s = createForgetJobStore();
 		const cascade = { crdt: ['doc'] };
 		s.begin(intent({ cascade }));
 		cascade.crdt.push('mutated');
 		expect(() => s.begin(intent())).toThrow();
-		// The first run holds the lease until 100.
-		expect(s.claim(claim({ at: 99 }))).toBeNull();
-		expect(s.due({ at: 99, limit: 10 })).toEqual([]);
-		expect(s.due({ at: 100, limit: 10 }).map((j) => j.id)).toEqual(['j1']);
-		// Its lease expired: another run takes over and the late run is fenced.
-		expect(s.claim(claim())).toEqual({ userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] }, attempts: 2, doneSurfaces: [] });
-		expect(s.complete({ id: 'j1', runId: 'r1', at: 150, rowsAffected: 1, surfaces: {} })).toBe(false);
-		expect(s.fail({ id: 'j1', runId: 'r1', at: 150, code: 'X', failedSurfaces: [], retryAt: 151 })).toBe(false);
-		expect(s.list()[0]).toMatchObject({ status: 'pending', attempts: 2, createdAt: 10, updatedAt: 100 });
-		expect(s.fail({ id: 'j1', runId: 'r2', at: 160, code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'], doneSurfaces: ['push', 'crdtDocs'], retryAt: 300 })).toBe(true);
-		expect(s.list({ status: 'failed' })[0]).toMatchObject({ retryAt: 300, error: { code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'] } });
-		expect(s.due({ at: 299, limit: 10 })).toEqual([]);
-		// A failed job is claimable by id before its retry time.
-		expect(s.claim(claim({ runId: 'r3', at: 170, leaseUntil: 400 }))).toMatchObject({ attempts: 3, doneSurfaces: ['push', 'crdtDocs'] });
-		expect(s.fail({ id: 'j1', runId: 'r3', at: 175, code: 'X', failedSurfaces: ['presence'], doneSurfaces: ['push', 'durable'], retryAt: 176 })).toBe(true);
-		expect(s.claim(claim({ runId: 'r3', at: 177, leaseUntil: 400 }))).toMatchObject({ attempts: 4, doneSurfaces: ['push', 'crdtDocs', 'durable'] });
-		expect(s.complete({ id: 'j1', runId: 'r3', at: 180, rowsAffected: 2, surfaces: {} })).toBe(true);
-		expect(s.list()[0]).toMatchObject({ status: 'completed', attempts: 4, completedAt: 180, retryAt: null, rowsAffected: 2, error: null });
-		expect(s.claim(claim({ runId: 'r4', at: 1000, leaseUntil: 2000 }))).toBeNull();
+		// A's run holds the lease while A is alive.
+		expect(s.claim(claim())).toBeNull();
+		expect(s.due({ at: 50, limit: 10, processId: 'B' })).toEqual([]);
+		// A is gone at 100: B takes over, and A's late outcomes are fenced.
+		expect(s.due({ at: 100, limit: 10, processId: 'B' }).map((j) => j.id)).toEqual(['j1']);
+		expect(s.claim(claim({ at: 100 }))).toEqual({
+			userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] }, attempts: 2,
+			owner: 'A', ownerAlive: false, shared: ['durable'], local: ['push', 'crdtDocs']
+		});
+		expect(s.complete({ id: 'j1', runId: 'r1', at: 150, rowsAffected: 1 })).toBe(false);
+		expect(s.fail(fail({ at: 150 }))).toBe(false);
+		expect(s.list()[0]).toMatchObject({ status: 'pending', attempts: 2, processId: 'A', updatedAt: 100, rowsAffected: 0 });
+		expect(s.complete({ id: 'j1', runId: 'r2', at: 160, rowsAffected: 3 })).toBe(true);
+		expect(s.list()[0]).toMatchObject({ status: 'completed', completedAt: 160, retryAt: null, rowsAffected: 3, error: null });
+		expect(s.claim(claim({ runId: 'r3', at: 2000 }))).toBeNull();
 		expect(JSON.stringify(s.list())).not.toContain('alice');
+	});
+
+	it('leaves a live owner its in-memory steps and lets any process finish the shared ones', () => {
+		const s = createForgetJobStore();
+		s.begin(intent());
+		expect(s.fail(fail({ localDone: ['push'], failedSurfaces: ['crdtDocs', 'durable'], code: 'FORGET_INCOMPLETE' }))).toBe(true);
+		expect(s.list({ status: 'failed' })[0]).toMatchObject({ retryAt: 30, rowsAffected: 2, error: { code: 'FORGET_INCOMPLETE', failedSurfaces: ['crdtDocs', 'durable'] } });
+		// B may run the open shared step; A, alive, still owes crdtDocs.
+		expect(s.claim(claim({ at: 40 }))).toMatchObject({ owner: 'A', ownerAlive: true, shared: ['durable'], local: ['crdtDocs'] });
+		expect(s.fail(fail({ runId: 'r2', at: 45, sharedDone: ['durable'], localDone: [], failedSurfaces: ['crdtDocs'], code: 'FORGET_INCOMPLETE', rowsAffected: 1, retryAt: 45 }))).toBe(true);
+		// Only the owner's step is open now: B has nothing to do there, A has.
+		expect(s.due({ at: 50, limit: 10, processId: 'B' })).toEqual([]);
+		expect(s.claim(claim({ runId: 'r3', at: 50 }))).toBeNull();
+		expect(s.due({ at: 50, limit: 10, processId: 'A' }).map((j) => j.id)).toEqual(['j1']);
+		expect(s.claim(claim({ runId: 'r4', processId: 'A', at: 50 }))).toMatchObject({ owner: 'A', shared: [], local: ['crdtDocs'], attempts: 3 });
+		expect(s.complete({ id: 'j1', runId: 'r4', at: 60, rowsAffected: 1 })).toBe(true);
+		expect(s.list()[0]).toMatchObject({ status: 'completed', rowsAffected: 4 });
 	});
 
 	it('orders due jobs by how long they have been due', () => {
 		const s = createForgetJobStore();
-		s.begin(intent({ id: 'a', at: 1, leaseUntil: 50 }));
-		s.begin(intent({ id: 'b', at: 2, leaseUntil: 20 }));
-		s.begin(intent({ id: 'c', at: 3, leaseUntil: 500 }));
-		expect(s.due({ at: 100, limit: 10 }).map((j) => j.id)).toEqual(['b', 'a']);
-		expect(s.due({ at: 100, limit: 1 }).map((j) => j.id)).toEqual(['b']);
+		s.begin(intent({ id: 'a', at: 1 }));
+		s.begin(intent({ id: 'b', at: 2 }));
+		s.begin(intent({ id: 'c', at: 3 }));
+		s.fail(fail({ id: 'a', retryAt: 50 }));
+		s.fail(fail({ id: 'b', retryAt: 20 }));
+		s.fail(fail({ id: 'c', retryAt: 500 }));
+		expect(s.due({ at: 100, limit: 10, processId: 'B' }).map((j) => j.id)).toEqual(['b', 'a']);
+		expect(s.due({ at: 100, limit: 1, processId: 'B' }).map((j) => j.id)).toEqual(['b']);
 	});
 
 	it('lists oldest first and drops the oldest completion to stay within max', () => {
 		const s = createForgetJobStore({ max: 3 });
 		for (let i = 0; i < 4; i++) {
 			s.begin(intent({ id: 'c' + i, runId: 'r', at: i + 1 }));
-			s.complete({ id: 'c' + i, runId: 'r', at: i + 1, rowsAffected: 0, surfaces: {} });
+			s.complete({ id: 'c' + i, runId: 'r', at: i + 1, rowsAffected: 0 });
 		}
 		s.begin(intent({ id: 'p', runId: 'r', at: 0 }));
 		expect(s.list().map((j) => j.id)).toEqual(['p', 'c2', 'c3']);
@@ -349,7 +368,7 @@ describe('resuming a partly finished erasure', () => {
 		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
 		expect(drop).toHaveBeenCalledTimes(1);
 		expect(purgeUser).toHaveBeenCalledTimes(1);
-		expect((await listForgetJobs())[0]).toMatchObject({ status: 'completed', attempts: 2, rowsAffected: 1 });
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'completed', attempts: 2, rowsAffected: 2 });
 	});
 
 	it('runs a surface again when it failed in the earlier run', async () => {
@@ -478,18 +497,107 @@ describe('erasure input and store bounds', () => {
 		expect(purgeUser).not.toHaveBeenCalled();
 	});
 
-	it('keeps the lease longer than every bounded wait of a run', async () => {
-		const leases = [];
-		const jobs = createForgetJobStore();
-		configureForget({ jobs: { ...jobs, begin: (i) => { leases.push(i.leaseUntil - i.at); return jobs.begin(i); } }, timeoutMs: 1000 });
-		await live.forget('alice', { tenantId: null });
-		// begin, each in-memory surface, the durable store and the outcome write.
-		expect(leases[0]).toBeGreaterThan(1000 * (7 + 3));
-	});
-
 	it('validates timeoutMs', () => {
 		for (const timeoutMs of [0, -1, 1.5, '50', 600_001]) {
 			expect(() => configureForget({ timeoutMs })).toThrow(/timeoutMs/);
 		}
+	});
+});
+
+describe('erasure jobs across processes', () => {
+	afterEach(() => { resetRuntimeEnv(); vi.resetModules(); _crdtDecls.clear(); configureWebhooks({ deadLetter: false }); });
+
+	/** Another process: its own module instance (own memory), the same job store. */
+	async function otherProcess(jobs, store, { muchLater = false } = {}) {
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		if (muchLater) (await import('../src/shared/runtime.js')).setRuntimeEnv({ clock: { wallEpoch: () => Date.now() + 24 * 3_600_000 } });
+		const crdt = await import('../src/server/crdt.js');
+		const drop = vi.fn(() => true);
+		crdt._crdtDecls.set('notes', { authority: { drop } });
+		const purgeUser = vi.fn(() => 0);
+		other.configureWebhooks({ deadLetter: { add() { return null; }, purgeUser } });
+		const dl = other.createDeadLetterStore();
+		const dlPurge = vi.spyOn(dl, 'purgeUser');
+		other.configureWebhooks({ deadLetter: dl });
+		other.configureForget({ store, jobs });
+		return { other, drop, dlPurge };
+	}
+
+	it('leaves the in-memory steps of a live owner to that owner', async () => {
+		const jobs = createForgetJobStore();
+		let failures = 1;
+		const dl = createDeadLetterStore();
+		const purge = vi.spyOn(dl, 'purgeUser').mockImplementation(() => { if (failures-- > 0) throw new Error('offline'); return 0; });
+		configureWebhooks({ deadLetter: dl });
+		configureForget({ store: durable(), jobs });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(err.code).toBe('FORGET_INCOMPLETE');
+
+		const b = await otherProcess(jobs, durable());
+		expect(await b.other.resumeForgetJobs()).toMatchObject({ total: 0 });
+		expect(await b.other.resumeForgetJobs({ id: err.job })).toMatchObject({ results: [{ id: err.job, status: 'skipped' }] });
+		expect(b.dlPurge).not.toHaveBeenCalled();
+		expect((await listForgetJobs())[0].status).toBe('failed');
+
+		// The owner finishes its own step.
+		expect(await resumeForgetJobs({ id: err.job })).toMatchObject({ completed: 1 });
+		expect(purge).toHaveBeenCalledTimes(2);
+		b.other.configureForget(null);
+	});
+
+	it('completes the job of an owner that is gone without running its in-memory steps elsewhere', async () => {
+		const jobs = createForgetJobStore();
+		const dl = createDeadLetterStore();
+		vi.spyOn(dl, 'purgeUser').mockImplementation(() => { throw new Error('offline'); });
+		configureWebhooks({ deadLetter: dl });
+		configureForget({ store: partial(), jobs });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		configureForget(null); // this process stops beating
+
+		// A day later the owner's liveness has long lapsed.
+		const b = await otherProcess(jobs, durable(), { muchLater: true });
+		expect(await b.other.resumeForgetJobs()).toMatchObject({ completed: 1, results: [{ id: err.job, status: 'completed' }] });
+		expect(b.dlPurge).not.toHaveBeenCalled();
+		expect(rows.has('alice')).toBe(false);
+		b.other.configureForget(null);
+	});
+
+	it('runs only the open shared step when another process resumes, and never repeats a finished document drop', async () => {
+		const jobs = createForgetJobStore();
+		const drop = vi.fn(() => true);
+		_crdtDecls.set('notes', { authority: { drop } });
+		configureForget({ store: partial(), jobs });
+		const err = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		expect(err.code).toBe('FORGET_STORE_FAILED');
+		expect(drop).toHaveBeenCalledTimes(1);
+
+		// B takes the open durable step; A is alive and has nothing left.
+		const b = await otherProcess(jobs, durable());
+		expect(await b.other.resumeForgetJobs({ id: err.job })).toMatchObject({ completed: 1 });
+		expect(b.drop).not.toHaveBeenCalled();
+		expect(drop).toHaveBeenCalledTimes(1);
+		b.other.configureForget(null);
+	});
+
+	it('does not repeat a document drop whose outcome the store never recorded', async () => {
+		const jobs = createForgetJobStore();
+		const drop = vi.fn(() => true);
+		_crdtDecls.set('notes', { authority: { drop } });
+		configureForget({ store: partial(), jobs: { ...jobs, fail() { throw new Error('job store offline'); } } });
+		const err = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		expect(err.code).toBe('FORGET_STORE_FAILED');
+
+		// The same process resumes its own job: the drop it remembers is not repeated.
+		configureForget({ store: durable(), jobs });
+		expect(await resumeForgetJobs({ id: err.job })).toMatchObject({ completed: 1 });
+		expect(drop).toHaveBeenCalledTimes(1);
+	});
+
+	it('beats while a job store is configured', async () => {
+		const jobs = createForgetJobStore();
+		const beat = vi.spyOn(jobs, 'beat');
+		configureForget({ jobs });
+		await vi.waitFor(() => expect(beat).toHaveBeenCalledWith(expect.objectContaining({ processId: expect.any(String) })));
 	});
 });
