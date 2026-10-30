@@ -5,8 +5,10 @@
 // floors, Node engine, scaffolder tuple, first-run transcript and the prose
 // that restates manifest facts must agree with the manifest's current row.
 //
-// The manifest rules mirror the adapter's own scripts/check-compatibility.js,
-// so this check accepts exactly the manifests the adapter can publish.
+// The row rules mirror the adapter's own scripts/check-compatibility.js. The
+// adapter additionally pins each published baseline row to a digest of its
+// registry release; that pin is the adapter's release gate, so the installed
+// manifest has already passed it.
 //
 // --write rewrites only the bounded README blocks and the restated facts.
 // --release additionally requires this package's version to be the realtime
@@ -61,6 +63,8 @@ export const STATEMENTS = [
 	{ file: UPGRADE_GUIDE, pattern: /\| `0\.5\.x` \((\d+\.\d+\.\d+) or later\) \|/, value: () => ADAPTER_FLOORS.get('0.5') },
 	{ file: UPGRADE_GUIDE, pattern: /\| matching `([^`]+)`, at least `[^`]+` \|/, value: (current) => current.adapter },
 	{ file: UPGRADE_GUIDE, pattern: /\| matching `[^`]+`, at least `([^`]+)` \|/, value: (current) => current.adapter_version },
+	{ file: UPGRADE_GUIDE, pattern: /\| exact `([^`]+)` \| matching `[^`]+`, at least/, value: (current) => (current.realtime.endsWith('.x') ? current.realtime : current.realtime + '.*') },
+	{ file: UPGRADE_GUIDE, pattern: /, at least `[^`]+` \| matching `([^`]+)` \|/, value: (current) => current.extensions },
 	{ file: 'README.md', pattern: new RegExp('the pinned native server supports ' + NODE_PHRASE + ' with a matching'), value: (current) => nodeRequirement(current.node) }
 ];
 
@@ -177,6 +181,9 @@ export function currentRow(rows) {
  * The stable cut of a prerelease series (0.6.0 for 0.6.0-next) counts, so
  * this package can take its release version before the adapter publishes the
  * stable manifest; --release still requires the exact declared version.
+ * A version below the declared release also passes: the adapter can declare
+ * the next realtime release before this package bumps its version, which
+ * happens only when the release is cut.
  */
 export function inRealtimeSeries(version, series) {
 	if (matchesSeries(version, series)) return true;
@@ -201,6 +208,8 @@ export function validateInstalledAdapter(adapter, current) {
 	const errors = [];
 	if (adapter.version !== current.adapter_version) errors.push('Installed svelte-adapter-uws ' + adapter.version + ' is not the manifest current adapter ' + current.adapter_version + '; reinstall dependencies');
 	if (adapter.optionalDependencies?.['uWebSockets.js'] !== current.uwebsockets) errors.push('Installed adapter native pin differs from the manifest uwebsockets value');
+	if (adapter.engines?.node !== current.node) errors.push('Installed adapter engines.node ' + JSON.stringify(adapter.engines?.node) + ' differs from the manifest Node prerequisite ' + current.node);
+	if (adapter.publishConfig?.tag !== current.dist_tag) errors.push('Installed adapter publishConfig.tag ' + JSON.stringify(adapter.publishConfig?.tag) + ' differs from the manifest dist tag ' + current.dist_tag);
 	return errors;
 }
 
@@ -236,7 +245,11 @@ export function validateFirstRun(text, current) {
 }
 
 const VERSION = '(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?)';
-const ADAPTER_REQUIREMENT = new RegExp('svelte-adapter-uws`?\\s*>=\\s*`?' + VERSION + '|svelte-adapter-uws`?\\s+`?' + VERSION + '`?\\s+or\\s+(?:newer|later)', 'g');
+// A release written next to the package name: `>= X`, `&gt;= X` (generated
+// HTML), `@X`, `^X`, `vX`, or a bare `X` followed by any wording. A release
+// newer than the tuple cannot be history, so every such mention is a
+// requirement the tuple does not meet yet.
+const ADAPTER_REQUIREMENT = new RegExp('svelte-adapter-uws`?(?:\\s*(?:>=|&gt;=)\\s*|@|\\s+)`?[\\^~]?v?' + VERSION + '(?![0-9A-Za-z-])', 'g');
 
 /**
  * Adapter releases that documented features require beyond the current
@@ -248,7 +261,7 @@ export function aheadRequirements(documents, current) {
 	const ahead = new Map();
 	for (const [file, text] of documents) {
 		for (const match of text.matchAll(ADAPTER_REQUIREMENT)) {
-			const version = match[1] || match[2];
+			const version = match[1];
 			if (!semver.valid(version) || !semver.gt(version, current.adapter_version)) continue;
 			if (!ahead.has(version)) ahead.set(version, new Set());
 			ahead.get(version).add(file);
@@ -355,14 +368,17 @@ export function outsideBlocks(readme) {
 
 const UNBOUNDED = [
 	[/\b(?:svelte-realtime|svelte-adapter-uws(?:-extensions)?)@(?:[\w^~<>=*-]|\.(?=[\w*]))+/g, 'a pinned ecosystem package'],
-	[/@(?:latest|next)\b/g, 'a moving dist-tag'],
-	[/\b(?:npm\s+(?:install|i|add)|pnpm\s+(?:add|install)|yarn\s+add|bun\s+add|npx)\b[^\n`]*?\bsvelte-(?:realtime|adapter-uws)\b/g, 'an ecosystem install command'],
+	// A bare tag (`@next`), not a scoped package (`@next/env`) or another
+	// package's tag (`@sveltejs/kit@next`).
+	[/(?<![\w/@.-])@(?:latest|next)\b(?![\w/-])/g, 'a moving dist-tag'],
+	[/\b(?:npm\s+(?:install|i|add|create|init|exec)|pnpm\s+(?:add|install|dlx|create)|yarn\s+(?:add|dlx|create)|bun\s+add|bunx|npx)\b[^\n`]*?\bsvelte-(?:realtime|adapter-uws)\b/g, 'an ecosystem install command'],
 	[/uNetworking\/uWebSockets\.js(?:#|\/archive\/)/g, 'a uWebSockets.js install source']
 ];
 
 /** Install instructions for the ecosystem belong in the generated blocks only. */
 export function validateUnboundedPins(readme) {
-	const outside = outsideBlocks(readme);
+	// Join shell continuation lines so a command split across lines is still one command.
+	const outside = outsideBlocks(readme).replace(/(?:\\|\^|`)\r?\n/g, '');
 	const errors = [];
 	for (const [pattern, kind] of UNBOUNDED) {
 		const found = outside.match(pattern);
@@ -386,10 +402,11 @@ function readText(directory, path) {
 	return readFileSync(resolve(directory, path), 'utf8').replace(/\r\n/g, '\n');
 }
 
-/** README outside the generated blocks plus every top-level docs page. */
+/** README outside the generated blocks, the migration guide and every top-level docs page. */
 export function requirementDocuments(directory, readme) {
 	const docs = readdirSync(resolve(directory, 'docs')).filter((name) => name.endsWith('.md')).sort();
-	return [['README.md', outsideBlocks(readme)], ...docs.map((name) => ['docs/' + name, readText(directory, 'docs/' + name)])];
+	const migration = existsSync(resolve(directory, 'MIGRATION.md')) ? [['MIGRATION.md', readText(directory, 'MIGRATION.md')]] : [];
+	return [['README.md', outsideBlocks(readme)], ...migration, ...docs.map((name) => ['docs/' + name, readText(directory, 'docs/' + name)])];
 }
 
 /** Read and validate the installed adapter's manifest. */

@@ -57,7 +57,7 @@ function withFixture(run) {
 		mkdirSync(join(directory, 'docs'), { recursive: true });
 		// Every top-level docs page, because documented adapter requirements are read from all of them.
 		const docs = readdirSync(join(root, 'docs')).filter((name) => name.endsWith('.md')).map((name) => 'docs/' + name);
-		for (const file of ['package.json', 'README.md', ...docs, MANIFEST_PATH, 'node_modules/svelte-adapter-uws/package.json']) {
+		for (const file of ['package.json', 'README.md', 'MIGRATION.md', ...docs, MANIFEST_PATH, 'node_modules/svelte-adapter-uws/package.json']) {
 			copyFileSync(new URL('../' + file, import.meta.url), join(directory, file));
 		}
 		return run(directory, (file) => readFileSync(join(directory, file), 'utf8'), (file, text) => writeFileSync(join(directory, file), text));
@@ -140,6 +140,26 @@ describe('README blocks generated from the adapter manifest', () => {
 		expect(rendered).toContain('Some documented features need a newer `svelte-adapter-uws` than this tuple: `' + next(1) + '` (this README); `' + next(2) + '` ([docs/a.md](./docs/a.md), [docs/b.md](./docs/b.md)).');
 	});
 
+	it.each([
+		['generated HTML', 'requires svelte-adapter-uws &gt;= {v}).'],
+		['an npm spec', 'install `svelte-adapter-uws@{v}` or newer'],
+		['a caret range', '`svelte-adapter-uws` `^{v}`'],
+		['a v prefix', 'svelte-adapter-uws v{v} or higher'],
+		['a bare release', 'Requires svelte-adapter-uws {v}.']
+	])('reads an adapter requirement written as %s', (_, template) => {
+		const version = current.adapter_version.replace(/\d+$/, (n) => String(Number(n) + 3));
+		expect(aheadRequirements([['docs/x.md', template.replace('{v}', version)]], current)).toEqual([{ version, files: ['docs/x.md'] }]);
+		expect(aheadRequirements([['docs/x.md', template.replace('{v}', version + '0-')]], current).map(({ version: found }) => found)).not.toContain(version);
+	});
+
+	it('scans the migration guide for adapter requirements', () => {
+		withFixture((directory, get, put) => {
+			const newer = current.adapter_version.replace(/\d+$/, (n) => String(Number(n) + 7));
+			put('MIGRATION.md', get('MIGRATION.md') + '\nThis step needs svelte-adapter-uws >= ' + newer + '.\n');
+			expect(aheadRequirements(requirementDocuments(directory, get('README.md')), current).at(-1)).toEqual({ version: newer, files: ['MIGRATION.md'] });
+		});
+	});
+
 	it('states the Node floor as prose only for a plain lower bound', () => {
 		expect(nodeRequirement('>=22.0.0')).toBe('Node 22 or newer');
 		expect(nodeRequirement('>=22.12.0')).toBe('Node 22.12 or newer');
@@ -166,7 +186,10 @@ describe('README blocks generated from the adapter manifest', () => {
 		]);
 		expect(validateUnboundedPins(outside('Pin svelte-adapter-uws@0.6.0-next.2.'))).toEqual(['README states a pinned ecosystem package outside the generated compatibility blocks: svelte-adapter-uws@0.6.0-next.2']);
 		expect(validateUnboundedPins(outside('Track the `@next` tag.')).join('\n')).toContain('a moving dist-tag outside the generated compatibility blocks: @next');
-		expect(validateUnboundedPins(outside('`pnpm add -D svelte-adapter-uws`')).join('\n')).toContain('an ecosystem install command');
+		expect(validateUnboundedPins(outside('Use `@sveltejs/kit@next` and `@next/env`, write to user@latest.example.'))).toEqual([]);
+		for (const command of ['`pnpm add -D svelte-adapter-uws`', '`bunx svelte-realtime my-app`', '`pnpm dlx svelte-realtime my-app`', '`npm create svelte-realtime`', '`npm exec svelte-realtime`', '```bash\nnpm install \\\n  svelte-adapter-uws\n```']) {
+			expect(validateUnboundedPins(outside(command)).join('\n')).toContain('an ecosystem install command');
+		}
 		expect(validateUnboundedPins(outside('`github:uNetworking/uWebSockets.js#v20.0.0`')).join('\n')).toContain('a uWebSockets.js install source');
 		expect(validateUnboundedPins(outside('The svelte-realtime package and svelte-adapter-uws work together.'))).toEqual([]);
 	});
@@ -274,14 +297,18 @@ describe('agreement with package, scaffolder and docs', () => {
 		expect(validateInstalledAdapter(adapter, current)).toEqual([]);
 		expect(validateInstalledAdapter({ ...adapter, version: '0.6.0-next.1' }, current).join('\n')).toContain('reinstall dependencies');
 		expect(validateInstalledAdapter({ ...adapter, optionalDependencies: {} }, current).join('\n')).toContain('native pin');
+		expect(validateInstalledAdapter({ ...adapter, engines: { node: '>=24.0.0' } }, current)).toEqual(['Installed adapter engines.node ">=24.0.0" differs from the manifest Node prerequisite ' + current.node]);
+		expect(validateInstalledAdapter({ ...adapter, publishConfig: { tag: 'latest' } }, current)).toEqual(['Installed adapter publishConfig.tag "latest" differs from the manifest dist tag ' + current.dist_tag]);
 	});
 
 	it('generates the floors the upgrade guide states', () => {
 		expect(applyStatements(UPGRADE_GUIDE, upgrade, current)).toBe(upgrade);
-		const moved = { ...current, adapter_version: '0.6.0-next.500', adapter: '0.6.1-next' };
+		const moved = { ...current, adapter_version: '0.6.0-next.500', adapter: '0.6.1-next', realtime: '0.6.1-next', extensions: '0.6.1-next' };
 		const rendered = applyStatements(UPGRADE_GUIDE, upgrade, moved);
 		expect(rendered).toContain('`svelte-adapter-uws`\n`^0.6.0-next.500` as a peer');
-		expect(rendered).toContain('| matching `0.6.1-next`, at least `0.6.0-next.500` |');
+		expect(rendered).toContain('| exact `0.6.1-next.*` | matching `0.6.1-next`, at least `0.6.0-next.500` | matching `0.6.1-next` |');
+		const promoted = applyStatements(UPGRADE_GUIDE, upgrade, { ...current, adapter_version: '0.6.0', adapter: '0.6.x', realtime: '0.6.x', extensions: '0.6.x' });
+		expect(promoted).toContain('| exact `0.6.x` | matching `0.6.x`, at least `0.6.0` | matching `0.6.x` |');
 		expect(applyStatements(UPGRADE_GUIDE, upgrade.replace('(0.5.11 or later)', '(0.5.8 or later)'), current)).toBe(upgrade);
 		expect(() => applyStatements(UPGRADE_GUIDE, upgrade.replace('as a peer', 'as peer'), current)).toThrow(/exactly one statement/);
 	});

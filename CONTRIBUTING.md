@@ -350,9 +350,9 @@ compatibility blocks; `node scripts/check-compatibility.js` owns them.
 The Quick start command, version table and install commands are generated from
 the installed adapter's `docs/compatibility.v1.csv`; refresh them with
 `node scripts/check-compatibility.js --write`. The table also names adapter
-releases that documented features need beyond the current tuple, found from
-`svelte-adapter-uws >= X` and `svelte-adapter-uws X or newer` statements in the
-README and `docs/*.md`. The check requires the scaffolder tuple in
+releases that documented features need beyond the current tuple: any release
+newer than the tuple written next to the package name (`svelte-adapter-uws >= X`,
+`@X`, `^X`, `vX` or a bare `X`) in the README, `MIGRATION.md` or `docs/*.md`. The check requires the scaffolder tuple in
 `src/cli-utils.js`, `docs/first-run.md`, the package floors, `engines.node`, the
 README's native Node floor and the stated floors in `docs/0.6-upgrade.md` to
 match the manifest's current row, and refuses ecosystem install commands, pins,
