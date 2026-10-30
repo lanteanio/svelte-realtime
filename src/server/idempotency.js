@@ -98,11 +98,12 @@ let _defaultIdempotencyStore = null;
  *
  * Capacity is charged to the caller that created a slot: its tenant, and within
  * the tenant its principal (the authenticated identity, the connection for an
- * anonymous caller, the room's alarms, or one bucket for server-side calls with
- * neither). A tenant may hold a tenth of the store and a principal a tenth of
- * its tenant's share, and the last tenth of each level is kept for holders below
- * a hundredth of it. Cron jobs, a finite set the app declares, are charged to
- * their own pool beside the store, so no caller or room can crowd them out.
+ * anonymous caller, or one bucket for server-side calls with neither). A tenant
+ * may hold a tenth of the store and a principal a tenth of its tenant's share,
+ * and the last tenth of each level is kept for holders below a hundredth of it.
+ * Cron jobs and alarms are charged to pools of their own beside the store, so
+ * callers cannot crowd them out. The alarm pool is divided between tenants the
+ * same way, since rooms (and so alarms) follow visitor activity.
  *
  * Only a principal at its own share gives up a result, and only one whose key
  * is its own (from the client envelope). A key from `keyFrom` may be shared by
@@ -114,10 +115,14 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const tenantLimit = Math.min(1000, maxEntries);
 	const reserve = Math.min(1000, Math.floor(maxEntries / 10));
 	const reserveLimit = Math.min(100, reserve);
-	const cronPool = Math.max(1, reserve);
-	let cronCount = 0;
+	// Pools beside the store for work the server scheduled itself.
+	const pools = { cron: { limit: Math.max(1, reserve), count: 0 }, alarm: { limit: Math.max(1, reserve), count: 0 } };
 	const tenantCounts = new Map();
-	/** @typedef {{ pkey: string, tenant: string | null, cron: boolean, count: number, cached: Set<string>, results: Set<string> }} Principal cached: its committed keys; results: those it may give up */
+	/**
+	 * @typedef {{ pkey: string, tenant: string | null, pool: { limit: number, count: number } | null, count: number, cachedCount: number, byTtl: Map<number, Set<string>>, results: Set<string> }} Principal
+	 * byTtl: its committed keys by TTL, each set in commit (so expiry) order;
+	 * results: those it may give up.
+	 */
 	/** @type {Map<string, Principal>} */
 	const principals = new Map();
 	/** @type {Map<string, Principal>} cache key -> owning principal */
@@ -165,9 +170,14 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		if (!owner) return;
 		keyOwners.delete(key);
 		owner.results.delete(key);
-		owner.cached.delete(key);
+		for (const [ttl, keys] of owner.byTtl) {
+			if (!keys.delete(key)) continue;
+			owner.cachedCount--;
+			if (keys.size === 0) owner.byTtl.delete(ttl);
+			break;
+		}
 		if (--owner.count === 0 && principals.get(owner.pkey) === owner) principals.delete(owner.pkey);
-		if (owner.cron) { cronCount--; return; }
+		if (owner.pool) { owner.pool.count--; return; }
 		const count = tenantCounts.get(owner.tenant) - 1;
 		if (count === 0) tenantCounts.delete(owner.tenant);
 		else tenantCounts.set(owner.tenant, count);
@@ -175,18 +185,27 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 
 	// Admission pressure: 0 admits, _OWN_SHARE means the principal holds its whole
 	// share, _SHARED_LIMIT means a store, tenant or reserve limit applies.
-	function _pressure(tenant, pkey, cron) {
-		// Cron is bounded by its own pool only.
-		if (cron) return cronCount >= cronPool ? _SHARED_LIMIT : 0;
+	function _pressure(tenant, pkey, pool) {
 		// Without a tenant resolver there is no tenant boundary to divide the
 		// store by, so an app that never configures one keeps all of it. With a
 		// resolver, callers it leaves unscoped stay one capped bucket so they
 		// cannot crowd out resolved tenants.
 		const whole = tenant === null && !_isTenancyEnabled();
-		const share = whole ? maxEntries : tenantLimit;
 		const held = principals.get(pkey)?.count || 0;
+		// Cron is bounded by its pool only. The alarm pool is divided between
+		// tenants like the store: a tenth each, and its last tenth kept for
+		// tenants holding below a hundredth.
+		if (pool === pools.cron) return pool.count >= pool.limit ? _SHARED_LIMIT : 0;
+		if (pool === pools.alarm) {
+			if (pool.count >= pool.limit) return _SHARED_LIMIT;
+			if (whole) return 0;
+			const tenth = Math.max(1, Math.floor(pool.limit / 10));
+			if (held >= tenth) return _OWN_SHARE;
+			return pool.count >= pool.limit - tenth && held >= Math.max(1, Math.floor(pool.limit / 100)) ? _SHARED_LIMIT : 0;
+		}
+		const share = whole ? maxEntries : tenantLimit;
 		if (held >= Math.max(1, Math.floor(share / 10))) return _OWN_SHARE;
-		const used = results.size + inflight.size - cronCount;
+		const used = results.size + inflight.size - pools.cron.count - pools.alarm.count;
 		if (used >= maxEntries) return _SHARED_LIMIT;
 		const count = tenantCounts.get(tenant) || 0;
 		const inReserve = used >= maxEntries - reserve && count >= reserveLimit;
@@ -200,12 +219,15 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		serverState.metricsInstruments?.idempotencyCapacity?.inc({ outcome });
 	}
 
-	// Milliseconds until the first of a principal's cached results expires, when
-	// it holds any: the earliest its share can admit a key it cannot replace.
+	// Milliseconds until the first of a principal's cached results expires: the
+	// earliest its share can admit a key it cannot replace. Each TTL's keys sit
+	// in expiry order, so this reads one key per distinct TTL. Undefined while
+	// the principal also holds running keys, which can free a slot any moment.
 	function _retryAfter(owner, now) {
+		if (!owner || owner.cachedCount < owner.count) return undefined;
 		let first = Infinity;
-		if (owner) for (const key of owner.cached) {
-			const entry = results.get(key);
+		for (const keys of owner.byTtl.values()) {
+			const entry = results.get(keys.values().next().value);
 			if (entry && entry.expiresAt < first) first = entry.expiresAt;
 		}
 		return first === Infinity ? undefined : Math.max(0, Math.ceil(first - now));
@@ -249,18 +271,19 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		}
 	}
 
-	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, tenant, principal, cron, ownKey) {
+	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, tenant, principal, pool, ownKey) {
 		// A result that expired while this caller waited on its running sibling
 		// still holds its slot; drop it so the key is not charged twice.
 		if (results.has(key)) { results.delete(key); _indexDrop(key); _releaseCapacity(key); }
 		// A validated tenant id has no NUL, so the first NUL ends it.
 		const pkey = (tenant ?? '') + '\0' + principal;
-		if (_pressure(tenant, pkey, cron)) {
+		if (_pressure(tenant, pkey, pool)) {
 			const now = runtimeNow();
 			// Reclaim expired results on pressure, even before the periodic sweep.
-			// A full cache of live results rejects in constant time between expiries.
+			// A full cache of live results rejects between expiries without walking
+			// it: a refusal reads at most one key per distinct TTL of the caller.
 			if (now >= nextExpiry) _sweepResults(now);
-			const pressure = _pressure(tenant, pkey, cron);
+			const pressure = _pressure(tenant, pkey, pool);
 			if (pressure) {
 				// A caller at its own share swaps its own oldest result for the new
 				// key, which leaves every level exactly as full as before. Any other
@@ -273,7 +296,8 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					_recordCapacity('rejected');
 					if (pressure === _OWN_SHARE) {
 						const retryAfter = _retryAfter(principals.get(pkey), now);
-						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after its oldest result expires.', retryAfter === undefined ? undefined : { retryAfter });
+						if (retryAfter === undefined) throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store, partly with calls still running; the handler has not run. Retry once one of them settles.');
+						throw new LiveError('IDEMPOTENCY_CAPACITY', 'This caller holds its whole share of the idempotency store and none of it can be replaced; the handler has not run. Retry after its oldest result expires.', { retryAfter });
 					}
 					throw new LiveError('IDEMPOTENCY_CAPACITY', 'The idempotency store is full; the handler has not run. Retry after capacity becomes available.');
 				}
@@ -292,10 +316,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		promise.catch(() => {});
 		inflight.set(key, promise);
 		let owner = principals.get(pkey);
-		if (!owner) { owner = { pkey, tenant, cron, count: 0, cached: new Set(), results: new Set() }; principals.set(pkey, owner); }
+		if (!owner) { owner = { pkey, tenant, pool, count: 0, cachedCount: 0, byTtl: new Map(), results: new Set() }; principals.set(pkey, owner); }
 		owner.count++;
 		keyOwners.set(key, owner);
-		if (cron) cronCount++;
+		if (pool) pool.count++;
 		else tenantCounts.set(tenant, (tenantCounts.get(tenant) || 0) + 1);
 
 		let settled = false;
@@ -321,7 +345,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					_indexAdd(key, idemUser, activeUser);
 					const owner = keyOwners.get(key);
 					if (owner) {
-						owner.cached.add(key);
+						let keys = owner.byTtl.get(ttlMs);
+						if (!keys) owner.byTtl.set(ttlMs, keys = new Set());
+						keys.add(key);
+						owner.cachedCount++;
 						if (ownKey) owner.results.add(key);
 					}
 				}
@@ -402,9 +429,9 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			// that caller's own; the other buckets hold callers that cannot be told
 			// apart, and a keyFrom key may be shared on purpose.
 			const ownKey = meta?.shared === false && (principal[0] === 'u' || principal[0] === 'c');
-			// Cron work spans tenants and is charged to its own pool.
-			const cron = principal === 's';
-			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, cron ? null : meta?.tenant ?? null, principal, cron, ownKey);
+			// Cron work spans tenants; alarms keep their room's tenant.
+			const pool = principal === 's' ? pools.cron : principal === 'a' ? pools.alarm : null;
+			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, pool === pools.cron ? null : meta?.tenant ?? null, principal, pool, ownKey);
 		},
 		/**
 		 * Right-to-erasure: drop every cached + in-flight entry recorded under a
@@ -716,7 +743,7 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  *
  * The default in-process store holds up to 10,000 running keys and cached
  * results, divided between tenants and, inside a tenant, between identities
- * (anonymous callers per connection), with a separate pool for cron jobs.
+ * (anonymous callers per connection), with separate pools for cron and alarms.
  * A caller holding its whole identity share replaces its own oldest result for
  * a client envelope key; a `keyFrom` key may be shared and is never replaced.
  * At any other limit, or with nothing of its own to give up, a new key gets

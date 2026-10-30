@@ -2119,10 +2119,11 @@ export namespace live {
 	 * up, a new key gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler
 	 * runs and every cached result stays, so no caller's traffic evicts another
 	 * caller's result. A refusal at the caller's own share carries `retryAfter`,
-	 * the milliseconds until its oldest result expires. Server-side calls without
-	 * a user (`.load()`, form actions) share one identity-sized bucket per tenant
-	 * that never replaces; each tenant's alarms have one such bucket too; cron
-	 * jobs have their own pool of 1,000 that neither callers nor rooms can fill.
+	 * the milliseconds until its oldest result expires, unless some of its calls
+	 * are still running. Server-side calls without a user (`.load()`, form
+	 * actions) share one identity-sized bucket per tenant that never replaces.
+	 * Cron jobs and alarms have pools of 1,000 of their own that callers cannot
+	 * fill; with a tenant resolver each tenant's alarms may hold 100 of theirs.
 	 * Pending durable slots are polled for up to five seconds, then return
 	 * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
 	 * Waiting never cancels the original owner.

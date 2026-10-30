@@ -719,6 +719,8 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		setAlarm: _alarmUnavailable,
 		getAlarm: _alarmGetUnavailable,
 		deleteAlarm: _alarmUnavailable,
+		// Set only on cron and alarm contexts (see _markWorkOrigin).
+		[_WORK_ORIGIN]: undefined,
 		_idempotencyKey: idempotencyKey || null,
 		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
 		// null). `_publishWire` is the raw, non-prefixing publish for framework

@@ -237,6 +237,20 @@ describe('idempotency capacity preserves accepted effects', () => {
 		expect(effects.get('::quiet')).toBe(1);
 	});
 
+	it('names no wait while a caller at its share still has calls running', async () => {
+		const gate = deferred(); gates.push(gate);
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => { if (key === 'slow') await gate.promise; return key; });
+		const alice = { user: { id: 'alice' } };
+		for (let i = 1; i < TENANT; i++) await run(alice, 'k' + i);
+		const slow = run(alice, 'slow');
+		await nextTurn();
+		const refusal = await run(alice, 'over').catch(error => error);
+		expect(refusal).toMatchObject(capacityError);
+		expect(refusal.retryAfter).toBeUndefined();
+		expect(refusal.message).toMatch(/still running/);
+		gate.resolve(); await slow;
+	});
+
 	it('names the wait until the oldest result expires when a caller cannot give one up', async () => {
 		let effects = 0;
 		const run = live.idempotent({ ttl: 60, keyFrom: (ctx, key) => ctx.user.id + ':' + key }, async () => ++effects);
@@ -444,7 +458,7 @@ describe('idempotency capacity for alarms', () => {
 	});
 
 	function closingRoom(effects) {
-		const onAlarm = live.idempotent({ keyFrom: ctx => 'close-' + ctx.tenantId + '-' + ctx.alarm.at }, async ctx => {
+		const onAlarm = live.idempotent({ keyFrom: ctx => ctx.alarm.idempotencyKey }, async ctx => {
 			effects.set(ctx.tenantId, (effects.get(ctx.tenantId) || 0) + 1);
 		});
 		registry.set('rooms/closing', live.stream('room', () => ({}), { alarm: { onAlarm } }));
@@ -464,15 +478,47 @@ describe('idempotency capacity for alarms', () => {
 		expect(effects.get(null)).toBe(1);
 	});
 
-	it('charges an alarm to its room\'s tenant', async () => {
+	const fillWith = live.idempotent({ keyFrom: (ctx, key) => key }, async () => null);
+
+	it('runs an alarm while the store and its tenant are full', async () => {
 		const effects = new Map();
 		const store = closingRoom(effects);
-		const fill = live.idempotent({ keyFrom: (ctx, key) => key }, async () => null);
-		for (let i = 0; i < TENANT; i++) await fill({ user: { id: 'filler' + Math.floor(i / 9) }, tenantId: 'acme' }, 'f' + i);
+		// Nine full tenants and ten at the reserve threshold fill the store.
+		for (const tenantId of ['acme', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8']) {
+			for (let i = 0; i < TENANT; i++) await fillWith({ user: { id: 'filler' + Math.floor(i / 9) }, tenantId }, 'f' + i);
+		}
+		for (let t = 0; t < 10; t++) {
+			for (let i = 0; i < TENANT / 10; i++) await fillWith({ user: { id: 'small' + Math.floor(i / 9) }, tenantId: 'small' + t }, 'f' + i);
+		}
+		await expect(fillWith({ user: { id: 'late' }, tenantId: 'late' }, 'x')).rejects.toMatchObject(capacityError);
+		await expect(fillWith({ user: { id: 'late' }, tenantId: 'acme' }, 'x')).rejects.toMatchObject(capacityError);
 		store.seed('@t/acme/room', Date.now() - 1, { path: 'rooms/closing', tenantId: 'acme' });
+		await _pollAlarms();
+		expect(effects.get('acme')).toBe(1);
+	});
+
+	it('runs an alarm while anonymous connections fill the store without tenants', async () => {
+		_resetTenantResolver();
+		const effects = new Map();
+		const store = closingRoom(effects);
+		let ws;
+		for (let i = 0; i < GLOBAL; i++) {
+			if (i % 99 === 0) ws = {};
+			await fillWith({ user: null, ws }, 'f' + i);
+		}
+		await expect(fillWith({ user: null, ws: {} }, 'x')).rejects.toMatchObject(capacityError);
+		store.seed('room', Date.now() - 1, { path: 'rooms/closing', tenantId: null });
+		await _pollAlarms();
+		expect(effects.get(null)).toBe(1);
+	});
+
+	it('divides the alarm pool between tenants', async () => {
+		const effects = new Map();
+		const store = closingRoom(effects);
+		for (let i = 0; i <= TENANT / 10; i++) store.seed('@t/acme/room' + i, Date.now() - 1, { path: 'rooms/closing', tenantId: 'acme' });
 		store.seed('@t/beta/room', Date.now() - 1, { path: 'rooms/closing', tenantId: 'beta' });
 		await _pollAlarms();
-		expect(effects.get('acme')).toBeUndefined();
+		expect(effects.get('acme')).toBe(TENANT / 10);
 		expect(effects.get('beta')).toBe(1);
 	});
 });
