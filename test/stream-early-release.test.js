@@ -1636,7 +1636,7 @@ describe('attach-window replay inclusion', () => {
   return { result, response };
  }
 
- it('deduplicates only exact replay members and keeps intervening and later live sequences', async () => {
+ it('deduplicates only exact replay members and keeps a later live sequence', async () => {
   const event = seq => ({ event: 'push', data: { id: seq }, seq });
   const { result, response } = await resumeReplay('latest', [event(2), event(3)], [event(2), event(3), event(4)], 3);
   expect(response.replay).toBe(true);
