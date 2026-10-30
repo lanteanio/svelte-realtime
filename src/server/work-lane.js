@@ -58,14 +58,15 @@ const _MAX_TIMEOUT_MS = 2147483647;
  * @property {boolean} metered - false for framework-internal watchers kept out of the app's series
  * @property {(a: any, b: any, c: any, d: any) => any} run - returns `LANE_FAILED` (or a promise of it) when the job failed
  * @property {(lane: WorkLane, a: any, b: any, c: any, d: any) => void} [onReject]
- * @property {(lane: WorkLane, rejected: number) => void} [onDrained]
+ * @property {(lane: WorkLane, rejected: number) => void} [onOverflowEnded]
  * @property {(lane: WorkLane, released: number) => void} [onTimeout]
  * @property {number} timeoutMs - how long a pending job may hold its slot; Infinity for no limit
  * @property {number} active
  * @property {Array<(go: boolean) => void>} queue - waiting jobs, as the resolvers of their waits
  * @property {number[]} since - when each waiting job was queued (monotonic ms, 0 while metrics are off), aligned with `queue`
  * @property {number} head
- * @property {number} rejected - jobs rejected since the queue last had room
+ * @property {number} rejected - jobs rejected in the current overflow episode
+ * @property {number} resumeDepth - the queue depth at or below which an overflow episode ends
  * @property {number} pending - running jobs that returned a promise, while timeoutMs is finite
  * @property {Int32Array | null} pendingByTick - `pending` split by start tick, indexed by tick % _TICK_RING
  * @property {number} tick
@@ -77,10 +78,10 @@ const _MAX_TIMEOUT_MS = 2147483647;
  * @param {'effect' | 'webhook'} kind
  * @param {{ maxConcurrent: number, maxQueued: number, overflow?: 'reject' | 'coalesce', metered?: boolean, timeoutMs?: number }} limits
  * @param {(a: any, b: any, c: any, d: any) => any} run - starts one job from its submitted arguments; a returned promise holds its slot until it settles. A result of `LANE_FAILED` counts the job as an error.
- * @param {{ onReject?: (lane: WorkLane, a: any, b: any, c: any, d: any) => void, onDrained?: (lane: WorkLane, rejected: number) => void, onTimeout?: (lane: WorkLane, released: number) => void }} [hooks]
+ * @param {{ onReject?: (lane: WorkLane, a: any, b: any, c: any, d: any) => void, onOverflowEnded?: (lane: WorkLane, rejected: number) => void, onTimeout?: (lane: WorkLane, released: number) => void }} [hooks]
  *   `onReject` hears each rejected job (`lane.rejected` is 1 for the first of
- *   an overflow episode); `onDrained` hears when the queue has room again after
- *   rejections, with their count; `onTimeout` hears each deadline tick that
+ *   an overflow episode); `onOverflowEnded` hears when the episode ends, with
+ *   its count of rejections; `onTimeout` hears each deadline tick that
  *   released pending jobs, with their count.
  * @returns {WorkLane}
  */
@@ -93,7 +94,7 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		metered: limits.metered !== false,
 		run,
 		onReject: hooks.onReject,
-		onDrained: hooks.onDrained,
+		onOverflowEnded: hooks.onOverflowEnded,
 		onTimeout: hooks.onTimeout,
 		timeoutMs: limits.timeoutMs ?? Infinity,
 		active: 0,
@@ -101,6 +102,7 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		since: [],
 		head: 0,
 		rejected: 0,
+		resumeDepth: Math.floor(limits.maxQueued / 2),
 		pending: 0,
 		pendingByTick: null,
 		tick: 0,
@@ -329,22 +331,27 @@ function _settle(lane, startedAt, result) {
 			lane.head = 0;
 		}
 		_move(lane, 'queued', -1);
-		if (lane.rejected && lane.head === lane.queue.length) _drained(lane);
+		if (lane.rejected && lane.queue.length - lane.head <= lane.resumeDepth) _overflowEnded(lane);
 		// The slot passes straight to the next job.
 		next(true);
 		return;
 	}
 	lane.active--;
 	_move(lane, 'inflight', -1);
-	if (lane.rejected) _drained(lane);
+	if (lane.rejected) _overflowEnded(lane);
 }
 
-/** @param {WorkLane} lane */
-function _drained(lane) {
+/**
+ * End an overflow episode. It ends once the queue is back to half its limit,
+ * not at the first free place: a handler that only just keeps up would
+ * otherwise start and end an episode, and report both, on every job.
+ * @param {WorkLane} lane
+ */
+function _overflowEnded(lane) {
 	const rejected = lane.rejected;
 	lane.rejected = 0;
-	if (lane.onDrained) {
-		try { lane.onDrained(lane, rejected); } catch {}
+	if (lane.onOverflowEnded) {
+		try { lane.onOverflowEnded(lane, rejected); } catch {}
 	}
 }
 

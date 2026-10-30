@@ -1051,7 +1051,7 @@ function _effectLane(entry) {
 	const limits = entry.limits || { maxConcurrent: EFFECT_MAX_CONCURRENT, maxQueued: EFFECT_MAX_QUEUED, timeoutMs: EFFECT_TIMEOUT_MS };
 	const lane = _createLane('effect', limits, (event, data, platform) => _fireEffect(entry, event, data, platform), {
 		onReject: _effectRejected,
-		onDrained: _effectOverflowEnded,
+		onOverflowEnded: _effectOverflowEnded,
 		onTimeout: _effectTimedOut
 	});
 	lane.id = entry.id || 'unknown';
@@ -1071,8 +1071,8 @@ function _submitEffect(entry, event, data, platform) {
 
 /**
  * Report a rejected effect call. The lane counts every rejection; the first
- * of an overflow episode is reported, the rest stay quiet until the queue has
- * room again.
+ * of an overflow episode is reported, the rest stay quiet until the episode
+ * ends.
  * @param {any} lane
  */
 function _effectRejected(lane) {
@@ -1125,7 +1125,7 @@ function _effectOverflowEnded(lane, rejected) {
 		event: 'reactive.effect.overflow.ended',
 		severity: 'info',
 		dataClass: 'operational',
-		message: 'A reactive effect has queue room again after skipping calls.',
+		message: 'A reactive effect queue is back to half its limit after skipping calls.',
 		attributes: { effect: lane.id, rejected }
 	});
 }

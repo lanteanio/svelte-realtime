@@ -369,8 +369,8 @@ export const EVENT_GUIDANCE = Object.freeze({
 	}),
 	'reactive.effect.overflow': Object.freeze({
 		cause: 'A `live.effect` receives a publish while `maxConcurrent` calls are running and `maxQueued` more are waiting, with `overflow` set to `reject` (the default). The `effect` attribute names the registration.',
-		consequence: 'The call for that publish is skipped, and so is every call for a publish that arrives before the queue has room again. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode; each skip counts in `svelte_realtime_background_total` with result `rejected`.',
-		automaticRecovery: 'The effect takes new publishes again as soon as its queue has room. A `reactive.effect.overflow.ended` info event then reports how many calls were skipped.',
+		consequence: 'The call for that publish is skipped, and so is every call for a publish that arrives while the queue is full. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode, which lasts until the queue is back to half of `maxQueued`; each skip counts in `svelte_realtime_background_total` with result `rejected`.',
+		automaticRecovery: 'The effect takes new publishes again as soon as its queue has room. Once the queue is back to half of `maxQueued`, a `reactive.effect.overflow.ended` info event reports how many calls the episode skipped, and the next overflow starts a new episode.',
 		nextAction: 'Find why the effect handler is slow or stalled (a hung query or remote call). Raise `maxConcurrent` or `maxQueued` only if the work can keep up, or use the `coalesce` overflow when only the latest event matters.'
 	}),
 	'reactive.effect.timeout': Object.freeze({
@@ -471,8 +471,8 @@ export const EVENT_GUIDANCE = Object.freeze({
 	}),
 	'webhook.delivery.overflow': Object.freeze({
 		cause: 'An outbound webhook receives a publish while `maxConcurrent` deliveries are in flight and `maxQueued` more events are waiting. The `webhookId` attribute names the registration.',
-		consequence: 'That event and every event that arrives before the queue has room again are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.',
-		automaticRecovery: 'The webhook takes new events again as soon as its queue has room. A `webhook.delivery.overflow.ended` info event then reports how many were rejected.',
+		consequence: 'That event and every event that arrives while the queue is full are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.',
+		automaticRecovery: 'The webhook takes new events again as soon as its queue has room. Once the queue is back to half of `maxQueued`, a `webhook.delivery.overflow.ended` info event reports how many the episode rejected, and the next overflow starts a new episode.',
 		nextAction: 'Check the endpoint latency and health. Replay dead-lettered events with `replayDeadLetter()` once it recovers, and raise `maxConcurrent` or `maxQueued` only if the endpoint can take the load.'
 	}),
 	'webhook.delivery.failed': Object.freeze({

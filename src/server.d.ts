@@ -4054,6 +4054,9 @@ export interface EffectOptions {
 	 *   `svelte_realtime_background_total{kind="effect",result="rejected"}`. The
 	 *   first skip of an overflow episode reaches `onError('effect', err)` as a
 	 *   `LiveError` with code `OVERLOADED` and emits `reactive.effect.overflow`.
+	 *   The episode ends once the queue is back to half of `maxQueued`, when
+	 *   `reactive.effect.overflow.ended` reports its count; the next skip
+	 *   starts a new episode.
 	 * - `'coalesce'`: the call replaces the newest waiting call, so the effect
 	 *   still sees the latest event. Needs `maxQueued >= 1`.
 	 * @default 'reject'

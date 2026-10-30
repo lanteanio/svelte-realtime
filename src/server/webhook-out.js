@@ -132,7 +132,7 @@ function _webhookLane(entry) {
 		maxQueued: config.maxQueued ?? WEBHOOK_MAX_QUEUED
 	}, (topic, event, data, platform) => _fireWebhookOut(entry, topic, event, data, platform), {
 		onReject: (l, topic, event, data, platform) => _webhookOverflow(entry, l, topic, event, data, platform),
-		onDrained: _webhookOverflowEnded
+		onOverflowEnded: _webhookOverflowEnded
 	});
 	lane.id = entry.id;
 	return entry.lane = lane;
@@ -194,7 +194,7 @@ function _webhookOverflowEnded(lane, rejected) {
 		event: 'webhook.delivery.overflow.ended',
 		severity: 'info',
 		dataClass: 'operational',
-		message: 'An outbound webhook has queue room again after rejecting events.',
+		message: 'An outbound webhook queue is back to half its limit after rejecting events.',
 		attributes: { webhookId: lane.id, rejected }
 	});
 }

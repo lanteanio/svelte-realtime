@@ -3245,7 +3245,7 @@ Effects are server-only. They fire whenever a matching topic publishes and canno
 
 Each effect runs at most `maxConcurrent` calls at once (default 32) and queues at most `maxQueued` more (default 10000) in publish order, so a stalled handler cannot pile up unbounded work. A publish that finds both full is the effect's overflow, set by `overflow`:
 
-- `'reject'` (default): that call is skipped. The first skip of an overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits a `reactive.effect.overflow` event; every skip counts in `svelte_realtime_background_total{kind="effect",result="rejected"}`.
+- `'reject'` (default): that call is skipped. The first skip of an overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits a `reactive.effect.overflow` event, and the episode ends once the queue is back to half of `maxQueued`; every skip counts in `svelte_realtime_background_total{kind="effect",result="rejected"}`.
 - `'coalesce'`: the new call replaces the newest waiting one, for effects where only the latest event matters (a cache refresh, a recount).
 
 A call still pending `timeoutMs` after it started (default 30000) gives its slot back, so a handler that never settles cannot stall the effect for good; the handler keeps running, its late result is ignored, and the release reaches `onError('effect', err)` with code `TIMEOUT`.

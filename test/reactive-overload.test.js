@@ -109,6 +109,36 @@ describe('live.effect concurrency and queue limits', () => {
 		expect(errors).toHaveLength(2);
 	});
 
+	it('ends an overflow episode once the queue is back to half its limit, without draining', async () => {
+		const { errors, events } = captureErrors();
+		const fx = setupEffect({ maxConcurrent: 1, maxQueued: 4 });
+		const release = async () => { fx.waiting.shift()(); await flush(); };
+		const ended = () => events.filter((e) => e.event === 'reactive.effect.overflow.ended').map((e) => e.attributes.rejected);
+		// One running, four waiting, two rejected.
+		for (let i = 1; i <= 7; i++) fx.publish(i);
+		await flush();
+		expect(errors).toHaveLength(1);
+		await release();
+		// Three waiting: the queue has room, but the episode goes on, so a
+		// rejection now is not reported again.
+		fx.publish(8);
+		fx.publish(9);
+		await flush();
+		expect(errors).toHaveLength(1);
+		await release();
+		expect(ended()).toEqual([]);
+		await release();
+		// Two waiting: half of maxQueued ends the episode.
+		expect(ended()).toEqual([3]);
+		// The handler never caught up, yet the next overflow is a new episode.
+		for (let i = 10; i <= 13; i++) fx.publish(i);
+		await flush();
+		expect(errors).toHaveLength(2);
+		expect(events.filter((e) => e.event === 'reactive.effect.overflow')).toHaveLength(2);
+		await fx.drain();
+		expect(ended()).toEqual([3, 2]);
+	});
+
 	it("overflow: 'coalesce' keeps the newest event in place of the newest waiting one", async () => {
 		const { errors } = captureErrors();
 		const fx = setupEffect({ maxConcurrent: 1, maxQueued: 1, overflow: 'coalesce' });

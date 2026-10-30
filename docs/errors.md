@@ -827,8 +827,8 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Delivered to: operational event sink
 - Message patterns: <code>A reactive effect is at its concurrency and queue limits; calls for new publishes are skipped.</code>
 - Cause: A `live.effect` receives a publish while `maxConcurrent` calls are running and `maxQueued` more are waiting, with `overflow` set to `reject` (the default). The `effect` attribute names the registration.
-- Consequence: The call for that publish is skipped, and so is every call for a publish that arrives before the queue has room again. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode; each skip counts in `svelte_realtime_background_total` with result `rejected`.
-- Automatic recovery: The effect takes new publishes again as soon as its queue has room. A `reactive.effect.overflow.ended` info event then reports how many calls were skipped.
+- Consequence: The call for that publish is skipped, and so is every call for a publish that arrives while the queue is full. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode, which lasts until the queue is back to half of `maxQueued`; each skip counts in `svelte_realtime_background_total` with result `rejected`.
+- Automatic recovery: The effect takes new publishes again as soon as its queue has room. Once the queue is back to half of `maxQueued`, a `reactive.effect.overflow.ended` info event reports how many calls the episode skipped, and the next overflow starts a new episode.
 - Next action: Find why the effect handler is slow or stalled (a hung query or remote call). Raise `maxConcurrent` or `maxQueued` only if the work can keep up, or use the `coalesce` overflow when only the latest event matters.
 - Owning sources: [src/server/reactive.js](../src/server/reactive.js)
 
@@ -1043,8 +1043,8 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Delivered to: operational event sink
 - Message patterns: <code>An outbound webhook is at its concurrency and queue limits; new events are not delivered.</code>
 - Cause: An outbound webhook receives a publish while `maxConcurrent` deliveries are in flight and `maxQueued` more events are waiting. The `webhookId` attribute names the registration.
-- Consequence: That event and every event that arrives before the queue has room again are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.
-- Automatic recovery: The webhook takes new events again as soon as its queue has room. A `webhook.delivery.overflow.ended` info event then reports how many were rejected.
+- Consequence: That event and every event that arrives while the queue is full are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.
+- Automatic recovery: The webhook takes new events again as soon as its queue has room. Once the queue is back to half of `maxQueued`, a `webhook.delivery.overflow.ended` info event reports how many the episode rejected, and the next overflow starts a new episode.
 - Next action: Check the endpoint latency and health. Replay dead-lettered events with `replayDeadLetter()` once it recovers, and raise `maxConcurrent` or `maxQueued` only if the endpoint can take the load.
 - Owning sources: [src/server/webhook-out.js](../src/server/webhook-out.js)
 
@@ -1053,12 +1053,12 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 
 | Event | Severity | Message patterns | Owning sources |
 |---|---|---|---|
-| <a id="diagnostic-reactive.effect.overflow.ended"></a>`reactive.effect.overflow.ended` | info | <code>A reactive effect has queue room again after skipping calls.</code> | [src/server/reactive.js](../src/server/reactive.js) |
+| <a id="diagnostic-reactive.effect.overflow.ended"></a>`reactive.effect.overflow.ended` | info | <code>A reactive effect queue is back to half its limit after skipping calls.</code> | [src/server/reactive.js](../src/server/reactive.js) |
 | <a id="diagnostic-shutdown.drain.completed"></a>`shutdown.drain.completed` | info | <code>Shutdown drain budget expired with tracked handlers still active.</code>; <code>Shutdown tracked handlers drained before teardown.</code> | [src/server/lifecycle.js](../src/server/lifecycle.js) |
 | <a id="diagnostic-upload.stream.ended"></a>`upload.stream.ended` | debug | <code>An upload stream ended.</code> | [src/server/upload.js](../src/server/upload.js) |
 | <a id="diagnostic-upload.stream.started"></a>`upload.stream.started` | debug | <code>An upload stream started.</code> | [src/server/upload.js](../src/server/upload.js) |
 | <a id="diagnostic-webhook.dead-letter.replayed"></a>`webhook.dead-letter.replayed` | info | <code>Dead-lettered webhook events were replayed.</code> | [src/server/webhooks.js](../src/server/webhooks.js) |
-| <a id="diagnostic-webhook.delivery.overflow.ended"></a>`webhook.delivery.overflow.ended` | info | <code>An outbound webhook has queue room again after rejecting events.</code> | [src/server/webhook-out.js](../src/server/webhook-out.js) |
+| <a id="diagnostic-webhook.delivery.overflow.ended"></a>`webhook.delivery.overflow.ended` | info | <code>An outbound webhook queue is back to half its limit after rejecting events.</code> | [src/server/webhook-out.js](../src/server/webhook-out.js) |
 
 <a id="console-lines"></a>
 ## Console lines
