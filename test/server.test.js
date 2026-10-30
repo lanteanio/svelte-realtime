@@ -12286,6 +12286,22 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 			.toThrow(/delta must be an object/);
 	});
 
+	it('warns once in dev when a stream declares both replay and delta.fromSeq', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const fromSeq = async () => [];
+			live.stream('tt/both-declared', async () => [], { merge: 'crud', key: 'id', replay: true, delta: { fromSeq } });
+			live.stream('tt/both-declared', async () => [], { merge: 'crud', key: 'id', replay: true, delta: { fromSeq } });
+			live.stream('tt/fromseq-only', async () => [], { merge: 'crud', key: 'id', delta: { fromSeq } });
+			live.stream('tt/replay-only', async () => [], { merge: 'crud', key: 'id', replay: true, delta: { version: async () => 1 } });
+			const calls = warn.mock.calls.filter((c) => String(c[0]).includes('delta.fromSeq'));
+			expect(calls).toHaveLength(1);
+			expect(calls[0][0]).toContain('"tt/both-declared" declares both replay and delta.fromSeq');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('tier 1: replay buffer satisfies the gap (fromSeq not called)', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();

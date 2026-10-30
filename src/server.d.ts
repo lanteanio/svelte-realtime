@@ -867,7 +867,7 @@ export interface StreamOptions extends LiveOptions {
 	 *
 	 *   1. Replay buffer (bounded, fast) - if `replay: true` is set and the
 	 *      platform exposes `platform.replay`. A gap the buffer cannot cover
-	 *      goes to the loader, not to this hook.
+	 *      goes to the loader, not to this hook; declaring both warns in dev.
 	 *   2. `delta.fromSeq(clientSeq)` - this hook, for a stream without one.
 	 *   3. Full rehydrate via the loader (always safe).
 	 *

@@ -485,6 +485,9 @@ const _redactPatternWarned = new Set();
 /** One-shot dedup for the "piiRedact factory has no cluster-transient coverage" warning (keyed by factory source). */
 const _redactUncompilableWarned = new Set();
 
+/** One-shot dedup for the "replay and delta.fromSeq both declared" warning (keyed by topic source). */
+const _replayFromSeqWarned = new Set();
+
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
 
@@ -1639,6 +1642,22 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		if (delta.fromSeq !== undefined && typeof delta.fromSeq !== 'function') {
 			throw new Error('[svelte-realtime] live.stream delta.fromSeq must be a function (sinceSeq) => events[]');
+		}
+		// With a replay buffer installed, a resume the buffer cannot cover
+		// reloads through the loader: `fromSeq` then never runs, which is easy
+		// to miss when both are declared. Once per topic, so HMR stays quiet.
+		if (_IS_DEV && replay && typeof delta.fromSeq === 'function') {
+			const _key = String(topic);
+			if (!_replayFromSeqWarned.has(_key)) {
+				_replayFromSeqWarned.add(_key);
+				const _label = typeof topic === 'string' ? topic : 'topic factory';
+				console.warn(
+					'[svelte-realtime] live.stream "' + _label + '"' +
+					' declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer ' +
+					'cannot cover reloads through the loader and delta.fromSeq is not called. Drop replay to resume ' +
+					'gaps through delta.fromSeq, or drop delta.fromSeq.'
+				);
+			}
 		}
 	}
 	// `key` only applies to `crud`. `set` and `latest` ignore it; `presence`
