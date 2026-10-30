@@ -294,22 +294,6 @@ let _subscribeBatch = null;
 const _ORDER_MARKS_MAX = 4;
 
 /**
- * How far behind the newest sequence a frame may arrive and still be a late
- * frame of the same sequence: publishes from different instances can reach a
- * client a little out of the order they were numbered in. Also the number of
- * recent sequences a stream remembers.
- */
-const _SEQ_REORDER = 256;
-
-/** Window over which streams spread the re-snapshot after a sequence restart. */
-const _SEQ_RESYNC_JITTER_MS = 1000;
-
-/** What to do with a sequenced frame. */
-const _FRAME_APPLY = 0;
-const _FRAME_DROP = 1;
-const _FRAME_RESYNC = 2;
-
-/**
  * Does a replay answer from the buffer continue a resume from `cursor`? Its
  * entries must run on from the cursor without a hole, and its sequence must
  * not be behind the cursor. A buffer trimmed past the cursor answers with a
@@ -796,29 +780,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/** @type {number | null} Last known sequence number for replay */
 	let _lastSeq = null;
-
-	/**
-	 * The order of sequenced frames applied since the last snapshot, kept while
-	 * the subscribe answer carries a sequence (the topic is published through a
-	 * replay buffer, so one counter numbers every frame). A late frame - one
-	 * below the newest, filling a sequence not seen yet - is dropped when it
-	 * was overtaken: a crud frame older than the newest applied for its row, or
-	 * any frame at or below the newest whole-value frame (a `set`, a
-	 * `refreshed`). Frames for different rows apply in arrival order. A frame
-	 * at or below the newest that cannot be a late one (its sequence was seen,
-	 * nothing below the newest is missing, or it is too far behind) is either a
-	 * repeat or the first of a sequence that restarted while the socket stayed
-	 * up (the buffer evicted or expired the topic); the stream cannot tell
-	 * which, so it re-snapshots. `base` is the sequence the answer carried:
-	 * frames at or below it may have missed a snapshot and apply. Slot
-	 * `seq % _SEQ_REORDER` of _seqApplied holds the last sequence seen there;
-	 * `missing` counts sequences below the newest not seen yet, and rows'
-	 * sequences are kept only while it is above zero.
-	 * @type {{ base: number, newest: number, missing: number, rows: Map<any, number>, whole: number } | null}
-	 */
-	let _seqOrder = null;
-	/** @type {Float64Array | null} The slots of _seqOrder, allocated on first use and reused. */
-	let _seqApplied = null;
 
 	/**
 	 * Per-key, per-field publisher marks for presence field updates, so a field
@@ -1361,62 +1322,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
-	 * Start the frame order over at `base`, or stop keeping it.
-	 * @param {number | null} base
-	 */
-	function _resetSeqOrder(base) {
-		if (base === null) { _seqOrder = null; return; }
-		if (_seqApplied === null) _seqApplied = new Float64Array(_SEQ_REORDER);
-		else _seqApplied.fill(0);
-		_seqOrder = { base, newest: base, missing: 0, rows: new Map(), whole: 0 };
-	}
-
-	/**
-	 * Place a sequenced frame in the order of those applied: apply it, drop it
-	 * as overtaken, or re-snapshot because it repeats a sequence or the
-	 * sequence restarted.
-	 * @param {{ event: string, data: any, seq?: number }} envelope
-	 * @returns {number} _FRAME_APPLY, _FRAME_DROP or _FRAME_RESYNC
-	 */
-	function _frameOrder(envelope) {
-		const order = _seqOrder;
-		const s = envelope.seq;
-		if (order === null || !Number.isSafeInteger(s) || /** @type {number} */ (s) < 1) return _FRAME_APPLY;
-		const seq = /** @type {number} */ (s);
-		const applied = /** @type {Float64Array} */ (_seqApplied);
-		const slot = seq % _SEQ_REORDER;
-		if (seq > order.newest) {
-			order.missing = Math.min(order.missing + seq - order.newest - 1, _SEQ_REORDER);
-			order.newest = seq;
-		} else {
-			if (applied[slot] === seq || order.newest - seq >= _SEQ_REORDER) return _FRAME_RESYNC;
-			if (seq <= order.base) {
-				applied[slot] = seq;
-				return _FRAME_APPLY;
-			}
-			if (order.missing === 0) return _FRAME_RESYNC;
-			order.missing--;
-		}
-		applied[slot] = seq;
-		if (seq <= order.whole) return _FRAME_DROP;
-		if (merge === 'set' || envelope.event === 'refreshed') order.whole = seq;
-		if (merge !== 'crud' || envelope.event === 'refreshed' || envelope.data == null || typeof envelope.data !== 'object') return _FRAME_APPLY;
-		const row = envelope.data[key];
-		if (row === undefined) return _FRAME_APPLY;
-		if (order.rows.size > 0) {
-			const held = order.rows.get(row);
-			if (held !== undefined && seq <= held) return _FRAME_DROP;
-		}
-		if (order.missing === 0) {
-			if (order.rows.size > 0) order.rows.clear();
-		} else {
-			if (order.rows.size >= _SEQ_REORDER) order.rows.clear();
-			order.rows.set(row, seq);
-		}
-		return _FRAME_APPLY;
-	}
-
-	/**
 	 * Apply a merge event to the stream's authoritative state. In the
 	 * steady-state hot path (queue empty), mutates currentValue / _index
 	 * directly. In queue mode (a `mutate(asyncOp, change)`
@@ -1437,19 +1342,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// `request.seq` for gap-fill, so it must only ADVANCE. A multi-node
 		// cluster can deliver two concurrently-published events with inverted
 		// seqs (seq is minted atomically but the fan-out order is PUBLISH
-		// arrival order); frames for different rows apply in arrival order
-		// (see _frameOrder), but letting the cursor regress would re-deliver the gap
+		// arrival order); applying them in arrival order is fine - the merge is
+		// key-based - but letting the cursor regress would re-deliver the gap
 		// on the next reconnect. A fresh session starts from null, and a full
 		// rehydrate response reassigns the cursor authoritatively elsewhere.
 		if (envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
-		const placed = _frameOrder(envelope);
-		if (placed !== _FRAME_APPLY) {
-			if (placed === _FRAME_RESYNC) {
-				_seqOrder = null;
-				_onGapMarker({ j: _SEQ_RESYNC_JITTER_MS });
-			}
-			return false;
-		}
 		if (_optimisticQueue.length > 0) {
 			// optimistic.queue invariant: when queue is non-empty the un-overlaid
 			// server state pair (_serverValue, _serverIndex) must be set. Both
@@ -2105,8 +2002,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Bound and settled before any store update runs app code.
 				_bindTopic(response.topic || null);
 				_subscribeDone(ticket);
-				// A replay that cannot fill the gap is not applied: the stream
-				// subscribes again without a cursor and takes the full snapshot.
+				// A buffer replay that cannot fill the gap is not applied: the
+				// stream subscribes again without a cursor and takes the full
+				// snapshot. A `delta.fromSeq` answer carries the application's own
+				// numbering and is applied as given.
 				if (response.replay === true && response.fromSeq !== true && !_replayContinues(response, ticket.request.seq)) {
 					if (topicUnsub) { topicUnsub(); topicUnsub = null; }
 					_jitter.clear();
@@ -2129,13 +2028,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 				// Track sequence number for replay
 				if (response.seq !== undefined) _lastSeq = response.seq;
-				// A buffer replay that resumed from a cursor continues the frame
-				// order. Any other answer starts it over at its sequence once its
-				// data is applied, since a snapshot may miss frames published just
-				// before that sequence. A `delta.fromSeq` answer carries the
-				// application's own numbering, so none is kept after it.
-				const continuesOrder = response.replay === true && response.fromSeq !== true && typeof ticket.request.seq === 'number' && _seqOrder !== null;
-				if (!continuesOrder) _seqOrder = null;
 
 				// Track version for delta sync
 				if (response.version !== undefined) _lastVersion = response.version;
@@ -2214,8 +2106,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
-				if (!continuesOrder) _resetSeqOrder(typeof response.seq === 'number' && response.fromSeq !== true ? response.seq : null);
-
 				// Usually a no-op: the attach frame installed the listener before
 				// the loader ran, and `buffer` holds what arrived since. Only a
 				// response without an attach frame installs it here, and the
@@ -2231,11 +2121,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Replay buffered messages in batch. Only explicit replay members
 				// prove inclusion: response.seq is read after the snapshot/replay
 				// read, so using it as a cutoff would discard intervening live data.
-				// A buffer replay numbers its entries like the live frames, so a
-				// frame it already carried is skipped for every merge.
+				// A `delta.fromSeq` answer is numbered by the application, so its
+				// sequences say nothing about the live frames.
 				if (buffer.length > 0) {
 					let included = null;
-					if (response.replay === true && Array.isArray(response.data) && (response.fromSeq !== true || merge === 'latest' || merge === 'set')) {
+					if ((merge === 'latest' || merge === 'set') && response.replay === true && response.fromSeq !== true && Array.isArray(response.data)) {
 						included = new Set();
 						for (const evt of response.data) {
 							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) included.add(evt.seq);

@@ -3732,6 +3732,35 @@ describe('__stream() reconnect cursor time-check', () => {
 		unsub();
 	});
 
+	it('keeps a live frame that arrived during a delta.fromSeq answer whatever the answer numbers its events', async () => {
+		// The application numbers the bridged events; a live frame with the
+		// same number is a different event and stays.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('bridged/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { attach: true, topic: 'bridged-topic' });
+		simulateTopicMessage('bridged-topic', { event: 'push', data: { n: 3 }, seq: 12 });
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 12, event: 'push', data: { n: 2 } }], topic: 'bridged-topic', merge: 'latest', max: 10, seq: 12, replay: true, fromSeq: true });
+		await flush();
+		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
+		expect(values[values.length - 1]).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
+
+		unsub();
+	});
+
 	it('keeps the replay cursor for a brief bounce within resumeMaxCursorAgeMs', async () => {
 		// An ordinary socket bounce still gap-fills from the retained seq - the
 		// default 60s bound comfortably covers it.

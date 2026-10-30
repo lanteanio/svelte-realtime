@@ -220,22 +220,21 @@ describe('relay gap markers', () => {
 		off();
 	});
 
-	it('a reordered live frame for another row applies, and a repeated one re-snapshots', async () => {
+	it('a duplicated or reordered live frame leaves the keyed view intact', async () => {
 		const { ws, off, value } = await loadedStream();
-		runtime.setRuntimeEnv({ rng: { float: () => 0 } });
-		ws.receive({ topic: 'items', event: 'created', data: { id: 2, v: 0 }, seq: 8 });
+		const created = { topic: 'items', event: 'created', data: { id: 2, v: 0 }, seq: 8 };
+		ws.receive(created);
+		ws.receive(created);
+		await tick();
+		expect(value()).toEqual([{ id: 1 }, { id: 2, v: 0 }]);
 		// Two publishers' frames crossing on a cluster relay: seq 10 lands before 9.
 		ws.receive({ topic: 'items', event: 'updated', data: { id: 1, v: 2 }, seq: 10 });
 		ws.receive({ topic: 'items', event: 'updated', data: { id: 2, v: 1 }, seq: 9 });
 		await tick();
 		expect(value()).toEqual([{ id: 1, v: 2 }, { id: 2, v: 1 }]);
-		expect(subscribes(ws, 'items/list')).toHaveLength(1);
-		// A sequence seen again is a repeat or a restarted counter: not applied,
-		// and the stream re-snapshots without its cursor.
-		ws.receive({ topic: 'items', event: 'created', data: { id: 2, v: 0 }, seq: 8 });
+		// A gap marker after them still re-snapshots in full.
+		gap(ws);
 		await tick();
-		await tick();
-		expect(value()).toEqual([{ id: 1, v: 2 }, { id: 2, v: 1 }]);
 		const again = subscribes(ws, 'items/list');
 		expect(again).toHaveLength(2);
 		expect(again[1].seq).toBeUndefined();
@@ -268,34 +267,6 @@ describe('relay gap markers', () => {
 		answer(ws, again[1], { ok: true, data: [{ key: 'a', typing: false }, { key: 'c', typing: false }], topic: 'room', merge: 'presence', seq: 4 });
 		await tick();
 		expect(value).toEqual([{ key: 'a', typing: false }, { key: 'c', typing: false }]);
-		off();
-	});
-
-	it('a re-snapshot answered from the buffer starts the frame order over', async () => {
-		// A flag stream's subscribe without a cursor is answered from its
-		// one-entry buffer, as a replay. The buffer restarted, so the order kept
-		// from the old sequence must not hold back the new one.
-		const store = client.__stream('mode/state', { merge: 'set' });
-		let value;
-		const off = store.subscribe((v) => { value = v; });
-		await tick();
-		await tick();
-		const ws = MockWebSocket.sockets[0];
-		answer(ws, subscribes(ws, 'mode/state')[0], { ok: true, data: { mode: 'a' }, topic: 'mode', merge: 'set', seq: 400 });
-		await tick();
-		ws.receive({ topic: 'mode', event: 'set', data: { mode: 'b' }, seq: 401 });
-		ws.receive({ topic: '__replay:mode', event: 'gap', data: { lost: 1 } });
-		await tick();
-		const again = subscribes(ws, 'mode/state');
-		expect(again).toHaveLength(2);
-		expect(again[1].seq).toBeUndefined();
-		answer(ws, again[1], { ok: true, data: [{ event: 'set', data: { mode: 'c' }, seq: 2 }], topic: 'mode', merge: 'set', seq: 2, replay: true });
-		await tick();
-		expect(value).toEqual({ mode: 'c' });
-		ws.receive({ topic: 'mode', event: 'set', data: { mode: 'd' }, seq: 3 });
-		await tick();
-		expect(value).toEqual({ mode: 'd' });
-		expect(subscribes(ws, 'mode/state')).toHaveLength(2);
 		off();
 	});
 
