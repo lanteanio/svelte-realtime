@@ -4187,9 +4187,14 @@ export interface OutboundWebhookConfig {
 	 */
 	onFailure?: (err: Error, event: string, data: any, attempts: number) => void | Promise<void>;
 	/**
-	 * Deliveries of this webhook in flight at once, retries included. An
-	 * integer >= 1, or `Infinity`.
-	 * @default 8
+	 * Deliveries of this webhook in flight at once. A delivery holds its slot
+	 * through its retries, their backoff and every per-attempt timeout, so the
+	 * webhook carries at most `maxConcurrent` events per delivery time: 128
+	 * events/s at the default to an endpoint that answers in 500 ms, about 2
+	 * events/s to one that times out on all 3 default attempts of 10 s. With a
+	 * leader configured only the leader delivers, so this is the ceiling of the
+	 * whole cluster. An integer >= 1, or `Infinity`.
+	 * @default 64
 	 */
 	maxConcurrent?: number;
 	/**

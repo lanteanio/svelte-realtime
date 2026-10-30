@@ -4499,7 +4499,7 @@ The freshness check is what closes capture-replay: without it any observed (body
 | `validateUrl` | - | Additional restriction `(url) => boolean \| Promise<boolean>`, ANDed with the built-in guard on every hop. Narrows only. |
 | `resolve` | `node:dns` | Custom DNS resolver `(hostname) => address \| address[] \| Promise<...>` for the pin. |
 | `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect, or an event past the limits below). |
-| `maxConcurrent` | `8` | Deliveries in flight at once for this webhook, retries included. `Infinity` lifts the limit. |
+| `maxConcurrent` | `64` | Deliveries in flight at once for this webhook. A delivery keeps its slot through its retries, backoff and timeouts, so the webhook carries at most `maxConcurrent` events per delivery time: 128 events/s to a 500 ms endpoint, about 2 events/s to one that times out on all 3 default attempts. With a leader only the leader delivers, so this is the cluster's ceiling. `Infinity` lifts the limit. |
 | `maxQueued` | `10000` | Events waiting for a delivery slot. An event past both limits is not sent: `onFailure(err, event, data, 0)` receives a `LiveError` with code `OVERLOADED` (without `onFailure`, the first rejection of an episode reaches `onError('webhook', err)`). The dead-letter queue does not keep it, so an overflow burst never evicts failed deliveries; keep it from `onFailure` if it must be replayed. |
 
 ### Dead-letter queue

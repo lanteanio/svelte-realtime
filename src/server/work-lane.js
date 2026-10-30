@@ -27,8 +27,14 @@ import { _bgClock, _bgDone, _bgCount, _bgInflight, _bgQueued, _bgQueuedAt, _bgQu
 export const EFFECT_MAX_CONCURRENT = 32;
 export const EFFECT_MAX_QUEUED = 10000;
 export const EFFECT_TIMEOUT_MS = 30000;
-/** Default limits for `live.webhooks.outbound`, per webhook. */
-export const WEBHOOK_MAX_CONCURRENT = 8;
+/**
+ * Default limits for `live.webhooks.outbound`, per webhook. A delivery holds
+ * its slot through its retries, so throughput is `maxConcurrent` divided by
+ * the delivery time: 64 slots carry 128 events/s to an endpoint that answers
+ * in 500 ms. Only the leader delivers when one is configured, so this is the
+ * ceiling of the whole cluster.
+ */
+export const WEBHOOK_MAX_CONCURRENT = 64;
 export const WEBHOOK_MAX_QUEUED = 10000;
 
 /**

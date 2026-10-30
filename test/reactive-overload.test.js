@@ -465,18 +465,18 @@ async function heldEndpoint() {
 }
 
 describe('live.webhooks.outbound bulkhead', () => {
-	it('a stalled endpoint holds at most the default 8 deliveries in flight', async () => {
+	it('a stalled endpoint holds at most the default 64 deliveries in flight', async () => {
 		const ep = await heldEndpoint();
 		env = createTestEnv();
 		env.register('hooks', {});
 		__registerWebhookOut('hooks/orders', live.webhooks.outbound(['orders'], { url: ep.url, urlMode: 'off', retry: { attempts: 1 } }));
-		for (let i = 0; i < 30; i++) env.platform.publish('orders', 'created', { i });
-		await ep.wait(() => ep.received >= 8);
+		for (let i = 0; i < 100; i++) env.platform.publish('orders', 'created', { i });
+		await ep.wait(() => ep.received >= 64);
 		await new Promise((r) => setTimeout(r, 50));
-		expect(ep.received).toBe(8);
-		await ep.drain(30);
-		expect(ep.received).toBe(30);
-		expect(ep.maxOpen).toBe(8);
+		expect(ep.received).toBe(64);
+		await ep.drain(100);
+		expect(ep.received).toBe(100);
+		expect(ep.maxOpen).toBe(64);
 	}, 20000);
 
 	it('an overflowed delivery is reported as OVERLOADED and kept out of the dead-letter store', async () => {
