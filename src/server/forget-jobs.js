@@ -80,13 +80,28 @@ export function createForgetJobStore(options = {}) {
 		return Array.isArray(list) ? list.filter((n) => typeof n === 'string') : [];
 	}
 
-	/** @param {any} j @param {number} now */
+	/**
+	 * Mark a job abandoned and drop everything user-derived. A job abandoned
+	 * through a cancellation remembers the run that held it, so that run, if
+	 * it is still alive, is told it was cancelled rather than that it lost
+	 * its lease.
+	 * @param {any} j @param {number} now
+	 */
 	function _abandon(j, now) {
+		const cancelledRunId = j.cancelRequested ? j.leaseRunId : null;
 		Object.assign(j, {
-			status: 'abandoned', updatedAt: now, retryAt: null, cancelRequested: false,
+			status: 'abandoned', updatedAt: now, retryAt: null, cancelRequested: false, cancelledRunId,
 			userId: null, userIdHash: null, cascade: null, shared: [], leaseRunId: null, leaseUntil: 0
 		});
 		_settle(j);
+	}
+
+	/**
+	 * Whether `runId` held job `j` when a cancellation abandoned it.
+	 * @param {any} j @param {string} runId
+	 */
+	function _cancelledFor(j, runId) {
+		return j !== undefined && j.status === 'abandoned' && j.cancelledRunId !== null && j.cancelledRunId === runId;
 	}
 
 	/** @param {any} j */
@@ -131,7 +146,7 @@ export function createForgetJobStore(options = {}) {
 				// cannot change what a later resume runs.
 				userId: intent.userId, cascade: JSON.parse(JSON.stringify(intent.cascade)), shared: _names(intent.shared),
 				status: 'pending', attempts: 1, createdAt: now, updatedAt: now, completedAt: null,
-				retryAt: null, rowsAffected: 0, error: null, cancelRequested: false,
+				retryAt: null, rowsAffected: 0, error: null, cancelRequested: false, cancelledRunId: null,
 				leaseRunId: intent.runId, leaseUntil: now + intent.leaseMs
 			});
 		},
@@ -139,12 +154,14 @@ export function createForgetJobStore(options = {}) {
 		/**
 		 * Extend the lease of the run that holds it and return true. Returns
 		 * `'cancelled'` to the holder of a job whose cancellation was asked for,
-		 * which stops and abandons it, and false to a run that holds no lease
-		 * (another run took the job over, or it finished), which just stops.
+		 * which stops and abandons it, and to the run that held a job when a
+		 * cancellation abandoned it; false to any other run (another run took
+		 * the job over, or it finished), which just stops.
 		 * @param {{ id: string, runId: string, leaseMs: number }} req
 		 * @returns {boolean | 'cancelled'}
 		 */
 		renew(req) {
+			if (_cancelledFor(jobs.get(req.id), req.runId)) return 'cancelled';
 			const j = _held(req.id, req.runId);
 			if (j === undefined) return false;
 			if (j.cancelRequested) return 'cancelled';
@@ -178,10 +195,14 @@ export function createForgetJobStore(options = {}) {
 		/**
 		 * Mark the job completed and drop the raw user id, its audit hash, the
 		 * cascade and the step list: a finished job keeps nothing user-derived.
-		 * Returns false, changing nothing, unless `runId` holds the lease.
+		 * Returns false, changing nothing, unless `runId` holds the lease, or
+		 * `'cancelled'` when a cancellation abandoned the job while `runId`
+		 * held it.
 		 * @param {{ id: string, runId: string, rowsAffected: number }} outcome
+		 * @returns {boolean | 'cancelled'}
 		 */
 		complete(outcome) {
+			if (_cancelledFor(jobs.get(outcome.id), outcome.runId)) return 'cancelled';
 			const j = _held(outcome.id, outcome.runId);
 			if (j === undefined) return false;
 			const now = wallEpoch();
@@ -198,18 +219,21 @@ export function createForgetJobStore(options = {}) {
 		 * Mark the job failed, drop the steps the run finished, release the
 		 * lease and make it due again `retryAfterMs` from now - or, with
 		 * `exhausted`, mark it exhausted and never due by itself again. A job
-		 * whose cancellation was asked for is abandoned instead, so it drops
-		 * the user id at once. Returns false, changing nothing, unless `runId`
-		 * holds the lease.
+		 * whose cancellation was asked for is abandoned instead and returns
+		 * `'cancelled'`, as does one a cancellation abandoned while `runId`
+		 * held it. Returns false, changing nothing, unless `runId` holds the
+		 * lease.
 		 * @param {{ id: string, runId: string, code: string, failedSurfaces: string[], sharedDone: string[], rowsAffected: number, retryAfterMs: number, exhausted: boolean }} outcome
+		 * @returns {boolean | 'cancelled'}
 		 */
 		fail(outcome) {
+			if (_cancelledFor(jobs.get(outcome.id), outcome.runId)) return 'cancelled';
 			const j = _held(outcome.id, outcome.runId);
 			if (j === undefined) return false;
 			const now = wallEpoch();
 			if (j.cancelRequested) {
 				_abandon(j, now);
-				return true;
+				return 'cancelled';
 			}
 			const done = new Set(_names(outcome.sharedDone));
 			const exhausted = outcome.exhausted === true;
@@ -229,10 +253,11 @@ export function createForgetJobStore(options = {}) {
 		 * Give up an open job. When no run holds its lease, or `runId` does,
 		 * mark it abandoned, drop everything user-derived and return true.
 		 * When another run holds the lease, expired or not (a stalled run keeps
-		 * it until another run claims the job), record a cancellation and return
-		 * `'cancelled'`: that run's next renewal answers `'cancelled'`, it stops,
-		 * and it abandons the job (or completes it, had it finished every step).
-		 * Returns false for an unknown or finished job.
+		 * it until another run claims the job), record a cancellation, drop the
+		 * user id, its audit hash and the cascade at once (the run keeps its own
+		 * copy), and return `'cancelled'`: that run's next renewal answers
+		 * `'cancelled'`, it stops, and it abandons the job (or completes it, had
+		 * it finished every step). Returns false for an unknown or finished job.
 		 * @param {{ id: string, runId?: string }} req
 		 * @returns {boolean | 'cancelled'}
 		 */
@@ -243,8 +268,7 @@ export function createForgetJobStore(options = {}) {
 			if (j.leaseRunId !== null && j.leaseRunId !== req.runId) {
 				// A run holds it: ask that run to stop. Its next renewal answers
 				// that it was cancelled, and it abandons the job when it stops.
-				j.cancelRequested = true;
-				j.updatedAt = now;
+				Object.assign(j, { cancelRequested: true, updatedAt: now, userId: null, userIdHash: null, cascade: null });
 				return 'cancelled';
 			}
 			_abandon(j, now);
@@ -277,8 +301,9 @@ export function createForgetJobStore(options = {}) {
 		/**
 		 * Jobs a resume may claim now, at most `limit`: pending or failed ones
 		 * past their retry time with no unexpired lease, earliest due first; or,
-		 * with `exhausted`, the exhausted ones, oldest first. A cancelled job
-		 * whose lease ran out (its run died) is abandoned here, not returned.
+		 * with `exhausted`, the exhausted ones, oldest first. Every cancelled
+		 * job whose lease ran out is abandoned here, however many there are,
+		 * and none is returned.
 		 * @param {{ limit: number, exhausted?: boolean }} req
 		 */
 		due(req) {

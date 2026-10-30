@@ -700,17 +700,25 @@ async function _runErasure(jobs, job, run, onForget) {
 				_keepLocal(job.id, { userId, userIdHash, tenantId, cascade }, localOpen, localBlocked, holders);
 			}
 			const sharedOpen = job.shared.filter((step) => !done.has(step));
+			/** @type {'recorded' | 'unrecorded' | 'cancelled' | null} */
+			let recorded = null;
 			if (!leaseLost && sharedOpen.length > 0) {
 				const code = sharedOpen.includes('durable') ? 'FORGET_STORE_FAILED' : 'FORGET_INCOMPLETE';
 				const exhausted = job.attempts >= _MAX_ATTEMPTS;
-				const recorded = await _recordOutcome(jobs, 'fail', {
+				recorded = await _recordOutcome(jobs, 'fail', {
 					id: job.id, runId: job.runId, code, failedSurfaces: sharedOpen,
 					sharedDone: job.shared.filter((step) => done.has(step)),
 					rowsAffected: failure.rowsAffected, retryAfterMs: _retryDelay(job.attempts), exhausted
 				});
-				if (recorded && exhausted) _reportJobExhausted(job.id, code, job.attempts);
+				if (recorded === 'recorded' && exhausted) _reportJobExhausted(job.id, code, job.attempts);
 			} else if (!leaseLost) {
-				await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, rowsAffected: failure.rowsAffected });
+				recorded = await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, rowsAffected: failure.rowsAffected });
+			}
+			if (recorded === 'cancelled') {
+				// The job was given up while this run held it: the run ends
+				// cancelled, and the in-memory work it kept is dropped with it.
+				if (_localJobs.delete(job.id)) _armLocalTimer();
+				throw _withJob(_cancelledError(), jobId);
 			}
 		}
 		if (error !== null) throw _withJob(error, jobId);
@@ -793,9 +801,11 @@ function _keepLease(jobs, id, runId, controller, lease) {
 /**
  * Record a run's outcome. A store that throws, or answers false because the
  * run no longer holds the lease, leaves the job open; that is reported, never
- * thrown, so the caller still gets the erasure's own result.
+ * thrown, so the caller still gets the erasure's own result. A store that
+ * answers `'cancelled'` abandoned the job because it was cancelled while
+ * this run held it.
  * @param {any} jobs @param {'complete' | 'fail'} method @param {any} outcome
- * @returns {Promise<boolean>} whether the store recorded it
+ * @returns {Promise<'recorded' | 'unrecorded' | 'cancelled'>}
  */
 async function _recordOutcome(jobs, method, outcome) {
 	let recorded;
@@ -804,8 +814,12 @@ async function _recordOutcome(jobs, method, outcome) {
 	} catch {
 		recorded = false;
 	}
-	if (recorded === false) _reportJobUnrecorded(outcome.id, method === 'complete' ? 'completed' : 'failed');
-	return recorded !== false;
+	if (recorded === 'cancelled') return 'cancelled';
+	if (recorded === false) {
+		_reportJobUnrecorded(outcome.id, method === 'complete' ? 'completed' : 'failed');
+		return 'unrecorded';
+	}
+	return 'recorded';
 }
 
 /**
@@ -1526,7 +1540,7 @@ export async function resumeForgetJobs(opts = {}) {
 					id: jobId, runId, code, failedSurfaces: [], sharedDone: [], rowsAffected: 0,
 					retryAfterMs: _retryDelay(job.attempts), exhausted: isExhausted
 				});
-				if (recorded && isExhausted) _reportJobExhausted(jobId, code, job.attempts);
+				if (recorded === 'recorded' && isExhausted) _reportJobExhausted(jobId, code, job.attempts);
 			}
 			out.failed++;
 			out.results.push({ id: jobId, steps: 'shared', status: 'failed', code });

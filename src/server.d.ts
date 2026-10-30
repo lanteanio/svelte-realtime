@@ -4749,9 +4749,10 @@ export interface ForgetJobStore {
 	 * When `runId` holds the lease: mark the job `completed` (sets
 	 * `completedAt` and `updatedAt`, adds `rowsAffected`, clears `error`),
 	 * release the lease, delete `userId`, `userIdHash`, `cascade` and the step
-	 * list, and resolve true. Otherwise resolve false.
+	 * list, and resolve true. Resolve `'cancelled'` when a cancellation
+	 * abandoned the job while `runId` held it, otherwise false.
 	 */
-	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean | Promise<boolean>;
+	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean | 'cancelled' | Promise<boolean | 'cancelled'>;
 	/**
 	 * When `runId` holds the lease: remove `sharedDone` from the open steps,
 	 * add `rowsAffected`, set `error: { code, failedSurfaces }` and
@@ -4759,10 +4760,10 @@ export interface ForgetJobStore {
 	 * true. The job becomes `failed`, due again `retryAfterMs` from now - or,
 	 * with `exhausted`, `exhausted`: never due again, still claimable on
 	 * request. A job whose cancellation was asked for is abandoned instead
-	 * (its user-derived fields deleted), still resolving true. Otherwise
-	 * resolve false.
+	 * and resolves `'cancelled'`, as does one a cancellation abandoned while
+	 * `runId` held it. Otherwise resolve false.
 	 */
-	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean | Promise<boolean>;
+	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean | 'cancelled' | Promise<boolean | 'cancelled'>;
 	/**
 	 * When the job is pending, failed or exhausted and no run holds its lease
 	 * (it was released, or `runId` holds it): mark it `abandoned`, release the
@@ -4794,8 +4795,8 @@ export interface MemoryForgetJobStore extends ForgetJobStore {
 	begin(intent: ForgetJobIntent): void;
 	renew(req: { id: string; runId: string; leaseMs: number }): boolean | 'cancelled';
 	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null;
-	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean;
-	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean;
+	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean | 'cancelled';
+	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean | 'cancelled';
 	abandon(req: { id: string; runId?: string }): boolean | 'cancelled';
 	get(req: { id: string }): Omit<ForgetJob, 'local'> | null;
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): Array<Omit<ForgetJob, 'local'>>;
@@ -4822,10 +4823,10 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
  * another process is asked to stop through the store and stops at its next
  * lease renewal (within 20 seconds). A cancelled run rejects with
  * FORGET_CANCELLED and the job ends abandoned - or completed, had the run
- * already finished every step, whichever process asked. A job whose run died
- * holding its lease ends abandoned, and drops its user id, at the next
- * `resumeForgetJobs` on any process. Resolves whether anything was given up
- * or cancelled. Rejects with INVALID_REQUEST on a bad
+ * already finished every step, whichever process asked. A cancelled job's
+ * user id is dropped at once; one whose run died stays `pending` until the
+ * next `resumeForgetJobs` on any process marks it abandoned. Resolves whether
+ * anything was given up or cancelled. Rejects with INVALID_REQUEST on a bad
  * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;

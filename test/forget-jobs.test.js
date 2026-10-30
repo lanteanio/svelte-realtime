@@ -275,12 +275,42 @@ describe('createForgetJobStore', () => {
 		const s = createForgetJobStore();
 		s.begin(intent());
 		expect(s.abandon({ id: 'j1' })).toBe('cancelled');
-		expect(s.fail(fail())).toBe(true);
+		expect(s.fail(fail())).toBe('cancelled');
 		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'abandoned', userIdHash: null, retryAt: null });
 		t = 1e9;
 		expect(s.claim({ id: 'j1', runId: 'r2', leaseMs: 100, exhausted: true })).toBeNull();
 		expect(s.due({ limit: 10 })).toEqual([]);
 		expect(JSON.stringify(s.list())).not.toContain('alice');
+	});
+
+	it('drops the user id of a cancelled job at once, while its run still holds the lease', () => {
+		const s = createForgetJobStore();
+		s.begin(intent());
+		expect(s.abandon({ id: 'j1' })).toBe('cancelled');
+		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'pending', userIdHash: null });
+		expect(s.claim({ id: 'j1', runId: 'r2', leaseMs: 100 })).toBeNull();
+		expect(s.renew({ id: 'j1', runId: 'r1', leaseMs: 100 })).toBe('cancelled');
+		expect(s.complete({ id: 'j1', runId: 'r1', rowsAffected: 0 })).toBe(true);
+		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'completed' });
+	});
+
+	it('tells the run that held a job a sweep abandoned that it was cancelled, not that it lost its lease', () => {
+		const s = createForgetJobStore();
+		s.begin(intent());
+		s.begin(intent({ id: 'j2', runId: 'r2' }));
+		s.abandon({ id: 'j1' });
+		s.abandon({ id: 'j2' });
+		t = 1500;
+		expect(s.due({ limit: 1 })).toEqual([]);
+		// Both were swept, independent of the limit.
+		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'abandoned' });
+		expect(s.get({ id: 'j2' })).toMatchObject({ status: 'abandoned' });
+		expect(s.renew({ id: 'j1', runId: 'r1', leaseMs: 100 })).toBe('cancelled');
+		expect(s.complete({ id: 'j1', runId: 'r1', rowsAffected: 0 })).toBe('cancelled');
+		expect(s.fail(fail())).toBe('cancelled');
+		expect(s.renew({ id: 'j1', runId: 'r9', leaseMs: 100 })).toBe(false);
+		expect(s.complete({ id: 'j1', runId: 'r9', rowsAffected: 0 })).toBe(false);
+		expect(s.get({ id: 'j1' })).toMatchObject({ status: 'abandoned' });
 	});
 
 	it('cancels a run whose lease expired but that no other run claimed, so the stalled run learns it was cancelled', () => {
@@ -1111,7 +1141,7 @@ describe('abandoning a job a run is working on', () => {
 			jobs: { ...jobs, fail(outcome) { void abandonForgetJob(outcome.id); return jobs.fail(outcome); } }
 		});
 		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
-		expect(err.code).toBe('FORGET_STORE_FAILED');
+		expect(err.code).toBe('FORGET_CANCELLED');
 		expect(jobs.get({ id: err.job })).toMatchObject({ status: 'abandoned', userIdHash: null });
 		later();
 		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
@@ -1121,7 +1151,7 @@ describe('abandoning a job a run is working on', () => {
 		const jobs = createForgetJobStore();
 		let releaseBegin;
 		let id;
-		let failAbandon = true;
+		let failAbandon = 2;
 		const purge = vi.fn(async () => 0);
 		configureForget({
 			store: { purgeUser: purge },
@@ -1129,8 +1159,9 @@ describe('abandoning a job a run is working on', () => {
 				...jobs,
 				begin(intent) { id = intent.id; return new Promise((r) => { releaseBegin = () => r(jobs.begin(intent)); }); },
 				abandon(req) {
-					// The run's own abandon is lost once.
-					if (req.runId !== undefined && failAbandon) { failAbandon = false; throw new Error('connection reset'); }
+					// The run's own abandon and its first retry are lost; the
+					// resume that finds the job due abandons it.
+					if (req.runId !== undefined && failAbandon > 0) { failAbandon--; throw new Error('connection reset'); }
 					return jobs.abandon(req);
 				}
 			}
@@ -1140,10 +1171,83 @@ describe('abandoning a job a run is working on', () => {
 		expect(await abandonForgetJob(id)).toBe(true);
 		releaseBegin();
 		expect((await run).code).toBe('FORGET_CANCELLED');
+		expect(jobs.get({ id })).toMatchObject({ status: 'pending' });
 		later();
-		await resumeForgetJobs();
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
 		expect(purge).not.toHaveBeenCalled();
 		expect(jobs.get({ id })).toMatchObject({ status: 'abandoned', userIdHash: null });
+	});
+
+	it('drops the user id when a job whose outcome was never recorded is abandoned, without a resume', async () => {
+		const jobs = createForgetJobStore();
+		configureForget({ store: durable(), jobs: { ...jobs, complete() { throw new Error('connection reset'); } } });
+		const res = await live.forget('alice', { tenantId: null });
+		expect(events.some((e) => e.event === 'forget.job-unrecorded')).toBe(true);
+		expect((await listForgetJobs())[0]).toMatchObject({ id: res.job, status: 'pending', userIdHash: sha('alice') });
+		expect(await abandonForgetJob(res.job)).toBe(true);
+		expect((await listForgetJobs())[0]).toMatchObject({ id: res.job, userIdHash: null });
+	});
+
+	it('cancels a stalled run whose job a resume abandoned after another process asked for it', async () => {
+		let wall = 0;
+		setRuntimeEnv({
+			clock: { wallEpoch: () => Date.now() + wall },
+			timers: { setInterval: (cb, _ms, ...a) => setInterval(cb, 5, ...a) }
+		});
+		const jobs = createForgetJobStore();
+		let stalled = false;
+		/** @type {(() => void) | null} */
+		let unstall = null;
+		const stalling = {
+			...jobs,
+			renew(req) {
+				if (!stalled) return jobs.renew(req);
+				return new Promise((resolve) => { unstall = () => resolve(jobs.renew(req)); });
+			}
+		};
+		const store = { calls: 0, purgeUser() { store.calls++; return new Promise(() => {}); } };
+		configureForget({ store, jobs: stalling });
+		const run = live.forget('alice', { tenantId: null }).catch((e) => e);
+		await vi.waitFor(() => expect(store.calls).toBe(1));
+		stalled = true;
+		await vi.waitFor(() => expect(unstall).not.toBeNull());
+		wall = 5 * 60_000;
+		const [job] = await listForgetJobs();
+
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		(await import('../src/shared/runtime.js')).setRuntimeEnv({ clock: { wallEpoch: () => Date.now() + wall } });
+		other.configureForget({ store, jobs });
+		expect(await other.abandonForgetJob(job.id)).toBe(true);
+		expect(await other.resumeForgetJobs()).toMatchObject({ total: 0 });
+		expect(jobs.get({ id: job.id })).toMatchObject({ status: 'abandoned' });
+		/** @type {() => void} */ (unstall)();
+		expect((await run).code).toBe('FORGET_CANCELLED');
+		other.configureForget(null);
+	});
+
+	it('ends a run cancelled when a resume abandoned its job before it could record that it finished', async () => {
+		let wall = 0;
+		setRuntimeEnv({ clock: { wallEpoch: () => Date.now() + wall } });
+		const jobs = createForgetJobStore();
+		configureForget({
+			store: durable(),
+			jobs: {
+				...jobs,
+				complete(outcome) {
+					// The run stalled past its lease; meanwhile the job is
+					// abandoned and a resume sweeps it.
+					wall = 5 * 60_000;
+					jobs.abandon({ id: outcome.id });
+					jobs.due({ limit: 10 });
+					return jobs.complete(outcome);
+				}
+			}
+		});
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(err.code).toBe('FORGET_CANCELLED');
+		expect(jobs.get({ id: err.job })).toMatchObject({ status: 'abandoned' });
+		expect(events.some((e) => e.event === 'forget.job-unrecorded')).toBe(false);
 	});
 });
 
