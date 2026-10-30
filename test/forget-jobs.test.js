@@ -220,11 +220,11 @@ describe('createForgetJobStore', () => {
 		expect(s.due({ at: 100, limit: 1 }).map((j) => j.id)).toEqual(['b']);
 	});
 
-	it('lists oldest first and bounds retained completed jobs, never pending ones', () => {
-		const s = createForgetJobStore({ max: 2 });
+	it('lists oldest first and drops the oldest completion to stay within max', () => {
+		const s = createForgetJobStore({ max: 3 });
 		for (let i = 0; i < 4; i++) {
-			s.begin(intent({ id: 'c' + i, runId: 'r', at: i }));
-			s.complete({ id: 'c' + i, runId: 'r', at: i, rowsAffected: 0, surfaces: {} });
+			s.begin(intent({ id: 'c' + i, runId: 'r', at: i + 1 }));
+			s.complete({ id: 'c' + i, runId: 'r', at: i + 1, rowsAffected: 0, surfaces: {} });
 		}
 		s.begin(intent({ id: 'p', runId: 'r', at: 0 }));
 		expect(s.list().map((j) => j.id)).toEqual(['p', 'c2', 'c3']);
@@ -360,5 +360,29 @@ describe('resuming a partly finished erasure', () => {
 		later();
 		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
 		expect(purgeUser).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('in-memory job store capacity', () => {
+	it('makes room by dropping the oldest completed job and refuses a new job when only unfinished ones remain', async () => {
+		const jobs = createForgetJobStore({ max: 2 });
+		const purgeUser = vi.fn(async (_t, userId) => { if (userId !== 'carol') throw new Error('offline'); return 0; });
+		configureForget({ store: { purgeUser }, jobs });
+		const done = await live.forget('carol', { tenantId: null });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		// Full: the completed job makes room for the next one.
+		await expect(live.forget('bob', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		expect((await listForgetJobs()).map((j) => j.id)).not.toContain(done.job);
+		// Full of unfinished jobs: the erasure is refused before anything is erased.
+		purgeUser.mockClear();
+		await expect(live.forget('dave', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_JOB_FAILED' });
+		expect(purgeUser).not.toHaveBeenCalled();
+		expect(await listForgetJobs({ status: 'failed' })).toHaveLength(2);
+	});
+
+	it('holds 10000 jobs by default', () => {
+		const s = createForgetJobStore();
+		for (let i = 0; i < 10000; i++) s.begin({ id: 'j' + i, runId: 'r', userIdHash: 'h', tenantId: null, userId: 'u', cascade: true, at: i, leaseUntil: i + 1 });
+		expect(() => s.begin({ id: 'over', runId: 'r', userIdHash: 'h', tenantId: null, userId: 'u', cascade: true, at: 0, leaseUntil: 1 })).toThrow(/full/);
 	});
 });

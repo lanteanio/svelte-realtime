@@ -261,10 +261,10 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-forget-job-failed"></a>
 ### `FORGET_JOB_FAILED`
 
-- Cause: The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it.
+- Cause: The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. The in-memory store also refuses a new job while it holds its `max` jobs and none of them is completed.
 - Consequence: From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.
 - Automatic recovery: None. The erasure does not start without its job record.
-- Next action: Fix the job store (connectivity, permissions, schema), then call `live.forget` or `resumeForgetJobs()` again.
+- Next action: Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish its unfinished jobs with `resumeForgetJobs()`, then call `live.forget` again.
 - Message patterns: <code>listForgetJobs: the erasure job store could not be read</code>; <code>live.forget: the erasure job could not be recorded; nothing was erased</code>; <code>resumeForgetJobs: the erasure job store could not be read</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 

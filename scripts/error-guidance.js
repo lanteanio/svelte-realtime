@@ -52,10 +52,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.'
 	}),
 	FORGET_JOB_FAILED: Object.freeze({
-		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it.',
+		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. The in-memory store also refuses a new job while it holds its `max` jobs and none of them is completed.',
 		consequence: 'From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.',
 		automaticRecovery: 'None. The erasure does not start without its job record.',
-		nextAction: 'Fix the job store (connectivity, permissions, schema), then call `live.forget` or `resumeForgetJobs()` again.'
+		nextAction: 'Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish its unfinished jobs with `resumeForgetJobs()`, then call `live.forget` again.'
 	}),
 	FORGET_STORE_FAILED: Object.freeze({
 		cause: 'The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`.',

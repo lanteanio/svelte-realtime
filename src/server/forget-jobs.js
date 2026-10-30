@@ -23,13 +23,14 @@ const _STATUSES = ['pending', 'failed', 'completed'];
  */
 
 /**
- * Create an in-memory erasure job store. Unfinished jobs are always kept;
- * finished ones are kept for audit up to `max` (default 1000), oldest
- * completion dropped first.
+ * Create an in-memory erasure job store holding at most `max` jobs (default
+ * 10000). A new job makes room by dropping the oldest completed job; an
+ * unfinished job is never dropped, so when every held job is unfinished
+ * `begin` throws and the erasure is refused before it touches anything.
  * @param {{ max?: number }} [options]
  */
 export function createForgetJobStore(options = {}) {
-	const max = Number.isInteger(options?.max) && /** @type {number} */ (options.max) > 0 ? /** @type {number} */ (options.max) : 1000;
+	const max = Number.isInteger(options?.max) && /** @type {number} */ (options.max) > 0 ? /** @type {number} */ (options.max) : 10000;
 	/** @type {Map<string, any>} */
 	const jobs = new Map();
 	/** @type {Set<string>} completed job ids, oldest completion first */
@@ -67,6 +68,12 @@ export function createForgetJobStore(options = {}) {
 		 */
 		begin(intent) {
 			if (jobs.has(intent.id)) throw new Error('forget job store: the job already exists');
+			if (jobs.size >= max) {
+				const oldest = completed.values().next().value;
+				if (oldest === undefined) throw new Error('forget job store: full of unfinished jobs (max ' + max + ')');
+				completed.delete(oldest);
+				jobs.delete(oldest);
+			}
 			jobs.set(intent.id, {
 				id: intent.id, seq: ++seq, userIdHash: intent.userIdHash, tenantId: intent.tenantId,
 				// A copy, as a durable store would serialize it, so the caller
@@ -108,11 +115,6 @@ export function createForgetJobStore(options = {}) {
 				leaseRunId: null, dueAt: null
 			});
 			completed.add(j.id);
-			for (const id of completed) {
-				if (completed.size <= max) break;
-				completed.delete(id);
-				jobs.delete(id);
-			}
 			return true;
 		},
 

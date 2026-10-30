@@ -6,6 +6,8 @@ Every call is its own job under a random UUID. Workers that erase the same user 
 
 ## Listing and resuming
 
+The in-memory store from `createForgetJobStore({ max })` holds at most `max` jobs (default 10000). A new job makes room by dropping the oldest completed job. An unfinished job is never dropped: while every held job is unfinished, `live.forget` rejects with `FORGET_JOB_FAILED` before erasing anything, so no erasure goes unrecorded. Resume or fix the unfinished jobs to make room.
+
 `listForgetJobs({ status, limit })` lists jobs with their status (`pending`, `failed`, `completed`), attempt count, timestamps, `retryAt` and last failure code and surfaces. A job holds the raw user id only until it completes.
 
 `resumeForgetJobs({ id, limit, onForget })` runs unfinished jobs again with their stored tenant and cascade. Run it at startup and on a schedule. Without `id` it takes the jobs that are due, longest due first:

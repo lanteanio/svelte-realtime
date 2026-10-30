@@ -4746,10 +4746,12 @@ export interface MemoryForgetJobStore extends ForgetJobStore {
 }
 
 /**
- * Create the in-memory erasure job store. Unfinished jobs are always kept;
- * completed ones are kept for audit up to `max` (default 1000), the oldest
- * completion dropped first. It does not survive a restart, so deployments
- * that must resume after a crash wire a durable store instead.
+ * Create the in-memory erasure job store, holding at most `max` jobs (default
+ * 10000). A new job makes room by dropping the oldest completed job; an
+ * unfinished job is never dropped, so when every held job is unfinished
+ * `begin` throws and `live.forget` rejects with FORGET_JOB_FAILED before
+ * erasing anything. It does not survive a restart, so deployments that must
+ * resume after a crash wire a durable store instead.
  */
 export function createForgetJobStore(options?: { max?: number }): MemoryForgetJobStore;
 
