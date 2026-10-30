@@ -44,7 +44,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** Nothing beyond this release for the built-in store; a durable store without `keyedAdd` keeps one unkeyed write per capture.
   - **Compatibility:** Failed deliveries of one webhook that share an idempotency key now collapse into one record in the built-in store.
   - **Detail:** [Added engineering detail](#added).
-- **Added: resumable erasure jobs.** With `configureForget({ jobs })` every `live.forget` is recorded as a job before any data is touched, so an erasure that fails or whose process dies part-way is listed by `listForgetJobs()` and finished by `resumeForgetJobs()` instead of being lost. Each call is its own job under a random reference, a run holds the job's lease so replicas never run one job together, failing jobs back off, and a resume skips the surfaces an earlier run finished.
+- **Added: resumable erasure jobs.** With `configureForget({ jobs })` every `live.forget` is recorded as its own job under a random reference before any data is touched, so an erasure that fails or dies part-way is listed by `listForgetJobs()` and finished by `resumeForgetJobs()`, one run at a time per job, with failing jobs backing off.
   - **Affects:** Applications that erase user data with `live.forget`, especially with a durable erasure store.
   - **Action:** Configure a job store and call `resumeForgetJobs()` at startup and on a schedule.
   - **Requires:** Nothing beyond this release for the in-memory store; a store that survives restarts implements `ForgetJobStore`.
