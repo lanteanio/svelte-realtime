@@ -10,6 +10,7 @@ import {
 	_resetForget, setOperationalEventSink
 } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
+import { _crdtDecls } from '../src/server/crdt.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 const KEY = 'k'.repeat(32);
@@ -193,17 +194,19 @@ describe('createForgetJobStore', () => {
 		expect(s.due({ at: 99, limit: 10 })).toEqual([]);
 		expect(s.due({ at: 100, limit: 10 }).map((j) => j.id)).toEqual(['j1']);
 		// Its lease expired: another run takes over and the late run is fenced.
-		expect(s.claim(claim())).toEqual({ userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] }, attempts: 2 });
+		expect(s.claim(claim())).toEqual({ userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] }, attempts: 2, doneSurfaces: [] });
 		expect(s.complete({ id: 'j1', runId: 'r1', at: 150, rowsAffected: 1, surfaces: {} })).toBe(false);
 		expect(s.fail({ id: 'j1', runId: 'r1', at: 150, code: 'X', failedSurfaces: [], retryAt: 151 })).toBe(false);
 		expect(s.list()[0]).toMatchObject({ status: 'pending', attempts: 2, createdAt: 10, updatedAt: 100 });
-		expect(s.fail({ id: 'j1', runId: 'r2', at: 160, code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'], retryAt: 300 })).toBe(true);
+		expect(s.fail({ id: 'j1', runId: 'r2', at: 160, code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'], doneSurfaces: ['push', 'crdtDocs'], retryAt: 300 })).toBe(true);
 		expect(s.list({ status: 'failed' })[0]).toMatchObject({ retryAt: 300, error: { code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'] } });
 		expect(s.due({ at: 299, limit: 10 })).toEqual([]);
 		// A failed job is claimable by id before its retry time.
-		expect(s.claim(claim({ runId: 'r3', at: 170, leaseUntil: 400 }))).toMatchObject({ attempts: 3 });
+		expect(s.claim(claim({ runId: 'r3', at: 170, leaseUntil: 400 }))).toMatchObject({ attempts: 3, doneSurfaces: ['push', 'crdtDocs'] });
+		expect(s.fail({ id: 'j1', runId: 'r3', at: 175, code: 'X', failedSurfaces: ['presence'], doneSurfaces: ['push', 'durable'], retryAt: 176 })).toBe(true);
+		expect(s.claim(claim({ runId: 'r3', at: 177, leaseUntil: 400 }))).toMatchObject({ attempts: 4, doneSurfaces: ['push', 'crdtDocs', 'durable'] });
 		expect(s.complete({ id: 'j1', runId: 'r3', at: 180, rowsAffected: 2, surfaces: {} })).toBe(true);
-		expect(s.list()[0]).toMatchObject({ status: 'completed', attempts: 3, completedAt: 180, retryAt: null, rowsAffected: 2, error: null });
+		expect(s.list()[0]).toMatchObject({ status: 'completed', attempts: 4, completedAt: 180, retryAt: null, rowsAffected: 2, error: null });
 		expect(s.claim(claim({ runId: 'r4', at: 1000, leaseUntil: 2000 }))).toBeNull();
 		expect(JSON.stringify(s.list())).not.toContain('alice');
 	});
@@ -321,5 +324,41 @@ describe('resuming erasure jobs across replicas', () => {
 		const after = (await listForgetJobs({ status: 'failed' }))[0];
 		expect(after).toMatchObject({ id: alice.id, attempts: 2 });
 		expect(after.retryAt - after.updatedAt).toBeGreaterThan(alice.retryAt - alice.updatedAt);
+	});
+});
+
+describe('resuming a partly finished erasure', () => {
+	afterEach(() => { _crdtDecls.clear(); configureWebhooks({ deadLetter: false }); });
+
+	it('skips the surfaces an earlier run already finished', async () => {
+		const drop = vi.fn(() => true);
+		_crdtDecls.set('notes', { authority: { drop } });
+		const purgeUser = vi.fn(() => 0);
+		configureWebhooks({ deadLetter: { add() { return null; }, purgeUser } });
+		let durableFailures = 1;
+		const store = { async purgeUser() { if (durableFailures-- > 0) throw new Error('offline'); return 1; } };
+		configureForget({ store, jobs: true });
+		const err = await live.forget('alice', { tenantId: null, cascade: { crdt: ['notes:1'] } }).catch((e) => e);
+		expect(err.code).toBe('FORGET_STORE_FAILED');
+		expect(drop).toHaveBeenCalledTimes(1);
+
+		// The document is in use again before the resume; dropping it a second
+		// time would destroy other users' new edits.
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
+		expect(drop).toHaveBeenCalledTimes(1);
+		expect(purgeUser).toHaveBeenCalledTimes(1);
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'completed', attempts: 2, rowsAffected: 1 });
+	});
+
+	it('runs a surface again when it failed in the earlier run', async () => {
+		let dlFailures = 1;
+		const purgeUser = vi.fn(() => { if (dlFailures-- > 0) throw new Error('offline'); return 2; });
+		configureWebhooks({ deadLetter: { add() { return null; }, purgeUser } });
+		configureForget({ jobs: true });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
+		expect(purgeUser).toHaveBeenCalledTimes(2);
 	});
 });

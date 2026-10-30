@@ -82,6 +82,8 @@ const _JOB_METHODS = ['begin', 'claim', 'complete', 'fail', 'list', 'due'];
 const _LEASE_MS = 5 * 60_000;
 const _RETRY_BASE_MS = 1000;
 const _RETRY_MAX_MS = 60 * 60_000;
+/** @type {ReadonlySet<string>} */
+const _NO_SKIP = new Set();
 const _JOB_STATUSES = ['pending', 'failed', 'completed'];
 const _MAX_JOB_LIMIT = 1000;
 
@@ -347,7 +349,7 @@ const _liveForget = async function forget(userId, opts) {
 	// Every call is its own job under a random reference: two workers erasing
 	// the same user each record their own outcome, and the reference reveals
 	// nothing about the user.
-	const job = jobs === null ? null : { id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false };
+	const job = jobs === null ? null : { id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false, skip: _NO_SKIP };
 	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade }, onForget);
 };
 
@@ -359,7 +361,7 @@ const _liveForget = async function forget(userId, opts) {
  * leaves the job unfinished, so it becomes due again when the lease ends and a
  * resume runs the idempotent cascade again.
  * @param {any} jobs
- * @param {{ id: string, runId: string, attempts: number, claimed: boolean } | null} job
+ * @param {{ id: string, runId: string, attempts: number, claimed: boolean, skip: ReadonlySet<string> } | null} job
  * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
  * @param {Function | undefined} onForget
  * @returns {Promise<ForgetResult>}
@@ -380,18 +382,19 @@ async function _runErasure(jobs, job, run, onForget) {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
 		}
-		/** @type {{ failedSurfaces: string[] }} */
-		const failure = { failedSurfaces: [] };
+		/** @type {{ failedSurfaces: string[], doneSurfaces: string[] }} */
+		const failure = { failedSurfaces: [], doneSurfaces: [] };
 		/** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */
 		let erased;
 		try {
-			erased = await _erase(userId, tenantId, cascade, jobId, failure);
+			erased = await _erase(userId, tenantId, cascade, jobId, failure, job === null ? _NO_SKIP : job.skip);
 		} catch (err) {
 			if (job !== null) {
 				const at = wallEpoch();
 				await _recordOutcome(jobs, 'fail', {
 					id: job.id, runId: job.runId, at, code: /** @type {any} */ (err)?.code || 'INTERNAL_ERROR',
-					failedSurfaces: failure.failedSurfaces, retryAt: at + _retryDelay(job.attempts)
+					failedSurfaces: failure.failedSurfaces, doneSurfaces: failure.doneSurfaces,
+					retryAt: at + _retryDelay(job.attempts)
 				});
 			}
 			throw _withJob(err, jobId);
@@ -449,27 +452,31 @@ function _retryDelay(attempts) {
 
 /**
  * The cascade itself: every in-memory surface, named documents, then the
- * durable store. Resolves the counts or throws the erasure's LiveError after
- * writing the failed surface names to `failure`.
+ * durable store, leaving out the surfaces in `skip`. Resolves the counts or
+ * throws the erasure's LiveError; either way `failure` holds the names of the
+ * surfaces that failed and of those that finished.
  * @param {string} userId @param {string | null} tenantId @param {any} cascade
  * @param {string | null} jobId
- * @param {{ failedSurfaces: string[] }} failure
+ * @param {{ failedSurfaces: string[], doneSurfaces: string[] }} failure
+ * @param {ReadonlySet<string>} skip
  * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
  */
-async function _erase(userId, tenantId, cascade, jobId, failure) {
+async function _erase(userId, tenantId, cascade, jobId, failure, skip) {
 	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
 	/** @type {Record<string, number>} */
 	const surfaces = {};
-	const failedSurfaces = failure.failedSurfaces;
+	const { failedSurfaces, doneSurfaces } = failure;
 	let rowsAffected = 0;
 
 	// In-memory descriptors run sequentially: the surface is small, the work
 	// is local, and a deterministic order keeps the cascade auditable.
 	for (const d of _descriptors) {
+		if (skip.has(d.name)) continue;
 		let count = 0;
 		try {
 			count = await d.run(tenantId, userId, cascade);
 			if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
+			doneSurfaces.push(d.name);
 		} catch {
 			// Attempt every independent surface before reporting incomplete work.
 			failedSurfaces.push(d.name);
@@ -483,10 +490,11 @@ async function _erase(userId, tenantId, cascade, jobId, failure) {
 	// Whole-document CRDT drops (cascade.crdt): erase the named documents'
 	// loaded replicas. Deleting the durably persisted copies is the app's
 	// half, in its own persist store.
-	if (crdtDocs !== null) {
+	if (crdtDocs !== null && !skip.has('crdtDocs')) {
 		let dropped = 0;
 		try {
 			dropped = _purgeCrdtDocs(crdtDocs);
+			doneSurfaces.push('crdtDocs');
 		} catch {
 			failedSurfaces.push('crdtDocs');
 		}
@@ -498,7 +506,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure) {
 	// resolving before the durable delete confirms would be a compliance lie
 	// (GDPR must wait for durable confirmation). The return shapes are handled
 	// below (count, breakdown, or the owner-succession envelope).
-	if (_forgetStore) {
+	if (_forgetStore && !skip.has('durable')) {
 		let successions = null;
 		try {
 			const durable = await _forgetStore.purgeUser(tenantId, userId, cascade);
@@ -559,6 +567,7 @@ async function _erase(userId, tenantId, cascade, jobId, failure) {
 		// wire announcement is best-effort by construction and an exotic throw
 		// out of it must never misreport as FORGET_STORE_FAILED (which would
 		// tell the caller to retry an erasure that succeeded).
+		doneSurfaces.push('durable');
 		if (successions !== null) {
 			surfaces.ownerSuccessions = _publishOwnerSuccessions(tenantId, successions);
 		}
@@ -704,7 +713,11 @@ export async function resumeForgetJobs(opts = {}) {
 			out.results.push({ id: jobId, status: 'skipped' });
 			continue;
 		}
-		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true };
+		// Surfaces an earlier run of the job finished are not run again: a
+		// document dropped then may be in use again, and an aggregate reset then
+		// may hold other users' data by now.
+		const done = Array.isArray(claim.doneSurfaces) ? claim.doneSurfaces.filter((n) => typeof n === 'string') : [];
+		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true, skip: new Set(done) };
 		try {
 			const { userId, tenantId, cascade } = claim;
 			if (typeof userId !== 'string' || userId.length === 0 || _validIdReason(userId, 'userId') !== null) {
@@ -721,7 +734,7 @@ export async function resumeForgetJobs(opts = {}) {
 			// with a failure, so it stays listed and backs off like any other.
 			if (code === 'INVALID_REQUEST') {
 				const failedAt = wallEpoch();
-				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], retryAt: failedAt + _retryDelay(job.attempts) });
+				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], doneSurfaces: [], retryAt: failedAt + _retryDelay(job.attempts) });
 			}
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code });

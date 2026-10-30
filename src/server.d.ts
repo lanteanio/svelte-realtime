@@ -4681,6 +4681,8 @@ export interface ForgetJobClaim {
 	cascade: boolean | { crdt?: string[] };
 	/** `attempts` after the claim, counting the new run. */
 	attempts: number;
+	/** Surfaces earlier runs finished; the new run does not run them again. */
+	doneSurfaces: string[];
 }
 
 /**
@@ -4715,11 +4717,12 @@ export interface ForgetJobStore {
 	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): boolean | Promise<boolean>;
 	/**
 	 * When `runId` holds the lease: mark the job `failed` with
-	 * `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, release the
-	 * lease, keep `userId` and `cascade`, and resolve true. Otherwise resolve
-	 * false.
+	 * `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, add
+	 * `doneSurfaces` to the job's finished surfaces (kept until completion and
+	 * returned by `claim`), release the lease, keep `userId` and `cascade`, and
+	 * resolve true. Otherwise resolve false.
 	 */
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; retryAt: number }): boolean | Promise<boolean>;
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; doneSurfaces: string[]; retryAt: number }): boolean | Promise<boolean>;
 	/** Jobs oldest `createdAt` first, optionally one status, at most `limit` (default 100). */
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[] | Promise<ForgetJob[]>;
 	/**
@@ -4736,7 +4739,7 @@ export interface MemoryForgetJobStore extends ForgetJobStore {
 	begin(intent: ForgetJobIntent): void;
 	claim(req: { id: string; runId: string; at: number; leaseUntil: number }): ForgetJobClaim | null;
 	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): boolean;
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; retryAt: number }): boolean;
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; doneSurfaces: string[]; retryAt: number }): boolean;
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[];
 	due(req: { at: number; limit: number }): ForgetJob[];
 	clear(): void;
@@ -4765,7 +4768,8 @@ export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: numb
  * due again after a delay that doubles per attempt from one second up to an
  * hour. Each run claims the job's lease first; a job another run holds, in
  * any process, or one with nothing left to do, reports `skipped`. Each run is
- * the full idempotent cascade with the job's stored tenant and cascade;
+ * the idempotent cascade with the job's stored tenant and cascade, leaving out
+ * the surfaces an earlier run of the job finished;
  * `onForget` fires for each completed job. Resolves zero counts without a job
  * store.
  */

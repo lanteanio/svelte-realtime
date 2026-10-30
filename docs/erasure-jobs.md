@@ -13,6 +13,8 @@ Every call is its own job under a random UUID. Workers that erase the same user 
 - a failed job once its `retryAt` has passed. The delay doubles with each attempt, from one second up to an hour, so a job that keeps failing yields to jobs that can finish instead of taking every resume;
 - a pending job whose run never recorded an outcome (its process died, or the store was unreachable) once that run's lease has ended.
 
+A resumed run leaves out the surfaces an earlier run of the job already finished and runs only the rest. That matters for the surfaces that are not repeatable without harm: a named CRDT document dropped by the first run may be in use again, and an aggregate reset by it may hold other users' data by now.
+
 With `id` it runs that job whatever its retry time. Each run first claims the job's lease, so a job another run holds - in this process or any other - reports `skipped`, and two replicas resuming at once never run the same job together.
 
 ## Store contract
@@ -22,9 +24,9 @@ A store that must survive restarts implements these methods, each atomic per job
 | Method | Contract |
 | --- | --- |
 | `begin({ id, runId, userIdHash, tenantId, userId, cascade, at, leaseUntil })` | Create a `pending` job with `attempts: 1` whose lease `runId` holds until `leaseUntil`. Durable before it resolves. Reject when `id` exists. |
-| `claim({ id, runId, at, leaseUntil })` | If the job is unfinished and no other run's lease is still running at `at`, give the lease to `runId` until `leaseUntil`, set `pending`, increment `attempts`, set `updatedAt`, and resolve `{ userId, userIdHash, tenantId, cascade, attempts }`. Otherwise resolve `null` and change nothing. A failed job is claimable before its `retryAt`. |
+| `claim({ id, runId, at, leaseUntil })` | If the job is unfinished and no other run's lease is still running at `at`, give the lease to `runId` until `leaseUntil`, set `pending`, increment `attempts`, set `updatedAt`, and resolve `{ userId, userIdHash, tenantId, cascade, attempts, doneSurfaces }`. Otherwise resolve `null` and change nothing. A failed job is claimable before its `retryAt`. |
 | `complete({ id, runId, at, rowsAffected, surfaces })` | Only when `runId` holds the lease: set `completed`, `completedAt`, `updatedAt` and `rowsAffected`, clear `error`, release the lease, delete `userId` and `cascade`, resolve `true`. Otherwise resolve `false`. |
-| `fail({ id, runId, at, code, failedSurfaces, retryAt })` | Only when `runId` holds the lease: set `failed`, `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, release the lease, keep `userId` and `cascade`, resolve `true`. Otherwise resolve `false`. |
+| `fail({ id, runId, at, code, failedSurfaces, doneSurfaces, retryAt })` | Only when `runId` holds the lease: set `failed`, `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, add `doneSurfaces` to the set `claim` returns, release the lease, keep `userId` and `cascade`, resolve `true`. Otherwise resolve `false`. |
 | `list({ status, limit })` | Jobs oldest `createdAt` first, optionally one status, at most `limit`, without `userId` or `cascade`. |
 | `due({ at, limit })` | Unfinished jobs claimable at `at` - failed with `retryAt <= at`, pending with the lease ended - ordered by the time each became due, then `createdAt`; at most `limit`. |
 

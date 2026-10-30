@@ -73,7 +73,7 @@ export function createForgetJobStore(options = {}) {
 				// cannot change what a later resume runs.
 				userId: intent.userId, cascade: JSON.parse(JSON.stringify(intent.cascade)),
 				status: 'pending', attempts: 1, createdAt: intent.at, updatedAt: intent.at,
-				completedAt: null, rowsAffected: null, error: null,
+				completedAt: null, rowsAffected: null, error: null, done: [],
 				leaseRunId: intent.runId, dueAt: intent.leaseUntil
 			});
 		},
@@ -88,7 +88,10 @@ export function createForgetJobStore(options = {}) {
 			if (j === undefined || j.status === 'completed') return null;
 			if (j.leaseRunId !== null && j.dueAt > req.at) return null;
 			Object.assign(j, { status: 'pending', attempts: j.attempts + 1, updatedAt: req.at, leaseRunId: req.runId, dueAt: req.leaseUntil });
-			return { userId: j.userId, userIdHash: j.userIdHash, tenantId: j.tenantId, cascade: JSON.parse(JSON.stringify(j.cascade)), attempts: j.attempts };
+			return {
+				userId: j.userId, userIdHash: j.userIdHash, tenantId: j.tenantId,
+				cascade: JSON.parse(JSON.stringify(j.cascade)), attempts: j.attempts, doneSurfaces: [...j.done]
+			};
 		},
 
 		/**
@@ -101,7 +104,7 @@ export function createForgetJobStore(options = {}) {
 			if (j === undefined) return false;
 			Object.assign(j, {
 				status: 'completed', updatedAt: outcome.at, completedAt: outcome.at,
-				rowsAffected: outcome.rowsAffected, error: null, userId: null, cascade: null,
+				rowsAffected: outcome.rowsAffected, error: null, userId: null, cascade: null, done: [],
 				leaseRunId: null, dueAt: null
 			});
 			completed.add(j.id);
@@ -114,16 +117,18 @@ export function createForgetJobStore(options = {}) {
 		},
 
 		/**
-		 * Mark the job failed, release the lease and make it due again at
-		 * `retryAt`, keeping what a resume needs. Returns false, changing
-		 * nothing, unless `runId` holds the lease.
-		 * @param {{ id: string, runId: string, at: number, code: string, failedSurfaces: string[], retryAt: number }} outcome
+		 * Mark the job failed, add the surfaces this run finished to those a
+		 * resume skips, release the lease and make it due again at `retryAt`,
+		 * keeping what a resume needs. Returns false, changing nothing, unless
+		 * `runId` holds the lease.
+		 * @param {{ id: string, runId: string, at: number, code: string, failedSurfaces: string[], doneSurfaces: string[], retryAt: number }} outcome
 		 */
 		fail(outcome) {
 			const j = _held(outcome.id, outcome.runId);
 			if (j === undefined) return false;
 			Object.assign(j, {
 				status: 'failed', updatedAt: outcome.at, leaseRunId: null, dueAt: outcome.retryAt,
+				done: [...new Set([...j.done, ...(Array.isArray(outcome.doneSurfaces) ? outcome.doneSurfaces : [])])],
 				error: { code: outcome.code, failedSurfaces: [...outcome.failedSurfaces] }
 			});
 			return true;
