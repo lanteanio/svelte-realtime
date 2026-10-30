@@ -3925,9 +3925,12 @@ export interface DocConfig {
 	 * the schedule. `load` returns the stored full-state bytes for a cold
 	 * topic (or null for a brand-new document); `store` persists the
 	 * compacted full-state bytes. Omit for a purely in-memory document.
+	 * `info.signal` aborts when the document is erased or torn down while
+	 * the load runs. In a cluster, a new persist lease holder also calls
+	 * `load` to merge the stored snapshot before its first write.
 	 */
 	persist?: {
-		load?: (topic: string) => Promise<Uint8Array | number[] | null | undefined> | Uint8Array | number[] | null | undefined;
+		load?: (topic: string, info: { signal: AbortSignal }) => Promise<Uint8Array | number[] | null | undefined> | Uint8Array | number[] | null | undefined;
 		store?: (topic: string, bytes: Uint8Array) => Promise<void> | void;
 	};
 	/** Persist this long after the last edit (ms). @default 2000 */
