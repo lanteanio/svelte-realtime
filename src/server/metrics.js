@@ -206,7 +206,7 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		lockWaiters: registry.gauge({ name: 'svelte_realtime_lock_waiters', help: 'Queued in-process lock callers' }),
 		lockEvents: registry.counter({ name: 'svelte_realtime_lock_events_total', help: 'Lock queue and execution events', labelNames: ['status'] }),
 		uploadLimits: registry.counter({ name: 'svelte_realtime_upload_limits_total', help: 'Upload starts and chunks refused by a concurrency or buffer limit', labelNames: ['limit'] }),
-		idempotencyCapacity: registry.counter({ name: 'svelte_realtime_idempotency_capacity_total', help: 'In-process idempotency admissions over a capacity share', labelNames: ['outcome'] }),
+		idempotencyCapacity: registry.counter({ name: 'svelte_realtime_idempotency_capacity_total', help: 'In-process idempotency admissions at a capacity limit, replaced or rejected', labelNames: ['outcome'] }),
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
 		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] }),
 		deadLetterFailures: registry.counter({ name: 'svelte_realtime_webhook_dead_letter_failures_total', help: 'Failed webhook deliveries the dead-letter store could not persist' })

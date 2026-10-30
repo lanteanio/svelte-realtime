@@ -270,8 +270,8 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-idempotency-capacity"></a>
 ### `IDEMPOTENCY_CAPACITY`
 
-- Cause: A `live.idempotent` call brings a new key while the default in-process store is at a limit: 10,000 entries overall, 1,000 per tenant, the reserves kept for small holders, or a tenth of the tenant share for the caller (per identity, per anonymous connection, and one shared bucket for calls with neither) while the caller holds only running keys.
-- Consequence: The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Every cached result stays and can still be returned. A caller holding its whole identity share with cached results replaces its own oldest one instead of being refused.
+- Cause: A `live.idempotent` call brings a new key while the default in-process store is at a limit. Either a shared limit applies (10,000 entries overall, 1,000 per tenant, the reserves kept for small holders, or the 1,000-slot pool for cron and alarms), or the caller holds its whole share (a tenth of its tenant share per identity, anonymous connection, or server-side bucket) and has no result of its own to give up: only running keys, results for `keyFrom` keys, or a server-side bucket.
+- Consequence: The call rejects with an IDEMPOTENCY_CAPACITY LiveError (RpcError on the client) and the handler does not run. Every cached result stays and can still be returned. A caller holding its whole share with a result for a client envelope key replaces its own oldest one instead of being refused.
 - Automatic recovery: Offline-queue replays pause and try again about one second later. Other callers are not retried, and slots free up as entries expire.
 - Next action: Retry with the same key and payload after a short backoff. Under sustained load, shorten the TTL or configure a durable idempotency store.
 - Message patterns: <code>The idempotency store is full; the handler has not run. Retry after capacity becomes available.</code>

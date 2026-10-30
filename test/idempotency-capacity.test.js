@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { live, _resetForget, _resetIdempotencyStore } from '../src/server.js';
+import { live, _resetForget, _resetIdempotencyStore, __register, __directCall, __registerCron, _clearCron, _tickCron, setCronPlatform } from '../src/server.js';
+import { mockPlatform } from './helpers/mock-platform.js';
 import { createTestEnv } from '../src/testing.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { state } from '../src/server/state.js';
@@ -13,6 +14,11 @@ function deferred() {
 	let resolve;
 	const promise = new Promise(done => { resolve = done; });
 	return { promise, resolve };
+}
+
+// Call an idempotent handler with a client envelope key, the key a caller owns.
+function enveloped(handler) {
+	return (ctx, key) => handler({ ...ctx, _idempotencyKey: key }, key);
 }
 
 // Fill `count` slots from callers that each stay below every reserve
@@ -34,16 +40,16 @@ describe('idempotency capacity preserves accepted effects', () => {
 		for (const gate of gates) gate.resolve();
 		env?.cleanup(); env = null;
 		state.metricsInstruments = null;
-		_resetIdempotencyStore(); _resetForget(); _resetTenantResolver(); resetRuntimeEnv();
+		_resetIdempotencyStore(); _resetForget(); _resetTenantResolver(); resetRuntimeEnv(); _clearCron();
 	});
 
 	function counted() {
 		const effects = new Map();
-		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => {
+		const run = enveloped(live.idempotent({}, async (ctx, key) => {
 			const id = (ctx.tenantId ?? '') + ':' + (ctx.user?.id ?? '') + ':' + key;
 			const count = (effects.get(id) || 0) + 1; effects.set(id, count);
 			return count;
-		});
+		}));
 		return { effects, run };
 	}
 
@@ -59,13 +65,13 @@ describe('idempotency capacity preserves accepted effects', () => {
 		const honest = env.connect(identified ? { id: 'same-user', tenant: 'honest' } : { tenant: 'honest' });
 		const hostile = env.connect(identified ? { id: 'same-user', tenant: 'hostile' } : { tenant: 'hostile' });
 		expect(await honest.call('work/run', 'paid')).toBe(1);
-		for (let i = 0; i < GLOBAL; i++) expect(await hostile.call('work/run', String(i))).toBe(1);
+		for (let i = 0; i < GLOBAL; i++) await hostile.call('work/run', String(i)).catch(() => {});
 		expect(await honest.call('work/run', 'paid')).toBe(1);
 		expect(effects.get('honest:paid')).toBe(1);
 		expect(await honest.call('work/run', 'fresh')).toBe(1);
-		// The hostile caller gave up only its own oldest results.
-		expect(await hostile.call('work/run', String(GLOBAL - 1))).toBe(1);
-		expect(await hostile.call('work/run', '0')).toBe(2);
+		// A keyFrom key may be shared, so the hostile caller keeps its results and is refused.
+		expect(await hostile.call('work/run', '0')).toBe(1);
+		await expect(hostile.call('work/run', 'new')).rejects.toMatchObject(capacityError);
 	});
 
 	it('keeps one identity from crowding out another in an app without tenants', async () => {
@@ -123,6 +129,43 @@ describe('idempotency capacity preserves accepted effects', () => {
 		await expect(run({ user: { id: 'bob' }, tenantId: 'other' }, 'fresh')).resolves.toBe(1);
 	});
 
+	it('never gives up a keyFrom result that other callers may share', async () => {
+		const { run } = counted();
+		let billed = 0;
+		const billing = live.idempotent({ keyFrom: () => 'billing-day1' }, async () => ++billed);
+		const alice = { user: { id: 'alice' } };
+		expect(await billing(alice)).toBe(1);
+		for (let i = 0; i < TENANT; i++) await run(alice, String(i));
+		expect(await billing({ user: { id: 'bob' } })).toBe(1);
+		expect(billed).toBe(1);
+		// Alice gave up her own oldest envelope result instead.
+		expect(await run(alice, '0')).toBe(2);
+	});
+
+	it('refuses a caller at its share whose results all come from keyFrom', async () => {
+		let effects = 0;
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async () => ++effects);
+		const alice = { user: { id: 'alice' } };
+		for (let i = 0; i < TENANT; i++) await run(alice, 'k' + i);
+		await expect(run(alice, 'over')).rejects.toMatchObject(capacityError);
+		expect(await run({ user: { id: 'bob' } }, 'k0')).toBe(1);
+		expect(effects).toBe(TENANT);
+	});
+
+	it('keeps scheduled jobs admitted while visitors fill the server-side bucket', async () => {
+		const platform = mockPlatform();
+		setCronPlatform(platform);
+		__register('pages/visit', live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key));
+		let nightly = 0;
+		__registerCron('jobs/nightly', live.cron('* * * * *', 'nightly', live.idempotent({ keyFrom: () => 'nightly-day1' }, async () => { nightly++; })));
+		for (let i = 0; i < TENANT; i++) await __directCall('pages/visit', ['v' + i], platform, { user: null });
+		await expect(__directCall('pages/visit', ['over'], platform, { user: null })).rejects.toMatchObject(capacityError);
+		await _tickCron();
+		await vi.waitFor(() => expect(nightly).toBe(1));
+		await _tickCron(); await nextTurn();
+		expect(nightly).toBe(1);
+	});
+
 	it('never replaces a result held for calls with neither an identity nor a connection', async () => {
 		const { effects, run } = counted();
 		const scheduled = { user: null };
@@ -145,16 +188,17 @@ describe('idempotency capacity preserves accepted effects', () => {
 		const quiet = env.connect({});
 		const noisy = env.connect({});
 		expect(await quiet.call('work/run', 'quiet')).toBe(1);
-		for (let i = 0; i < GLOBAL; i++) await noisy.call('work/run', 'noisy' + i);
+		for (let i = 0; i < GLOBAL; i++) await noisy.call('work/run', 'noisy' + i).catch(() => {});
 		expect(await quiet.call('work/run', 'quiet')).toBe(1);
 		expect(await quiet.call('work/run', 'quiet-fresh')).toBe(1);
-		expect(await noisy.call('work/run', 'noisy0')).toBe(2);
+		expect(await noisy.call('work/run', 'noisy0')).toBe(1);
+		await expect(noisy.call('work/run', 'noisy-new')).rejects.toMatchObject(capacityError);
 	});
 
 	it('refuses a caller whose share is all running handlers, before its handler runs', async () => {
 		const gate = deferred(); gates.push(gate);
 		let effects = 0;
-		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async () => { effects++; await gate.promise; return effects; });
+		const run = enveloped(live.idempotent({}, async () => { effects++; await gate.promise; return effects; }));
 		const alice = { user: { id: 'alice' } };
 		const pending = Array.from({ length: TENANT }, (_, i) => run(alice, String(i)));
 		await nextTurn();
@@ -286,7 +330,7 @@ describe('idempotency capacity preserves accepted effects', () => {
 		const events = [];
 		state.metricsInstruments = /** @type {any} */ ({ idempotencyCapacity: { inc: labels => events.push(labels) } });
 		const gate = deferred(); gates.push(gate);
-		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => { if (key.startsWith('hold')) await gate.promise; return key; });
+		const run = enveloped(live.idempotent({}, async (ctx, key) => { if (key.startsWith('hold')) await gate.promise; return key; }));
 		const alice = { user: { id: 'alice' } };
 		for (let i = 0; i <= TENANT; i++) await run(alice, String(i));
 		const held = Array.from({ length: TENANT }, (_, i) => run({ user: { id: 'bob' } }, 'hold' + i));

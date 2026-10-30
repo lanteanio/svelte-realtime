@@ -614,9 +614,27 @@ export function _rerunCtx(ctx, kind) {
 	return out;
 }
 
+/**
+ * Contexts the server built for work it scheduled itself (cron ticks, alarms),
+ * as opposed to a request any visitor can trigger.
+ * @type {WeakSet<object>}
+ */
+const _scheduledCtxs = new WeakSet();
+
+/** Mark a context as scheduled server work. */
+export function _markScheduledCtx(ctx) {
+	_scheduledCtxs.add(ctx);
+	return ctx;
+}
+
+/** @param {any} ctx */
+export function _isScheduledCtx(ctx) {
+	return ctx !== null && typeof ctx === 'object' && _scheduledCtxs.has(ctx);
+}
+
 /** Build background work without resolving a missing user's tenant. */
 export function _buildPersistedCtx(platform, helpers, tenantId) {
-	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
+	return _markScheduledCtx(_buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId)));
 }
 
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId) {
