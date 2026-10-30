@@ -411,6 +411,17 @@ describe('erasure input and store bounds', () => {
 		expect((await listForgetJobs())[0]).toMatchObject({ status: 'failed', error: { code: 'INVALID_REQUEST' } });
 	});
 
+	it('releases the lease of a stored job with an invalid tenant', async () => {
+		const jobs = createForgetJobStore();
+		configureForget({ store: partial(), jobs });
+		await live.forget('alice', { tenantId: null }).catch(() => {});
+		configureForget({ store: durable(), jobs: { ...jobs, claim: (r) => { const c = jobs.claim(r); return c && { ...c, tenantId: 'not a tenant!' }; } } });
+		const [job] = await listForgetJobs();
+		expect((await resumeForgetJobs({ id: job.id })).results).toEqual([{ id: job.id, status: 'failed', code: 'VALIDATION' }]);
+		expect((await listForgetJobs())[0]).toMatchObject({ status: 'failed', attempts: 2, error: { code: 'VALIDATION' } });
+		expect(rows.get('alice')).toBe(2);
+	});
+
 	it('bounds a durable store that never answers', async () => {
 		configureForget({ store: { purgeUser: () => new Promise(() => {}) }, timeoutMs: 50 });
 		const r = await within(live.forget('alice', { tenantId: null }));
