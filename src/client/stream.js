@@ -293,6 +293,32 @@ let _subscribeBatch = null;
  */
 const _ORDER_MARKS_MAX = 4;
 
+/** Sequenced frames, and crud rows, a stream remembers the order of. */
+const _SEQ_WINDOW = 4096;
+
+/**
+ * Does a replay answer continue a resume from `cursor`? Its entries that carry
+ * a sequence must run on from the cursor without a hole and reach the answer's
+ * own sequence, which must not be behind the cursor. A buffer trimmed past the
+ * cursor, or one that lost its history, answers with a later suffix or with
+ * nothing; applying that would leave the view on a stale base.
+ * @param {any} response
+ * @param {unknown} cursor the `seq` the subscribe resumed from
+ */
+function _replayContinues(response, cursor) {
+	if (typeof cursor !== 'number') return true;
+	if (!Array.isArray(response.data)) return false;
+	let last = cursor;
+	let sequenced = true;
+	for (const evt of response.data) {
+		if (evt == null || evt.seq === undefined) { sequenced = false; continue; }
+		if (evt.seq !== last + 1) return false;
+		last = evt.seq;
+	}
+	if (typeof response.seq !== 'number') return true;
+	return response.seq >= cursor && (!sequenced || response.seq <= last);
+}
+
 /**
  * Does a cursor / presence-field frame carry an ordering token? `_p` names the
  * publishing connection and `_n` counts that connection's publishes.
@@ -757,6 +783,23 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/** @type {number | null} Last known sequence number for replay */
 	let _lastSeq = null;
+
+	/**
+	 * The order of sequenced frames applied since the last full snapshot, kept
+	 * while the subscribe answer carries a sequence (the topic is published
+	 * through a replay buffer, so one counter numbers every frame). A frame
+	 * whose sequence was already applied is a repeat; a crud frame older than
+	 * the newest applied for its row, and any frame at or below the newest
+	 * whole-value frame (a `set`, a `refreshed`), was overtaken. Frames for
+	 * different rows still apply in arrival order, since publishes can reach
+	 * the client in a different order than they were numbered. `applied` holds
+	 * each of the last _SEQ_WINDOW sequences at its slot; one further behind
+	 * the newest than that is taken as applied. `missing` counts sequences
+	 * below the newest not seen yet: only while some are can an older frame
+	 * still arrive, so only then are rows' sequences kept.
+	 * @type {{ applied: Float64Array, newest: number, missing: number, rows: Map<any, number>, whole: number } | null}
+	 */
+	let _seqOrder = null;
 
 	/**
 	 * Per-key, per-field publisher marks for presence field updates, so a field
@@ -1299,6 +1342,42 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
+	 * Is this frame a repeat of, or overtaken by, a sequenced frame already
+	 * applied? Records it as applied when it is not.
+	 * @param {{ event: string, data: any, seq?: number }} envelope
+	 */
+	function _overtaken(envelope) {
+		const order = _seqOrder;
+		const s = envelope.seq;
+		if (order === null || !Number.isSafeInteger(s) || /** @type {number} */ (s) < 1) return false;
+		const seq = /** @type {number} */ (s);
+		const slot = seq % _SEQ_WINDOW;
+		if (order.applied[slot] === seq || seq <= order.newest - _SEQ_WINDOW) return true;
+		order.applied[slot] = seq;
+		// A frame past the newest opens a hole below it; an older one fills one.
+		if (seq > order.newest) {
+			order.missing = Math.min(order.missing + seq - order.newest - 1, _SEQ_WINDOW);
+			order.newest = seq;
+		} else if (order.missing > 0) order.missing--;
+		if (seq <= order.whole) return true;
+		if (merge === 'set' || envelope.event === 'refreshed') order.whole = seq;
+		if (merge !== 'crud' || envelope.event === 'refreshed' || envelope.data == null || typeof envelope.data !== 'object') return false;
+		const row = envelope.data[key];
+		if (row === undefined) return false;
+		if (order.rows.size > 0) {
+			const held = order.rows.get(row);
+			if (held !== undefined && seq <= held) return true;
+		}
+		if (order.missing === 0) {
+			if (order.rows.size > 0) order.rows.clear();
+		} else {
+			if (order.rows.size >= _SEQ_WINDOW) order.rows.clear();
+			order.rows.set(row, seq);
+		}
+		return false;
+	}
+
+	/**
 	 * Apply a merge event to the stream's authoritative state. In the
 	 * steady-state hot path (queue empty), mutates currentValue / _index
 	 * directly. In queue mode (a `mutate(asyncOp, change)`
@@ -1319,11 +1398,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// `request.seq` for gap-fill, so it must only ADVANCE. A multi-node
 		// cluster can deliver two concurrently-published events with inverted
 		// seqs (seq is minted atomically but the fan-out order is PUBLISH
-		// arrival order); applying them in arrival order is fine - the merge is
-		// key-based - but letting the cursor regress would re-deliver the gap
+		// arrival order); frames for different rows apply in arrival order
+		// (see _overtaken), but letting the cursor regress would re-deliver the gap
 		// on the next reconnect. A fresh session starts from null, and a full
 		// rehydrate response reassigns the cursor authoritatively elsewhere.
 		if (envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
+		if (_overtaken(envelope)) return false;
 		if (_optimisticQueue.length > 0) {
 			// optimistic.queue invariant: when queue is non-empty the un-overlaid
 			// server state pair (_serverValue, _serverIndex) must be set. Both
@@ -1979,6 +2059,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Bound and settled before any store update runs app code.
 				_bindTopic(response.topic || null);
 				_subscribeDone(ticket);
+				// A replay that cannot fill the gap is not applied: the stream
+				// subscribes again without a cursor and takes the full snapshot.
+				if (response.replay === true && !_replayContinues(response, ticket.request.seq)) {
+					if (topicUnsub) { topicUnsub(); topicUnsub = null; }
+					_jitter.clear();
+					_dropResumeCursors();
+					fetchAndSubscribe();
+					return;
+				}
 				// The answer is the cursor's new baseline: an outage before it no
 				// longer ages the cursor. Over a socket the listener counts as down
 				// (an answer landing in a hidden tab) staleness runs from here.
@@ -1994,6 +2083,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 				// Track sequence number for replay
 				if (response.seq !== undefined) _lastSeq = response.seq;
+				// A replay continues the frame order from the cursor; a full snapshot
+				// starts it over at the sequence read after the loader. Frames at or
+				// below that are not repeats: they may have missed the snapshot.
+				if (typeof response.seq !== 'number') _seqOrder = null;
+				else if (_seqOrder === null || response.replay !== true) {
+					const base = response.replay === true && typeof ticket.request.seq === 'number' ? ticket.request.seq : response.seq;
+					_seqOrder = { applied: new Float64Array(_SEQ_WINDOW), newest: base, missing: 0, rows: new Map(), whole: 0 };
+				}
 
 				// Track version for delta sync
 				if (response.version !== undefined) _lastVersion = response.version;

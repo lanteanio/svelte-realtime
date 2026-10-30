@@ -1605,7 +1605,7 @@ describe('attach-window replay inclusion', () => {
   for (const fn of [...net.clientTopics.get(topic)]) fn({ topic, ...envelope });
  }
 
- async function resumeReplay(merge, replayed, buffered, responseSeq = 10) {
+ async function resumeReplay(merge, replayed, buffered, headSeq = replayed.length + 1) {
   clientState.config.resumeGraceMs = 30000;
   const gate = deferred();
   let resuming = false;
@@ -1613,7 +1613,7 @@ describe('attach-window replay inclusion', () => {
   const topic = 'inclusion:' + merge;
   env.platform.replay = {
    since: async () => { replayRead = true; await gate.promise; return replayed; },
-   seq: async () => resuming ? responseSeq : 1
+   seq: async () => resuming ? headSeq : 1
   };
   env.register('inclusion', { feed: live.stream(topic, async () => merge === 'set' ? { owner: 'initial' } : [], { merge, replay: true, max: 50 }) });
   const stream = __stream('inclusion/feed', { merge, max: 50 });
@@ -1628,36 +1628,41 @@ describe('attach-window replay inclusion', () => {
   await until(() => replayRead);
   for (const envelope of buffered) emit(topic, envelope);
   gate.resolve();
-  await until(() => net.toClient.some(frame => frame.data?.replay === true));
-  const response = net.toClient.find(frame => frame.data?.replay === true).data;
-  expect(response.seq).toBe(responseSeq);
+  await until(() => net.toClient.some(frame => frame.data?.ok === true && frame.data.replay !== undefined));
+  const response = net.toClient.find(frame => frame.data?.ok === true && frame.data.replay !== undefined).data;
   await deliverToClient();
   const result = get(stream);
   off(); await ticks(); await deliverToServer();
-  return result;
+  return { result, response };
  }
 
  it('deduplicates only exact replay members and keeps intervening and later live sequences', async () => {
   const event = seq => ({ event: 'push', data: { id: seq }, seq });
-  const result = await resumeReplay('latest', [event(7), event(9)], [event(7), event(8), event(9), event(10)]);
-  expect(result).toEqual([{ id: 7 }, { id: 9 }, { id: 8 }, { id: 10 }]);
+  const { result, response } = await resumeReplay('latest', [event(2), event(3)], [event(2), event(3), event(4)], 3);
+  expect(response.replay).toBe(true);
+  expect(response.seq).toBe(3);
+  expect(result).toEqual([{ id: 2 }, { id: 3 }, { id: 4 }]);
  });
 
  it('does not roll a replayed set value back to an older included live frame', async () => {
-  const old = { event: 'set', data: { owner: 'bob' }, seq: 7 };
-  const latest = { event: 'set', data: { owner: 'carol' }, seq: 8 };
-  expect(await resumeReplay('set', [old, latest], [old])).toEqual({ owner: 'carol' });
+  const old = { event: 'set', data: { owner: 'bob' }, seq: 2 };
+  const latest = { event: 'set', data: { owner: 'carol' }, seq: 3 };
+  expect((await resumeReplay('set', [old, latest], [old])).result).toEqual({ owner: 'carol' });
  });
 
  it('keeps a live set published between the replay read and response watermark', async () => {
-  const old = { event: 'set', data: { owner: 'bob' }, seq: 7 };
-  const latest = { event: 'set', data: { owner: 'carol' }, seq: 8 };
-  expect(await resumeReplay('set', [old], [old, latest], 8)).toEqual({ owner: 'carol' });
+  const old = { event: 'set', data: { owner: 'bob' }, seq: 2 };
+  const latest = { event: 'set', data: { owner: 'carol' }, seq: 3 };
+  const { result, response } = await resumeReplay('set', [old], [old, latest], 2);
+  expect(response.seq).toBe(2);
+  expect(result).toEqual({ owner: 'carol' });
  });
 
- it.each([undefined, null, -1, 1.5])('retains unidentifiable replay/live events with sequence %s', async seq => {
+ it.each([undefined, null, -1, 1.5])('answers a replay entry with sequence %s from the loader and keeps the live frame', async seq => {
   const row = { event: 'push', data: { id: 'same' }, ...(seq === undefined ? {} : { seq }) };
-  expect(await resumeReplay('latest', [row], [row])).toEqual([{ id: 'same' }, { id: 'same' }]);
+  const { result, response } = await resumeReplay('latest', [row], [row]);
+  expect(response.replay).toBe(false);
+  expect(result).toEqual([{ id: 'same' }]);
  });
 
  it.each(['latest', 'set', 'crud'])('keeps loader-window live frames for %s even below the response watermark', async merge => {

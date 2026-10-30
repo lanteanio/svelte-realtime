@@ -882,6 +882,29 @@ function _settleClaimBarriers(ws, topic, fn) {
 }
 
 /**
+ * The sequence a replay read brings a resuming stream up to, or null when it
+ * cannot fill the gap. The entries must run on from the client's cursor with
+ * no hole and reach at least the sequence read before them. A buffer trimmed
+ * past the cursor returns a later suffix; a buffer that lost its history (a
+ * restart, an eviction) returns nothing while its sequence is behind the
+ * cursor. Both answer with the loader instead, which replaces the view.
+ * @param {unknown} missed
+ * @param {number} clientSeq
+ * @param {unknown} currentSeq
+ * @returns {number | null}
+ */
+function _replayFilledTo(missed, clientSeq, currentSeq) {
+	if (!Array.isArray(missed) || typeof currentSeq !== 'number' || !Number.isSafeInteger(clientSeq) || currentSeq < clientSeq) return null;
+	let last = clientSeq;
+	for (let i = 0; i < missed.length; i++) {
+		const entry = missed[i];
+		if (entry === null || typeof entry !== 'object' || entry.seq !== last + 1) return null;
+		last = entry.seq;
+	}
+	return last >= currentSeq ? last : null;
+}
+
+/**
  * Stream branch of `_executeSingleRpc`: validate args, gate, resolve topic,
  * subscribe, run optional channel/delta/replay/seq-delta short-circuits, run
  * the loader, apply transform/migration, build the response envelope.
@@ -1251,11 +1274,14 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	// Replay (bounded recent buffer)
 	if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
 		try {
+			// The current sequence is read first: everything published up to it
+			// has to come back from the buffer for the replay to fill the gap.
+			const currentSeq = await platform.replay.seq(topic);
 			const missed = await platform.replay.since(topic, clientSeq);
-			if (missed) {
-				const currentSeq = await platform.replay.seq(topic);
+			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq);
+			if (filledTo !== null) {
 				armReloads();
-				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: filledTo, replay: true };
 			}
 		} catch {}
 	}

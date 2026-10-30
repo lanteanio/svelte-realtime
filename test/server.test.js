@@ -4312,7 +4312,8 @@ describe('replay stream response', () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 		const missedEvents = [
-			{ event: 'created', data: { id: 2, name: 'New' } }
+			{ seq: 4, event: 'created', data: { id: 2, name: 'New' } },
+			{ seq: 5, event: 'updated', data: { id: 2, name: 'Newer' } }
 		];
 		platform.replay = {
 			seq: async () => 5,
@@ -12288,7 +12289,7 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	it('tier 1: replay buffer satisfies the gap (fromSeq not called)', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
-		const missed = [{ event: 'created', data: { id: 2, seq: 4 } }];
+		const missed = [{ seq: 4, event: 'created', data: { id: 2 } }, { seq: 5, event: 'updated', data: { id: 2 } }];
 		platform.replay = {
 			seq: async () => 5,
 			since: async (topic, sinceSeq) => sinceSeq < 5 ? missed : null

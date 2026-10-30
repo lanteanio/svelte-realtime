@@ -3668,6 +3668,42 @@ describe('__stream() reconnect cursor time-check', () => {
 		unsub();
 	});
 
+	it.each([
+		['starts past the cursor', [{ seq: 13, event: 'deleted', data: { id: 1 } }], 13],
+		['is empty while the sequence went back', [], 2]
+	])('discards a replay that %s and subscribes again for a full snapshot', async (_, replayed, seq) => {
+		// An older server answers whatever its buffer holds after the cursor:
+		// a later suffix, or nothing once the buffer restarted. Applying that
+		// would keep the rows the client held.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('suffix/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ id: 1 }, { id: 2 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: replayed, topic: 'suffix-topic', merge: 'crud', key: 'id', seq, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		simulateRpcResponse(sent3.id, { ok: true, data: [{ id: 2 }, { id: 3 }], topic: 'suffix-topic', merge: 'crud', key: 'id', seq });
+		expect(values[values.length - 1]).toEqual([{ id: 2 }, { id: 3 }]);
+
+		unsub();
+	});
+
 	it('keeps the replay cursor for a brief bounce within resumeMaxCursorAgeMs', async () => {
 		// An ordinary socket bounce still gap-fills from the retained seq - the
 		// default 60s bound comfortably covers it.
