@@ -2126,17 +2126,25 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// prove inclusion: response.seq is read after the snapshot/replay
 				// read, so using it as a cutoff would discard intervening live data.
 				// A `delta.fromSeq` answer is numbered by the application, so its
-				// sequences say nothing about the live frames.
+				// sequences say nothing about the live frames. A `set` replay may
+				// skip a hole: its newest entry replaced the whole value, so a
+				// numbered live frame at or below it is older and does not apply.
 				if (buffer.length > 0) {
 					let included = null;
+					let replacedTo = -1;
 					if ((merge === 'latest' || merge === 'set') && response.replay === true && response.fromSeq !== true && Array.isArray(response.data)) {
 						included = new Set();
 						for (const evt of response.data) {
-							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) included.add(evt.seq);
+							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) {
+								included.add(evt.seq);
+								if (merge === 'set' && evt.seq > replacedTo) replacedTo = evt.seq;
+							}
 						}
 					}
 					for (const evt of buffer) {
-						if (!included?.has(evt.seq)) _applyMerge(evt);
+						if (included?.has(evt.seq)) continue;
+						if (replacedTo >= 0 && Number.isSafeInteger(evt.seq) && evt.seq <= replacedTo) continue;
+						_applyMerge(evt);
 					}
 					if (_optimisticQueue.length > 0) _recomputeDisplay();
 					else {

@@ -1658,6 +1658,17 @@ describe('attach-window replay inclusion', () => {
   expect(result).toEqual({ owner: 'carol' });
  });
 
+ it('does not let a live set from the hole a set replay skipped overwrite the replayed value', async () => {
+  // The buffer kept only the newest set; the older one also arrived live
+  // while the resume read the buffer.
+  const old = { event: 'set', data: { owner: 'bob' }, seq: 2 };
+  const latest = { event: 'set', data: { owner: 'carol' }, seq: 3 };
+  const { result, response } = await resumeReplay('set', [latest], [old, latest], 3);
+  expect(response.replay).toBe(true);
+  expect(response.seq).toBe(3);
+  expect(result).toEqual({ owner: 'carol' });
+ });
+
  it.each([undefined, null, -1, 1.5])('answers a replay entry with sequence %s from the loader and keeps the live frame', async seq => {
   const row = { event: 'push', data: { id: 'same' }, ...(seq === undefined ? {} : { seq }) };
   const { result, response } = await resumeReplay('latest', [row], [row]);
