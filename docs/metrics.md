@@ -6,7 +6,9 @@
 
 - `svelte_realtime_rpc_total` - RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
+- `svelte_realtime_rpc_errors_total` - RPC errors by path, code, `reason` and `scope`, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits, `OVERLOADED` from [RPC admission](rpc-admission.md)), which also count in `svelte_realtime_rpc_total`. `reason` (`concurrency_limit`, `queue_full`) and `scope` (`connection`, `route`, `global`) name the admission limit that refused an `OVERLOADED` call and are empty for every other error
+- `svelte_realtime_rpc_inflight` - RPC calls of each registered `path` running in this worker, from admission until the handler settles
+- `svelte_realtime_rpc_queued` - RPC calls of each registered `path` waiting in this worker's admission queue. Both admission gauges are written with `set` once per microtask in which they change, so the registry's gauge needs a `set(labels, value)` method (the extensions `createMetrics()` gauge has one)
 - `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status

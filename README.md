@@ -253,6 +253,7 @@ The `ctx` object passed to every server function contains:
 | `ctx.cursor` | Cursor from a `loadMore()` call, or `null` |
 | `ctx.connectionId` | Stable WebSocket connection id (`undefined` for direct HTTP/SSR work) |
 | `ctx.requestId` | Per-operation correlation id; a bounded RPC envelope id on WebSocket or the per-request adapter id for HTTP/SSR |
+| `ctx.abortSignal` | `AbortSignal` that fires at the call's deadline (the function's `timeout`, else 30 s) or when its connection closes; pass it to `fetch` or a database driver. See [RPC admission](docs/rpc-admission.md) |
 | `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
 | `ctx.signal` | `(userId, event, data)` - point-to-point message (upload handlers use `ctx.abortSignal` for cancellation; their legacy `ctx.signal` is a deprecated cancellation alias - see [Streaming uploads](#streaming-uploads)) |
@@ -1636,6 +1637,7 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
 | `timeout` | App-wide RPC timeout in ms (default `30000`). Function declarations override it; per-call `.with({ timeout })` takes precedence over both. |
+| `rpc.maxPending` | Calls that may await a response at once (default `256`, `0` disables); one more rejects at once with `OVERLOADED`, `scope: 'client'`, unsent. See [RPC admission](docs/rpc-admission.md). |
 | `protocolVersion` | Baked non-negative integer advertised before queued work on every connection. Pair it with the server range policy below. |
 | `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
 | `resumeMaxCursorAgeMs` | Max outage in ms a reconnect trusts the retained replay cursor before rehydrating fully (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to always rehydrate on reconnect. |
@@ -2666,7 +2668,7 @@ app.get('/metrics', metrics.handler);
 
 The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, preserving that range independently of the extensions registry's configured defaults. The registry's generic default uses fractional seconds through 1 s. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
 
-The [metrics reference](docs/metrics.md) lists every registered series and covers cohort-stratified RPC series (`cohort`), per-subsystem performance budgets (`live.perfBudget`) and the pause-aware lifeline scrape (`lifeline`). Cron, alarms, polls, derived streams, effects, outbound webhooks and dead-letter replays report through one bounded schema, the `svelte_realtime_background_*` series described in [Background work metrics](docs/background-metrics.md) and exported as `BACKGROUND_METRICS`.
+The [metrics reference](docs/metrics.md) lists every registered series, including the per-function `svelte_realtime_rpc_inflight` and `svelte_realtime_rpc_queued` admission gauges, and covers cohort-stratified RPC series (`cohort`), per-subsystem performance budgets (`live.perfBudget`) and the pause-aware lifeline scrape (`lifeline`). Cron, alarms, polls, derived streams, effects, outbound webhooks and dead-letter replays report through one bounded schema, the `svelte_realtime_background_*` series described in [Background work metrics](docs/background-metrics.md) and exported as `BACKGROUND_METRICS`.
 
 ### Push, not poll
 
@@ -4920,7 +4922,7 @@ Each WebSocket connection has a send buffer limit (default 1MB, configurable via
 
 ### Batch and queue limits
 
-A single `batch()` call is capped at 50 RPC calls - the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods.
+A single `batch()` call is capped at 50 RPC calls - the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods. Each worker runs at most 32 calls per connection, 256 per function and 1024 in total, queues 256 more, and refuses the rest at once with `OVERLOADED`; tune it with `realtime({ rpc })`, and read [RPC admission](docs/rpc-admission.md) for the queue, deadlines and `ctx.abortSignal`.
 
 ---
 
@@ -5049,10 +5051,7 @@ The adapter rejects topic names longer than 256 characters or containing control
 
 ### Operational event sink
 
-Unexpected RPC, binary RPC, upload, cron, alarm, derived, effect, polling,
-webhook-delivery, and webhook dead-letter failures always emit one structured
-production event. Canonical one-line JSON console diagnostics are the default;
-install a process-wide sink to route records to your logger or collector:
+Unexpected RPC, binary RPC, upload, cron, alarm, derived, effect, polling, webhook-delivery, and webhook dead-letter failures always emit one structured production event. Canonical one-line JSON console diagnostics are the default; install a process-wide sink to route records to your logger or collector:
 
 ```js
 import { setOperationalEventSink } from 'svelte-realtime/server';
