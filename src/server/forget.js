@@ -68,21 +68,20 @@ let _forgetHashKey = null;
 
 /**
  * Optional erasure job store (default null = no job records). Duck-typed:
- * `begin`, `complete`, `fail`, `list` and `intent`, each sync or async.
+ * `begin`, `claim`, `complete`, `fail`, `list` and `due`, each sync or async.
  * `createForgetJobStore()` is the in-memory reference; durable stores implement
  * the same methods. Set via `configureForget({ jobs })`.
  * @type {any}
  */
 let _forgetJobs = null;
 
-/**
- * Job ids with a run in progress in this process, with their run counts, so a
- * resume does not start a second run of a job this process is still running.
- * @type {Map<string, number>}
- */
-const _activeJobs = new Map();
+const _JOB_METHODS = ['begin', 'claim', 'complete', 'fail', 'list', 'due'];
 
-const _JOB_METHODS = ['begin', 'complete', 'fail', 'list', 'intent'];
+// A run's lease on its job. A run records its outcome well within it; a run
+// whose process died leaves the job due again once it ends.
+const _LEASE_MS = 5 * 60_000;
+const _RETRY_BASE_MS = 1000;
+const _RETRY_MAX_MS = 60 * 60_000;
 const _JOB_STATUSES = ['pending', 'failed', 'completed'];
 const _MAX_JOB_LIMIT = 1000;
 
@@ -348,88 +347,104 @@ const _liveForget = async function forget(userId, opts) {
 	// Every call is its own job under a random reference: two workers erasing
 	// the same user each record their own outcome, and the reference reveals
 	// nothing about the user.
-	const jobId = jobs === null ? null : randomUuid();
-	return _runErasure(jobs, jobId, { userId, userIdHash, tenantId, cascade }, onForget);
+	const job = jobs === null ? null : { id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false };
+	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade }, onForget);
 };
 
 /**
- * One erasure run with its job bookkeeping. With a job store, the intent is
- * recorded before any surface is touched (a failure to record it erases
- * nothing) and the outcome after. An outcome that cannot be recorded leaves the
- * job unfinished, which only means a resume runs the idempotent cascade again.
+ * One erasure run with its job bookkeeping. With a job store, a new call
+ * records the job before any surface is touched (a failure to record it erases
+ * nothing); a resumed run has already claimed it. Either way the run holds the
+ * job's lease and records the outcome after. An outcome that cannot be recorded
+ * leaves the job unfinished, so it becomes due again when the lease ends and a
+ * resume runs the idempotent cascade again.
  * @param {any} jobs
- * @param {string | null} jobId
+ * @param {{ id: string, runId: string, attempts: number, claimed: boolean } | null} job
  * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
  * @param {Function | undefined} onForget
  * @returns {Promise<ForgetResult>}
  */
-async function _runErasure(jobs, jobId, run, onForget) {
+async function _runErasure(jobs, job, run, onForget) {
 	const { userId, userIdHash, tenantId, cascade } = run;
-	const runId = jobs === null ? '' : randomUuid();
+	const jobId = job === null ? null : job.id;
 	// Participate in graceful drain so a shutdown waits for an in-progress
 	// erasure rather than tearing it down half-applied (same contract as a cron
 	// tick / an alarm fire). The `finally` drains exactly once on every exit.
 	_enterInFlight();
 	try {
-		if (jobs !== null && jobId !== null) {
+		if (job !== null && !job.claimed) {
+			const at = wallEpoch();
 			try {
-				await jobs.begin({ id: jobId, runId, userIdHash, tenantId, userId, cascade, at: wallEpoch() });
+				await jobs.begin({ id: job.id, runId: job.runId, userIdHash, tenantId, userId, cascade, at, leaseUntil: at + _LEASE_MS });
 			} catch {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
-			_activeJobs.set(jobId, (_activeJobs.get(jobId) || 0) + 1);
 		}
+		/** @type {{ failedSurfaces: string[] }} */
+		const failure = { failedSurfaces: [] };
+		/** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */
+		let erased;
 		try {
-			/** @type {{ failedSurfaces: string[] }} */
-			const failure = { failedSurfaces: [] };
-			/** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */
-			let erased;
+			erased = await _erase(userId, tenantId, cascade, jobId, failure);
+		} catch (err) {
+			if (job !== null) {
+				const at = wallEpoch();
+				await _recordOutcome(jobs, 'fail', {
+					id: job.id, runId: job.runId, at, code: /** @type {any} */ (err)?.code || 'INTERNAL_ERROR',
+					failedSurfaces: failure.failedSurfaces, retryAt: at + _retryDelay(job.attempts)
+				});
+			}
+			throw _withJob(err, jobId);
+		}
+		const { surfaces, rowsAffected } = erased;
+		const at = wallEpoch();
+		if (job !== null) {
+			await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, at, rowsAffected, surfaces: { ...surfaces } });
+		}
+
+		// Optional erasure hook: receives a stable pseudonymous hash of the
+		// userId, the tenant, the cascade flag, and the counts.
+		// Caught-and-recorded: a throwing hook never aborts a completed erasure.
+		if (onForget) {
 			try {
-				erased = await _erase(userId, tenantId, cascade, jobId, failure);
+				// Shallow-copy surfaces so a hook that mutates the record cannot
+				// alter the value returned to the caller (the same object).
+				onForget({ userIdHash, tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
 			} catch (err) {
-				if (jobs !== null && jobId !== null) {
-					try {
-						await jobs.fail({ id: jobId, runId, at: wallEpoch(), code: /** @type {any} */ (err)?.code || 'INTERNAL_ERROR', failedSurfaces: failure.failedSurfaces });
-					} catch {
-						_reportJobUnrecorded(jobId, 'failed');
-					}
-				}
-				throw _withJob(err, jobId);
-			}
-			const { surfaces, rowsAffected } = erased;
-			const at = wallEpoch();
-			if (jobs !== null && jobId !== null) {
-				try {
-					await jobs.complete({ id: jobId, runId, at, rowsAffected, surfaces: { ...surfaces } });
-				} catch {
-					_reportJobUnrecorded(jobId, 'completed');
-				}
-			}
-
-			// Optional erasure hook: receives a stable pseudonymous hash of the
-			// userId, the tenant, the cascade flag, and the counts.
-			// Caught-and-recorded: a throwing hook never aborts a completed erasure.
-			if (onForget) {
-				try {
-					// Shallow-copy surfaces so a hook that mutates the record cannot
-					// alter the value returned to the caller (the same object).
-					onForget({ userIdHash, tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
-				} catch (err) {
-					if (_IS_DEV) console.error('[svelte-realtime] live.forget onForget hook threw (erasure already completed):', err);
-				}
-			}
-
-			return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
-		} finally {
-			if (jobId !== null && jobs !== null) {
-				const n = (_activeJobs.get(jobId) || 1) - 1;
-				if (n > 0) _activeJobs.set(jobId, n);
-				else _activeJobs.delete(jobId);
+				if (_IS_DEV) console.error('[svelte-realtime] live.forget onForget hook threw (erasure already completed):', err);
 			}
 		}
+
+		return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
 	} finally {
 		_exitInFlight();
 	}
+}
+
+/**
+ * Record a run's outcome. A store that throws, or answers false because the
+ * run no longer holds the lease, leaves the job unfinished; that is reported,
+ * never thrown, so the caller still gets the erasure's own result.
+ * @param {any} jobs @param {'complete' | 'fail'} method @param {any} outcome
+ */
+async function _recordOutcome(jobs, method, outcome) {
+	let recorded;
+	try {
+		recorded = await jobs[method](outcome);
+	} catch {
+		recorded = false;
+	}
+	if (recorded === false) _reportJobUnrecorded(outcome.id, method === 'complete' ? 'completed' : 'failed');
+}
+
+/**
+ * How long a failed job waits before it is due again: doubling from one second
+ * per attempt, at most an hour, so a job that keeps failing yields to others.
+ * @param {number} attempts
+ */
+function _retryDelay(attempts) {
+	const n = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 1;
+	return Math.min(_RETRY_BASE_MS * 2 ** Math.min(n - 1, 30), _RETRY_MAX_MS);
 }
 
 /**
@@ -608,6 +623,7 @@ function _publicJob(j) {
 		createdAt: Number(j.createdAt),
 		updatedAt: Number(j.updatedAt),
 		completedAt: typeof j.completedAt === 'number' ? j.completedAt : null,
+		retryAt: j.status === 'failed' && typeof j.retryAt === 'number' ? j.retryAt : null,
 		rowsAffected: typeof j.rowsAffected === 'number' ? j.rowsAffected : null,
 		error
 	};
@@ -637,11 +653,13 @@ export async function listForgetJobs(filter = {}) {
 }
 
 /**
- * Run unfinished erasure jobs again: failed ones, and pending ones whose run
- * ended without recording an outcome (a crash, a store outage). Oldest first,
- * at most `limit` (default 100) per call, or just the job named by `id`. A job
- * this process is still running is skipped. Each run is the full idempotent
- * cascade under the job's stored tenant and cascade options.
+ * Run unfinished erasure jobs again: failed ones whose retry time has come,
+ * and pending ones whose run ended without recording an outcome (a crash, a
+ * store outage) once its lease expired. Longest due first, at most `limit`
+ * (default 100) per call, or just the job named by `id`, which runs regardless
+ * of its retry time. Each run first claims the job's lease, so a job another
+ * run holds, in this process or another, is skipped. Each run is the full
+ * idempotent cascade under the job's stored tenant and cascade options.
  * @param {{ id?: string, limit?: number, onForget?: Function }} [opts]
  */
 export async function resumeForgetJobs(opts = {}) {
@@ -664,46 +682,49 @@ export async function resumeForgetJobs(opts = {}) {
 		ids = [id];
 	} else {
 		try {
-			const [failed, pending] = await Promise.all([jobs.list({ status: 'failed', limit }), jobs.list({ status: 'pending', limit })]);
-			ids = [...(Array.isArray(failed) ? failed : []), ...(Array.isArray(pending) ? pending : [])]
-				.sort((a, b) => Number(a.createdAt) - Number(b.createdAt))
-				.slice(0, limit)
-				.map((j) => String(j.id));
+			const due = await jobs.due({ at: wallEpoch(), limit });
+			ids = (Array.isArray(due) ? due : []).slice(0, limit).map((j) => String(j.id));
 		} catch {
 			throw new LiveError('FORGET_JOB_FAILED', 'resumeForgetJobs: the erasure job store could not be read');
 		}
 	}
 	for (const jobId of ids) {
 		out.total++;
-		if (_activeJobs.has(jobId)) {
-			out.results.push({ id: jobId, status: 'skipped' });
-			continue;
-		}
-		let intent;
+		const runId = randomUuid();
+		const at = wallEpoch();
+		let claim;
 		try {
-			intent = await jobs.intent(jobId);
+			claim = await jobs.claim({ id: jobId, runId, at, leaseUntil: at + _LEASE_MS });
 		} catch {
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code: 'FORGET_JOB_FAILED' });
 			continue;
 		}
-		if (!intent) {
+		if (!claim) {
 			out.results.push({ id: jobId, status: 'skipped' });
 			continue;
 		}
+		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true };
 		try {
-			const { userId, tenantId, cascade } = intent;
+			const { userId, tenantId, cascade } = claim;
 			if (typeof userId !== 'string' || userId.length === 0 || _validIdReason(userId, 'userId') !== null) {
 				throw _invalidJobRequest('resumeForgetJobs: the stored job has no valid user id');
 			}
 			const scope = tenantId == null ? null : _validTenantId(tenantId);
-			const userIdHash = typeof intent.userIdHash === 'string' ? intent.userIdHash : _hashUserId(userId, _forgetHashKey);
-			await _runErasure(jobs, jobId, { userId, userIdHash, tenantId: scope, cascade: cascade ?? true }, onForget);
+			const userIdHash = typeof claim.userIdHash === 'string' ? claim.userIdHash : _hashUserId(userId, _forgetHashKey);
+			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: cascade ?? true }, onForget);
 			out.completed++;
 			out.results.push({ id: jobId, status: 'completed' });
 		} catch (err) {
+			const code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
+			// A stored job this run cannot even start still releases its lease
+			// with a failure, so it stays listed and backs off like any other.
+			if (code === 'INVALID_REQUEST') {
+				const failedAt = wallEpoch();
+				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], retryAt: failedAt + _retryDelay(job.attempts) });
+			}
 			out.failed++;
-			out.results.push({ id: jobId, status: 'failed', code: String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR') });
+			out.results.push({ id: jobId, status: 'failed', code });
 		}
 	}
 	return out;

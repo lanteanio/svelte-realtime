@@ -4622,8 +4622,8 @@ export type ForgetJobStatus = 'pending' | 'failed' | 'completed';
 
 /**
  * A recorded erasure job as `listForgetJobs` returns it. It never carries the
- * user id: `id` and `userIdHash` are pseudonymous (keyed with the configured
- * `hashKey` when one is set, enumerable without it).
+ * user id: `id` is random and `userIdHash` pseudonymous (keyed with the
+ * configured `hashKey` when one is set, enumerable without it).
  */
 export interface ForgetJob {
 	/**
@@ -4635,9 +4635,9 @@ export interface ForgetJob {
 	userIdHash: string;
 	tenantId: string | null;
 	/**
-	 * `pending`: a run started and recorded no outcome yet (still running, or
-	 * its process died). `failed`: the last run failed. `completed`: every
-	 * surface confirmed; the stored user id is gone.
+	 * `pending`: a run holds or held the lease and recorded no outcome yet
+	 * (still running, or its process died). `failed`: the last run failed.
+	 * `completed`: every surface confirmed; the stored user id is gone.
 	 */
 	status: ForgetJobStatus;
 	/** Runs started, including the current one. */
@@ -4647,6 +4647,8 @@ export interface ForgetJob {
 	/** Wall-clock ms of the last change. */
 	updatedAt: number;
 	completedAt: number | null;
+	/** Wall-clock ms a failed job is due again; null unless `failed`. */
+	retryAt: number | null;
 	/** Rows removed by the completing run. */
 	rowsAffected: number | null;
 	/** The last failure, cleared on completion. Surface names only, never store errors. */
@@ -4655,8 +4657,9 @@ export interface ForgetJob {
 
 /** What `ForgetJobStore.begin` receives. */
 export interface ForgetJobIntent {
+	/** A new random job reference. */
 	id: string;
-	/** Identifies this run; `complete` and `fail` for any other run are ignored. */
+	/** The run that holds the lease from the start. */
 	runId: string;
 	userIdHash: string;
 	tenantId: string | null;
@@ -4666,55 +4669,76 @@ export interface ForgetJobIntent {
 	cascade: boolean | { crdt?: string[] };
 	/** Wall-clock ms. */
 	at: number;
+	/** Wall-clock ms the lease of `runId` ends. */
+	leaseUntil: number;
 }
 
-/** The resume input of an unfinished job. */
-export interface ForgetJobResumeInput {
+/** What a successful `ForgetJobStore.claim` resolves: the input of the new run. */
+export interface ForgetJobClaim {
 	userId: string;
 	userIdHash: string;
 	tenantId: string | null;
 	cascade: boolean | { crdt?: string[] };
+	/** `attempts` after the claim, counting the new run. */
+	attempts: number;
 }
 
 /**
  * Storage for erasure jobs. `createForgetJobStore()` is the in-memory
  * implementation; a store that must survive a process restart persists the
- * same records. Every method may return a promise.
+ * same records (docs/erasure-jobs.md has the full contract). Every method may
+ * return a promise and must be atomic per job `id`. A job is unfinished until
+ * `completed`; at any time at most one run holds its lease, and `complete` and
+ * `fail` change nothing unless their `runId` holds it. Times are the
+ * wall-clock values the caller passes.
  */
 export interface ForgetJobStore {
 	/**
-	 * Record a run as started, durably, before resolving. Creates the job as
-	 * `pending` with `attempts: 1`, or reopens an existing job of any status
-	 * as `pending` under the new `runId`, increments `attempts`, replaces
-	 * `userId` and `cascade`, keeps `createdAt` and `error`, and clears
-	 * `completedAt` and `rowsAffected`. Atomic per `id`.
+	 * Create a new `pending` job with `attempts: 1` whose lease `runId` holds
+	 * until `leaseUntil`, durably, before resolving. Rejects when `id` exists.
 	 */
 	begin(intent: ForgetJobIntent): void | Promise<void>;
 	/**
-	 * Mark the job `completed` (sets `completedAt`, `updatedAt` and
-	 * `rowsAffected`, clears `error`) and delete its `userId` and `cascade`.
-	 * A no-op unless `runId` is the job's current run and it is not completed.
+	 * Take the lease of an unfinished job for `runId` until `leaseUntil`,
+	 * unless another run's lease is still running at `at`. On success sets
+	 * `pending`, increments `attempts`, sets `updatedAt` and resolves the run's
+	 * input; otherwise (unknown, completed, leased) resolves null and changes
+	 * nothing. A failed job is claimable before its `retryAt`.
 	 */
-	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): void | Promise<void>;
+	claim(req: { id: string; runId: string; at: number; leaseUntil: number }): ForgetJobClaim | null | Promise<ForgetJobClaim | null>;
 	/**
-	 * Mark the job `failed` with `error: { code, failedSurfaces }` and
-	 * `updatedAt`, keeping `userId` and `cascade`. A no-op unless `runId` is
-	 * the job's current run and it is not completed.
+	 * When `runId` holds the lease: mark the job `completed` (sets
+	 * `completedAt`, `updatedAt` and `rowsAffected`, clears `error`), release
+	 * the lease, delete `userId` and `cascade`, and resolve true. Otherwise
+	 * resolve false.
 	 */
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[] }): void | Promise<void>;
+	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): boolean | Promise<boolean>;
+	/**
+	 * When `runId` holds the lease: mark the job `failed` with
+	 * `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, release the
+	 * lease, keep `userId` and `cascade`, and resolve true. Otherwise resolve
+	 * false.
+	 */
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; retryAt: number }): boolean | Promise<boolean>;
 	/** Jobs oldest `createdAt` first, optionally one status, at most `limit` (default 100). */
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[] | Promise<ForgetJob[]>;
-	/** The resume input of an unfinished job, or null when it is unknown or completed. */
-	intent(id: string): ForgetJobResumeInput | null | Promise<ForgetJobResumeInput | null>;
+	/**
+	 * Unfinished jobs claimable at `at`: failed jobs whose `retryAt` has
+	 * passed and pending jobs whose lease has ended. Ordered by the time each
+	 * became due (`retryAt` or the lease end), earliest first, then
+	 * `createdAt`; at most `limit`.
+	 */
+	due(req: { at: number; limit: number }): ForgetJob[] | Promise<ForgetJob[]>;
 }
 
 /** The in-memory job store; every method is synchronous. */
 export interface MemoryForgetJobStore extends ForgetJobStore {
 	begin(intent: ForgetJobIntent): void;
-	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): void;
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[] }): void;
+	claim(req: { id: string; runId: string; at: number; leaseUntil: number }): ForgetJobClaim | null;
+	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number; surfaces: Record<string, number> }): boolean;
+	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; retryAt: number }): boolean;
 	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[];
-	intent(id: string): ForgetJobResumeInput | null;
+	due(req: { at: number; limit: number }): ForgetJob[];
 	clear(): void;
 }
 
@@ -4734,12 +4758,16 @@ export function createForgetJobStore(options?: { max?: number }): MemoryForgetJo
 export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
 
 /**
- * Run unfinished erasure jobs again: `failed` jobs and `pending` jobs whose
- * run ended without an outcome, oldest first, at most `limit` (1 to 1000,
- * default 100), or only the job `id`. Each run is the full idempotent
- * cascade with the job's stored tenant and cascade; `onForget` fires for each
- * completed job. A job still running in this process, or one with nothing left
- * to do, reports `skipped`. Resolves zero counts without a job store.
+ * Run unfinished erasure jobs again: `failed` jobs whose `retryAt` has come
+ * and `pending` jobs whose run ended without an outcome once its lease
+ * expired, longest due first, at most `limit` (1 to 1000, default 100), or
+ * only the job `id`, regardless of its retry time. A failed run makes the job
+ * due again after a delay that doubles per attempt from one second up to an
+ * hour. Each run claims the job's lease first; a job another run holds, in
+ * any process, or one with nothing left to do, reports `skipped`. Each run is
+ * the full idempotent cascade with the job's stored tenant and cascade;
+ * `onForget` fires for each completed job. Resolves zero counts without a job
+ * store.
  */
 export function resumeForgetJobs(opts?: {
 	id?: string;

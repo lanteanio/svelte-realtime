@@ -765,9 +765,9 @@ Structured events emitted through `emitOperationalEvent()` go to the sink instal
 - Severity: warn
 - Delivered to: operational event sink
 - Message patterns: <code>The erasure job store could not record an erasure outcome; the job stays unfinished until resumeForgetJobs runs it again.</code>
-- Cause: An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw or rejected when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.
+- Cause: An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job lease) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.
 - Consequence: The erasure result returned to the caller is accurate, but the job stays unfinished in the store and still holds the user id until a later run completes it.
-- Automatic recovery: None. The job is run again by the next `resumeForgetJobs()` call, which repeats the idempotent cascade.
+- Automatic recovery: None. The job becomes due again when the lease of its run ends, and the next `resumeForgetJobs()` call after that repeats the idempotent cascade.
 - Next action: Fix the job store, then call `resumeForgetJobs()` so the job reaches a recorded outcome.
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 

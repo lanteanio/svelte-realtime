@@ -10,8 +10,11 @@ import {
 	_resetForget, setOperationalEventSink
 } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 const KEY = 'k'.repeat(32);
+/** Move the wall clock past every lease and retry delay, as a later resume sees it. */
+const later = () => setRuntimeEnv({ clock: { wallEpoch: () => Date.now() + 24 * 3_600_000 } });
 const hmac = (value) => createHmac('sha256', KEY).update(value).digest('hex').slice(0, 32);
 const sha = (value) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 
@@ -45,6 +48,7 @@ afterEach(() => {
 	_resetForget();
 	_pushRegistry.clear();
 	restoreSink();
+	resetRuntimeEnv();
 });
 
 describe('erasure jobs', () => {
@@ -60,6 +64,7 @@ describe('erasure jobs', () => {
 		// A new process: fresh in-memory state, the same job store and database.
 		_resetForget();
 		configureForget({ store: durable(), jobs });
+		later();
 		const pending = await listForgetJobs({ status: 'pending' });
 		expect(pending).toHaveLength(1);
 		expect(pending[0]).toMatchObject({ userIdHash: sha('alice'), tenantId: null, attempts: 1 });
@@ -74,8 +79,8 @@ describe('erasure jobs', () => {
 		const [done] = await listForgetJobs();
 		expect(done).toMatchObject({ status: 'completed', attempts: 2, rowsAffected: 2, error: null });
 		expect(typeof done.completedAt).toBe('number');
-		// A completed job keeps only the pseudonymous reference.
-		expect(await jobs.intent(done.id)).toBeNull();
+		// A completed job keeps only the pseudonymous reference and cannot be claimed.
+		expect(await jobs.claim({ id: done.id, runId: 'r', at: Date.now() + 1e9, leaseUntil: Date.now() + 2e9 })).toBeNull();
 		expect(await resumeForgetJobs()).toEqual({ total: 0, completed: 0, failed: 0, results: [] });
 	});
 
@@ -106,7 +111,7 @@ describe('erasure jobs', () => {
 		const failed = await listForgetJobs({ status: 'failed' });
 		expect(failed).toEqual([{
 			id, userIdHash: hmac(user), tenantId: 'acme', status: 'failed', attempts: 1,
-			createdAt: expect.any(Number), updatedAt: expect.any(Number), completedAt: null, rowsAffected: null,
+			createdAt: expect.any(Number), updatedAt: expect.any(Number), completedAt: null, retryAt: expect.any(Number), rowsAffected: null,
 			error: { code: 'FORGET_STORE_FAILED', failedSurfaces: ['durable'] }
 		}]);
 		const incomplete = events.filter((e) => e.event === 'forget.incomplete');
@@ -123,6 +128,7 @@ describe('erasure jobs', () => {
 	it('keeps a job failed when the resumed run fails again', async () => {
 		configureForget({ store: partial(), jobs: true });
 		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		later();
 		const res = await resumeForgetJobs();
 		expect(res).toMatchObject({ total: 1, completed: 0, failed: 1, results: [{ status: 'failed', code: 'FORGET_STORE_FAILED' }] });
 		expect((await listForgetJobs({ status: 'failed' }))[0].attempts).toBe(2);
@@ -143,6 +149,9 @@ describe('erasure jobs', () => {
 		expect(events.filter((e) => e.event === 'forget.job-unrecorded')).toHaveLength(1);
 		expect((await listForgetJobs())[0].status).toBe('pending');
 		configureForget({ jobs });
+		// Its run still holds the lease until it expires.
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		later();
 		expect(await resumeForgetJobs()).toMatchObject({ completed: 1 });
 	});
 
@@ -170,24 +179,42 @@ describe('erasure jobs', () => {
 });
 
 describe('createForgetJobStore', () => {
-	const intent = (over = {}) => ({ id: 'j1', runId: 'r1', userIdHash: 'h', tenantId: null, userId: 'alice', cascade: { crdt: ['doc'] }, at: 10, ...over });
+	const intent = (over = {}) => ({ id: 'j1', runId: 'r1', userIdHash: 'h', tenantId: null, userId: 'alice', cascade: { crdt: ['doc'] }, at: 10, leaseUntil: 100, ...over });
+	const claim = (over = {}) => ({ id: 'j1', runId: 'r2', at: 100, leaseUntil: 200, ...over });
 
-	it('keeps the intent until completion and ignores outcomes of a superseded run', () => {
+	it('leases a job to one run at a time and fences outcomes of other runs', () => {
 		const s = createForgetJobStore();
 		const cascade = { crdt: ['doc'] };
 		s.begin(intent({ cascade }));
 		cascade.crdt.push('mutated');
-		expect(s.intent('j1')).toEqual({ userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] } });
-		s.begin(intent({ runId: 'r2', at: 20 }));
-		s.complete({ id: 'j1', runId: 'r1', at: 30, rowsAffected: 1, surfaces: {} }); // stale run
-		expect(s.list()[0]).toMatchObject({ status: 'pending', attempts: 2, createdAt: 10, updatedAt: 20 });
-		s.fail({ id: 'j1', runId: 'r2', at: 40, code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'] });
-		expect(s.list({ status: 'failed' })).toHaveLength(1);
-		s.begin(intent({ runId: 'r3', at: 50 }));
-		s.complete({ id: 'j1', runId: 'r3', at: 60, rowsAffected: 2, surfaces: {} });
-		expect(s.list()[0]).toMatchObject({ status: 'completed', attempts: 3, completedAt: 60, rowsAffected: 2, error: null });
-		expect(s.intent('j1')).toBeNull();
+		expect(() => s.begin(intent())).toThrow();
+		// The first run holds the lease until 100.
+		expect(s.claim(claim({ at: 99 }))).toBeNull();
+		expect(s.due({ at: 99, limit: 10 })).toEqual([]);
+		expect(s.due({ at: 100, limit: 10 }).map((j) => j.id)).toEqual(['j1']);
+		// Its lease expired: another run takes over and the late run is fenced.
+		expect(s.claim(claim())).toEqual({ userId: 'alice', userIdHash: 'h', tenantId: null, cascade: { crdt: ['doc'] }, attempts: 2 });
+		expect(s.complete({ id: 'j1', runId: 'r1', at: 150, rowsAffected: 1, surfaces: {} })).toBe(false);
+		expect(s.fail({ id: 'j1', runId: 'r1', at: 150, code: 'X', failedSurfaces: [], retryAt: 151 })).toBe(false);
+		expect(s.list()[0]).toMatchObject({ status: 'pending', attempts: 2, createdAt: 10, updatedAt: 100 });
+		expect(s.fail({ id: 'j1', runId: 'r2', at: 160, code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'], retryAt: 300 })).toBe(true);
+		expect(s.list({ status: 'failed' })[0]).toMatchObject({ retryAt: 300, error: { code: 'FORGET_INCOMPLETE', failedSurfaces: ['presence'] } });
+		expect(s.due({ at: 299, limit: 10 })).toEqual([]);
+		// A failed job is claimable by id before its retry time.
+		expect(s.claim(claim({ runId: 'r3', at: 170, leaseUntil: 400 }))).toMatchObject({ attempts: 3 });
+		expect(s.complete({ id: 'j1', runId: 'r3', at: 180, rowsAffected: 2, surfaces: {} })).toBe(true);
+		expect(s.list()[0]).toMatchObject({ status: 'completed', attempts: 3, completedAt: 180, retryAt: null, rowsAffected: 2, error: null });
+		expect(s.claim(claim({ runId: 'r4', at: 1000, leaseUntil: 2000 }))).toBeNull();
 		expect(JSON.stringify(s.list())).not.toContain('alice');
+	});
+
+	it('orders due jobs by how long they have been due', () => {
+		const s = createForgetJobStore();
+		s.begin(intent({ id: 'a', at: 1, leaseUntil: 50 }));
+		s.begin(intent({ id: 'b', at: 2, leaseUntil: 20 }));
+		s.begin(intent({ id: 'c', at: 3, leaseUntil: 500 }));
+		expect(s.due({ at: 100, limit: 10 }).map((j) => j.id)).toEqual(['b', 'a']);
+		expect(s.due({ at: 100, limit: 1 }).map((j) => j.id)).toEqual(['b']);
 	});
 
 	it('lists oldest first and bounds retained completed jobs, never pending ones', () => {
@@ -232,5 +259,67 @@ describe('erasure job identity', () => {
 		expect(first.details).toBeUndefined();
 		expect(JSON.stringify(first)).not.toContain(first.job);
 		expect(Object.keys(first)).not.toContain('job');
+	});
+});
+
+describe('resuming erasure jobs across replicas', () => {
+	afterEach(() => { resetRuntimeEnv(); vi.resetModules(); });
+
+	it('lets only one replica run a job at a time', async () => {
+		const jobs = createForgetJobStore();
+		configureForget({ store: partial(), jobs });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		setRuntimeEnv({ clock: { wallEpoch: () => Date.now() + 3_600_000 } }); // past any retry delay
+
+		// A second replica: its own module instance, the same job store.
+		vi.resetModules();
+		const other = await import('../src/server.js');
+		let release;
+		const gate = new Promise((r) => { release = r; });
+		let purges = 0;
+		const blocking = { async purgeUser() { purges++; await gate; return 0; } };
+		configureForget({ store: blocking, jobs });
+		other.configureForget({ store: blocking, jobs });
+
+		const first = resumeForgetJobs();
+		await vi.waitFor(() => expect(purges).toBe(1));
+		const [held] = await other.listForgetJobs({ status: 'pending' });
+		const second = Promise.all([other.resumeForgetJobs(), other.resumeForgetJobs({ id: held.id })]);
+		await new Promise((r) => setTimeout(r, 20));
+		release();
+		expect(purges).toBe(1);
+		expect(await second).toEqual([
+			{ total: 0, completed: 0, failed: 0, results: [] },
+			{ total: 1, completed: 0, failed: 0, results: [{ id: held.id, status: 'skipped' }] }
+		]);
+		expect(await first).toMatchObject({ completed: 1 });
+		other.configureForget(null);
+	});
+
+	it('backs off a failing job so newer due jobs run first', async () => {
+		let t = 1_000_000;
+		setRuntimeEnv({ clock: { wallEpoch: () => t } });
+		let bobFailures = 1;
+		const store = { async purgeUser(_t, userId) {
+			if (userId === 'alice' || bobFailures-- > 0) throw new Error('offline');
+			return 0;
+		} };
+		configureForget({ store, jobs: true });
+		await live.forget('alice', { tenantId: null }).catch(() => {});
+		t += 10;
+		await live.forget('bob', { tenantId: null }).catch(() => {});
+
+		// Nothing is due until its retry delay has passed.
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		const [alice, bob] = await listForgetJobs({ status: 'failed' });
+		expect(alice.retryAt).toBeGreaterThan(t);
+
+		t += 60_000;
+		expect((await resumeForgetJobs({ limit: 1 })).results).toEqual([{ id: alice.id, status: 'failed', code: 'FORGET_STORE_FAILED' }]);
+		t += 1;
+		expect((await resumeForgetJobs({ limit: 1 })).results).toEqual([{ id: bob.id, status: 'completed' }]);
+		const after = (await listForgetJobs({ status: 'failed' }))[0];
+		expect(after).toMatchObject({ id: alice.id, attempts: 2 });
+		expect(after.retryAt - after.updatedAt).toBeGreaterThan(alice.retryAt - alice.updatedAt);
 	});
 });

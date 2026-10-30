@@ -338,9 +338,9 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant, or `resumeForgetJobs()` with a job store.'
 	}),
 	'forget.job-unrecorded': Object.freeze({
-		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw or rejected when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',
+		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job lease) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',
 		consequence: 'The erasure result returned to the caller is accurate, but the job stays unfinished in the store and still holds the user id until a later run completes it.',
-		automaticRecovery: 'None. The job is run again by the next `resumeForgetJobs()` call, which repeats the idempotent cascade.',
+		automaticRecovery: 'None. The job becomes due again when the lease of its run ends, and the next `resumeForgetJobs()` call after that repeats the idempotent cascade.',
 		nextAction: 'Fix the job store, then call `resumeForgetJobs()` so the job reaches a recorded outcome.'
 	}),
 	'forget.owner-succession-unannounced': Object.freeze({
