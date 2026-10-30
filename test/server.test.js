@@ -12335,7 +12335,8 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
 		expect(response.data).toBe(dbEvents);
-		expect(response.seq).toBe(60);   // last event's seq wins
+		// The cursor stays in the buffer's numbering, read before the bridge ran.
+		expect(response.seq).toBe(100);
 		expect(fromSeqCalls).toEqual([3]);
 	});
 
@@ -12460,7 +12461,8 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
 		expect(response.data).toBe(dbEvents);
-		expect(response.seq).toBe(12);
+		// No buffer, so no cursor: the events' own numbers do not become one.
+		expect(response.seq).toBeUndefined();
 	});
 
 	it('legacy version-delta (unchanged + diff) still composes alongside fromSeq', async () => {

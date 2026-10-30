@@ -329,7 +329,7 @@ export const addTodo = live(async (ctx, text) => {
 {/each}
 ```
 
-**Ordering writes to one row.** By default crud is last-writer-by-arrival: each client applies `created`, `updated` and `deleted` in the order its socket delivers them. Two replicas publishing absolute values for one row can reach two clients in opposite orders, and a client that receives the older value last keeps it. Live events are applied in the order they arrive, and an event delivered twice is applied twice; `seq` only moves the resume cursor, which never goes backwards. Name a monotonic field the publisher sets, such as a counter from the shared store, with `rowVersion: 'rev'`: a `created` or `updated` row whose version is not greater than the held row's is dropped, and a `deleted` below it is ignored. Versions compare as numbers or as strings; strings compare character by character, so `'10'` sorts before `'9'`: zero-pad string versions to a fixed width (`'0009'`, `'0010'`) or use numbers. A row without a comparable version applies as before, and a deleted row's version goes with it, so a `created` repeated after its `deleted` brings the row back. A wall-clock timestamp is not enough: two writes a client must order often share a millisecond. `set` and `latest` have no such option: a `set` stream shows the value that arrived last, and a `latest` stream lists a repeated event again.
+**Ordering writes to one row.** By default crud is last-writer-by-arrival: each client applies `created`, `updated` and `deleted` in the order its socket delivers them. Two replicas publishing absolute values for one row can reach two clients in opposite orders, and a client that receives the older value last keeps it. Live events are applied in the order they arrive, and an event delivered twice is applied twice; `seq` only moves the resume cursor, which keeps the highest sequence seen until the next subscribe answer sets it. An event that arrives after a later one and is still in flight when the socket drops is therefore skipped by the next resume. Name a monotonic field the publisher sets, such as a counter from the shared store, with `rowVersion: 'rev'`: a `created` or `updated` row whose version is not greater than the held row's is dropped, and a `deleted` below it is ignored. Versions compare as numbers or as strings; strings compare character by character, so `'10'` sorts before `'9'`: zero-pad string versions to a fixed width (`'0009'`, `'0010'`) or use numbers. A row without a comparable version applies as before, and a deleted row's version goes with it, so a `created` repeated after its `deleted` brings the row back. A wall-clock timestamp is not enough: two writes a client must order often share a millisecond. `set` and `latest` have no such option: a `set` stream shows the value that arrived last, and a `latest` stream lists a repeated event again.
 
 ### latest
 
@@ -4670,7 +4670,7 @@ How it works:
 
 ### Three-tier reconnect with `delta.fromSeq`
 
-For seq-based reconnects where the bounded replay buffer cannot satisfy the gap (the client's `lastSeenSeq` is older than the oldest entry in the buffer), `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
+For seq-based reconnects where the bounded replay buffer cannot satisfy the gap (the client's `lastSeenSeq` is older than the oldest entry in the buffer), `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. `sinceSeq` is the client's cursor in the replay buffer's numbering, and the hook must return every event published after that point, so the store records with each event the buffer sequence it was published under (or something it can translate the cursor to). The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
@@ -4682,7 +4682,7 @@ export const auditFeed = live.stream(
     replay: true,
     delta: {
       fromSeq: async (sinceSeq) => {
-        const events = await db.auditEvents.where('seq', '>', sinceSeq).orderBy('seq').limit(500);
+        const events = await db.auditEvents.where('bufferSeq', '>', sinceSeq).orderBy('bufferSeq').limit(500);
         if (events.length === 0) return [];        // nothing missed, no-op
         if (events.length === 500) return null;     // too many -> fall through to full rehydrate
         return events;
@@ -4692,7 +4692,7 @@ export const auditFeed = live.stream(
 );
 ```
 
-Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.fromSeq(clientSeq)` (this hook) -> full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, falls through to the next step. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check, since the application numbers these events; when they carry a `seq`, the last one becomes the resume cursor.
+Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.fromSeq(clientSeq)` (this hook) -> full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, falls through to the next step. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. The client's cursor stays in the buffer's numbering: the answer carries the buffer sequence the server read before calling the hook, and a `seq` on the returned events is ignored. Events published after that read reach the client live as well, so one can arrive twice; `rowVersion` absorbs that on crud.
 
 ### Replay
 

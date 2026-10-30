@@ -871,8 +871,9 @@ export interface StreamOptions extends LiveOptions {
 	 *   3. Full rehydrate via the loader (always safe).
 	 *
 	 *   Returning `null`/`undefined` falls through to rehydrate. Returning
-	 *   `[]` means "nothing missed" (no-op for the client). Each event
-	 *   should carry a `seq` field so the client's `_lastSeq` advances.
+	 *   `[]` means "nothing missed" (no-op for the client). `clientSeq` is in
+	 *   the replay buffer's numbering, and the hook returns every event
+	 *   published after it; the client's cursor stays in that numbering.
 	 */
 	delta?: {
 		/** Return the current version/hash of the data. Must be fast. */
@@ -881,15 +882,16 @@ export interface StreamOptions extends LiveOptions {
 		diff?(sinceVersion: any): any[] | Promise<any[] | null> | null;
 		/**
 		 * Bridge tier for seq-based reconnect. Called when the replay buffer
-		 * cannot satisfy a gap. Returns the events the client missed, or
+		 * cannot satisfy a gap, with the client's cursor in the buffer's
+		 * numbering. Returns every event published after it, or
 		 * `null`/`undefined` to fall through to full rehydrate.
 		 *
 		 * @example
 		 * ```js
 		 * delta: {
 		 *   fromSeq: async (sinceSeq) => db.audit
-		 *     .where('seq', '>', sinceSeq)
-		 *     .orderBy('seq', 'asc')
+		 *     .where('bufferSeq', '>', sinceSeq)
+		 *     .orderBy('bufferSeq', 'asc')
 		 *     .get()
 		 * }
 		 * ```
