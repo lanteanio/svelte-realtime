@@ -8,7 +8,7 @@ import { _ensureHealthSubscription } from './health.js';
 import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _setRetryAt, _onOfflineReset } from './offline.js';
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, idempotencyBackoff?: number, idempotencyHeld?: number, restored?: boolean }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, idempotencyBackoff?: number, idempotencyHeld?: number, idempotencyLastTry?: boolean, restored?: boolean }} OfflineEntry
  */
 
 const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
@@ -20,41 +20,70 @@ const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
 // A refusal that names no wait backs off from one second, doubling up to this.
 const _IDEMPOTENCY_BACKOFF_MAX_MS = 300000;
 
+// A wait cut short by the retention retries this long before it ends, so a
+// timer that fires late (a background tab) still finds the call in it.
+const _LAST_TRY_MARGIN_MS = 1000;
+
 /** A queued call set aside until its `retryAt`. */
 const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
+
+/**
+ * Whether a queued call is past its retention at `at`.
+ * @param {OfflineEntry} entry @param {number} at @param {number} maxAge
+ */
+const _expiredAt = (entry, at, maxAge) => (maxAge > 0 && at - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= at);
+
+/**
+ * The last moment a queued call is still within its retention.
+ * @param {OfflineEntry} entry @param {number} maxAge
+ */
+const _lastLegalAt = (entry, maxAge) => Math.min(maxAge > 0 ? entry.queuedAt + maxAge : Infinity, entry.expiresAt !== undefined ? entry.expiresAt - 1 : Infinity);
 
 // The longest delay a timer can take; a later drain re-arms for the rest.
 const _MAX_TIMER_MS = 2147483647;
 
-/** @type {{ handle: any, at: number } | null} The one pending re-drain of the queue. */
+/** @type {{ handle: any, at: number, early: boolean } | null} The one pending re-drain of the queue. */
 let _redrain = null;
 
 /**
- * No re-drain of `scope` before `at` (wall ms): the latest backoff or server
- * hint a refusal asked the queue head to wait. A set-aside call that comes due
- * earlier waits for it too, so the head is never retried early.
+ * No full re-drain of `scope` before `at` (wall ms): the latest backoff or
+ * server hint a refusal asked the queue head to wait. Until then a drain
+ * replays only set-aside calls that are due, so the head is never retried
+ * early, and a wake comes sooner only for a set-aside call that would expire
+ * by then.
  * @type {{ scope: any, at: number }}
  */
 let _redrainNotBefore = { scope: null, at: 0 };
 
+/** @param {any} scope */
+const _floorOf = (scope) => _redrainNotBefore.scope === scope ? _redrainNotBefore.at : 0;
+
 /**
- * Drain the current queue again after `delay` ms (no sooner than the latest
- * backoff), unless a pending re-drain comes sooner. Only while connected: the
- * next open drains anyway.
- * @param {number} delay
+ * Whether a set-aside call due by `at` would expire before `floorAt`, the end
+ * of the latest backoff: it may go up ahead of the held head.
+ * @param {OfflineEntry} entry @param {number} at @param {number} floorAt
  */
-function _scheduleRedrain(delay) {
+const _urgent = (entry, at, floorAt) => entry.retryAt !== undefined && entry.retryAt <= at && entry.retryAt < floorAt && _expiredAt(entry, floorAt, clientState.config.offline?.maxAge || 0);
+
+/**
+ * Drain the current queue again after `delay` ms, unless a pending re-drain
+ * comes sooner. No sooner than the latest backoff unless `early`. Only while
+ * connected: the next open drains anyway.
+ * @param {number} delay @param {boolean} [early]
+ */
+function _scheduleRedrain(delay, early = false) {
 	if (clientState.isOffline || clientState.terminated) return;
-	const floor = _redrainNotBefore.scope === _offlineScope() ? _redrainNotBefore.at : 0;
-	const at = Math.max(now() + delay, floor);
+	const floor = _floorOf(_offlineScope());
+	const at = Math.max(now() + delay, early ? 0 : floor);
 	delay = at - now();
 	if (_redrain !== null) {
 		// A wake armed before the latest backoff moves out to its end.
-		if (_redrain.at <= at && _redrain.at >= floor) return;
+		if (_redrain.at <= at && (_redrain.early || _redrain.at >= floor)) return;
 		clearTimer(_redrain.handle);
 	}
-	_redrain = { at, handle: setTimer(() => {
+	_redrain = { at, early, handle: setTimer(() => {
 		_redrain = null;
+		if (_redrainNotBefore.at <= now()) _redrainNotBefore = { scope: null, at: 0 };
 		void _drainOfflineQueue();
 	}, Math.min(_MAX_TIMER_MS, delay)) };
 }
@@ -230,7 +259,12 @@ async function _drainOfflineQueue() {
 	if (_replayingScope === scope) return;
 	_replayingScope = scope;
 	_startOfflineDrain(scope);
-	let again = false, retryIdempotency = false, retryDelay = 1000, reachedQueue = false;
+	let again = false, retryIdempotency = false, reachedQueue = false;
+	// Calls an idempotency refusal holds the queue for, with when they were
+	// refused, and when the last of their waits ends.
+	/** @type {Map<OfflineEntry, number>} */
+	const held = new Map();
+	let heldUntil = 0;
 	try {
 		await _offlineReady();
 		if (scope !== _offlineScope()) return;
@@ -239,7 +273,12 @@ async function _drainOfflineQueue() {
 		// drains.
 		if (closed() || clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
 		const readyAt = now();
-		if (!_offlineQueue.some(entry => !_isHeldAfterClose(entry) && !_waiting(entry, readyAt))) return;
+		// Before the latest backoff ends only set-aside calls that are due and
+		// would expire by then go up: the held head and the rest wait for it.
+		const floorAt = _floorOf(scope);
+		const early = readyAt < floorAt;
+		const ready = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => !_isHeldAfterClose(entry) && (early ? _urgent(entry, at, floorAt) : !_waiting(entry, at));
+		if (!_offlineQueue.some(entry => ready(entry, readyAt))) return;
 		_setUploading(true);
 		if (scope !== _offlineScope()) return;
 
@@ -250,7 +289,7 @@ async function _drainOfflineQueue() {
 		const maxAge = offlineOpts?.maxAge || 0;
 		const nowMs = now();
 		// Whether a call is past its retention at `at`.
-		const expiredAt = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => (maxAge > 0 && at - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= at);
+		const expiredAt = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => _expiredAt(entry, at, maxAge);
 
 		// Whether the batch went up in order with nothing failing (a clean
 		// drain closes the gap), and the lowest seq that failed in it: a
@@ -260,6 +299,8 @@ async function _drainOfflineQueue() {
 		const batch = _batchState();
 		let clean = batch.clean;
 		let lowestFailedSeq = batch.failedSeq;
+		// A call that goes up ahead of one still held back leaves a hole too.
+		let heldBackSeq = Infinity;
 		_beginBatch();
 		if (scope !== _offlineScope()) return;
 		// The connection went away during the drain: nothing more is sent.
@@ -268,8 +309,6 @@ async function _drainOfflineQueue() {
 		const settled = new Set();
 		/** @type {Set<OfflineEntry>} Calls set aside until their retryAt; still queued. */
 		const deferred = new Set();
-		/** @type {Map<OfflineEntry, number>} Calls an idempotency refusal holds the queue for, and when. */
-		const held = new Map();
 		/**
 		 * The path and args a replay function gave a call in place of its own.
 		 * @type {Map<OfflineEntry, { path: string, args: any[] }>}
@@ -279,7 +318,7 @@ async function _drainOfflineQueue() {
 		/** @param {OfflineEntry} entry @param {any} result */
 		function settleOk(entry, result) {
 			settled.add(entry);
-			const hole = lowestFailedSeq < (entry.seq ?? 0);
+			const hole = Math.min(lowestFailedSeq, heldBackSeq) < (entry.seq ?? 0);
 			if (hole) clean = false;
 			_settlePersist(entry, true, hole);
 			entry.resolve(result);
@@ -288,26 +327,10 @@ async function _drainOfflineQueue() {
 		/**
 		 * Set a call aside: reported like a failure and counted as a hole in the
 		 * upload order, but kept with its stored copy and pending caller.
-		 * @param {OfflineEntry} entry @param {any} err @param {number} wait
-		 * @param {boolean} hinted Whether the server named the wait.
+		 * @param {OfflineEntry} entry @param {any} err @param {number} retryAt
 		 */
-		function defer(entry, err, wait, hinted) {
+		function defer(entry, err, retryAt) {
 			if (scope !== _offlineScope()) return;
-			const at = now();
-			let retryAt = at + wait;
-			if (expiredAt(entry, retryAt)) {
-				// The client's own backoff gets one last try within the retention;
-				// a server that names a later time can only see it expire.
-				const last = Math.min(maxAge > 0 ? entry.queuedAt + maxAge : Infinity, entry.expiresAt !== undefined ? entry.expiresAt - 1 : Infinity);
-				if (hinted || last <= at) {
-					/** @type {any} */
-					const stale = new RpcError('STALE', hinted ? 'Offline mutation expired: the server asked to retry it after its retention ends' : 'Offline mutation expired');
-					stale.cause = err;
-					settleFail(entry, stale);
-					return;
-				}
-				retryAt = last;
-			}
 			deferred.add(entry);
 			clean = false;
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
@@ -376,17 +399,33 @@ async function _drainOfflineQueue() {
 						let wait;
 						if (hinted) wait = Math.max(1000, err.retryAfter);
 						else wait = entry.idempotencyBackoff = entry.idempotencyBackoff ? Math.min(entry.idempotencyBackoff * 2, _IDEMPOTENCY_BACKOFF_MAX_MS) : 1000;
+						const refusedAt = now();
+						if (expiredAt(entry, refusedAt + wait)) {
+							// Past its retention by then. A server that names that time
+							// can only see it expire; the client's own wait (its backoff,
+							// or the one-second minimum on a hint) is cut to one last try.
+							const serverLate = hinted && expiredAt(entry, refusedAt + err.retryAfter);
+							if (serverLate || entry.idempotencyLastTry || expiredAt(entry, refusedAt)) {
+								/** @type {any} */
+								const stale = new RpcError('STALE', serverLate ? 'Offline mutation expired: the server asked to retry it after its retention ends' : 'Offline mutation expired');
+								stale.cause = err;
+								settleFail(entry, stale);
+								return;
+							}
+							entry.idempotencyLastTry = true;
+							wait = Math.max(0, _lastLegalAt(entry, maxAge) - _LAST_TRY_MARGIN_MS - refusedAt);
+						}
 						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS || (entry.idempotencyHeld || 0) + wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
 							entry.idempotencyHeld = 0;
-							defer(entry, err, wait, hinted);
+							defer(entry, err, refusedAt + wait);
 							return;
 						}
-						// Held for the drain's wait once every refusal is in: with
-						// concurrent replay that is the longest of them.
-						held.set(entry, now());
+						// The queue waits for the last of the waits of the calls it
+						// holds, and for the rest of the drain.
+						held.set(entry, refusedAt);
+						heldUntil = Math.max(heldUntil, refusedAt + wait);
 						cut = true;
 						retryIdempotency = true;
-						retryDelay = Math.max(retryDelay, wait);
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
@@ -433,7 +472,8 @@ async function _drainOfflineQueue() {
 		const expired = (/** @type {OfflineEntry} */ entry) => expiredAt(entry, nowMs);
 		// A call set aside stays queued until it is due, unless it expired.
 		reachedQueue = true;
-		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry) && (!_waiting(entry, nowMs) || expired(entry))));
+		const captured = new Set(_offlineQueue.filter(entry => ready(entry, nowMs) || (!_isHeldAfterClose(entry) && expired(entry))));
+		if (early) for (const entry of _offlineQueue) if (!captured.has(entry)) heldBackSeq = Math.min(heldBackSeq, entry.seq ?? 0);
 		for (const entry of captured) {
 			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
@@ -574,10 +614,6 @@ async function _drainOfflineQueue() {
 			}
 		}
 
-		// Each held call waits for the rest of the drain, then for its longest
-		// wait: that is the time it holds the queue.
-		const heldUntil = now() + retryDelay;
-		for (const [entry, refusedAt] of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + heldUntil - refusedAt;
 		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (closed()) cut = true;
@@ -611,13 +647,14 @@ async function _drainOfflineQueue() {
 			// nothing left queued) closes any upload-order hole an EARLIER batch
 			// left; one that failed or left a hole keeps the gap visible for the
 			// app to act on. The next drain starts a new batch.
-			if (clean) _clearGapIfClean();
+			if (clean && !early) _clearGapIfClean();
 			if (scope !== _offlineScope()) return;
 			// Calls set aside go back to the front of the queue, in seq order.
 			if (deferred.size) _offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
 			// While any call is set aside the batch carries on: one going up after
 			// calls queued behind it is an upload-order hole no drain may close.
-			if (_offlineQueue.some(entry => entry.retryAt !== undefined)) _carryBatch(lowestFailedSeq);
+			// So does a drain that left the held head waiting.
+			if (early || _offlineQueue.some(entry => entry.retryAt !== undefined)) _carryBatch(lowestFailedSeq);
 			else _endBatch();
 		}
 	} finally {
@@ -628,26 +665,43 @@ async function _drainOfflineQueue() {
 		_replayingScope = null;
 		_bumpPending();
 		// Calls set aside: one that came due while this drain ran goes next, a
-		// later one when it is due. A drain that returned before reading the
+		// later one when it is due, and before the latest backoff ends only if
+		// it would expire by then. A drain that returned before reading the
 		// queue leaves due calls to the next open, so this never spins.
 		const at = now();
-		let due = false, wakeAt = Infinity;
+		let floorAt = _floorOf(scope);
+		let due = false;
 		for (const entry of _offlineQueue) {
-			if (entry.retryAt === undefined || _isHeldAfterClose(entry)) continue;
-			if (entry.retryAt <= at) due = true;
-			else if (entry.retryAt < wakeAt) wakeAt = entry.retryAt;
+			if (entry.retryAt === undefined || entry.retryAt > at || _isHeldAfterClose(entry)) continue;
+			if (at >= floorAt || _urgent(entry, at, floorAt)) due = true;
 		}
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
 		if (!retryIdempotency && (again || (due && reachedQueue && clientState.socketUp))) void _drainOfflineQueue();
 		else {
 			_setUploading(false);
-			if (again) {
-				if (retryIdempotency) _redrainNotBefore = { scope, at: Math.max(_redrainNotBefore.scope === scope ? _redrainNotBefore.at : 0, at + retryDelay) };
-				_scheduleRedrain(retryDelay);
+			if (again && !clientState.isOffline && !clientState.terminated) {
+				// The held calls wait out the last of their waits, or the rest of
+				// the drain if that took longer, and count it toward the hold.
+				const redrainAt = Math.max(at, heldUntil);
+				_redrainNotBefore = { scope, at: Math.max(_floorOf(scope), redrainAt) };
+				for (const [entry, refusedAt] of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + redrainAt - refusedAt;
+				_scheduleRedrain(redrainAt - at);
 			}
 		}
+		// The wakes: the next set-aside call to come due, sooner for one that
+		// would expire before the latest backoff ends, and that end itself.
+		floorAt = _floorOf(scope);
+		let wakeAt = Infinity, urgentAt = Infinity, waitsForFloor = false;
+		for (const entry of _offlineQueue) {
+			if (_isHeldAfterClose(entry)) continue;
+			if (entry.retryAt !== undefined && _urgent(entry, entry.retryAt, floorAt)) urgentAt = Math.min(urgentAt, entry.retryAt);
+			else if (entry.retryAt !== undefined && entry.retryAt > at) wakeAt = Math.min(wakeAt, entry.retryAt);
+			else waitsForFloor = true;
+		}
+		if (urgentAt !== Infinity && (urgentAt > at || reachedQueue)) _scheduleRedrain(Math.max(0, urgentAt - at), true);
 		if (wakeAt !== Infinity) _scheduleRedrain(wakeAt - at);
+		if (waitsForFloor && floorAt > at) _scheduleRedrain(floorAt - at);
 	}
 }
 
