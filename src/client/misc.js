@@ -30,13 +30,22 @@ const _MAX_TIMER_MS = 2147483647;
 let _redrain = null;
 
 /**
- * Drain the current queue again after `delay` ms, unless a pending re-drain
- * comes sooner. Only while connected: the next open drains anyway.
+ * No re-drain before this time (wall ms): the latest backoff or server hint a
+ * refusal asked the queue head to wait. A set-aside call that comes due
+ * earlier waits for it too, so the head is never retried early.
+ */
+let _redrainNotBefore = 0;
+
+/**
+ * Drain the current queue again after `delay` ms (no sooner than the latest
+ * backoff), unless a pending re-drain comes sooner. Only while connected: the
+ * next open drains anyway.
  * @param {number} delay
  */
 function _scheduleRedrain(delay) {
 	if (clientState.isOffline || clientState.terminated) return;
-	const at = now() + delay;
+	const at = Math.max(now() + delay, _redrainNotBefore);
+	delay = at - now();
 	if (_redrain !== null) {
 		if (_redrain.at <= at) return;
 		clearTimer(_redrain.handle);
@@ -48,6 +57,7 @@ function _scheduleRedrain(delay) {
 }
 
 function _cancelRedrain() {
+	_redrainNotBefore = 0;
 	if (_redrain === null) return;
 	clearTimer(_redrain.handle);
 	_redrain = null;
@@ -255,6 +265,8 @@ async function _drainOfflineQueue() {
 		const settled = new Set();
 		/** @type {Set<OfflineEntry>} Calls set aside until their retryAt; still queued. */
 		const deferred = new Set();
+		/** @type {Set<OfflineEntry>} Calls an idempotency refusal holds the queue for. */
+		const held = new Set();
 		/**
 		 * The path and args a replay function gave a call in place of its own.
 		 * @type {Map<OfflineEntry, { path: string, args: any[] }>}
@@ -274,17 +286,24 @@ async function _drainOfflineQueue() {
 		 * Set a call aside: reported like a failure and counted as a hole in the
 		 * upload order, but kept with its stored copy and pending caller.
 		 * @param {OfflineEntry} entry @param {any} err @param {number} wait
+		 * @param {boolean} hinted Whether the server named the wait.
 		 */
-		function defer(entry, err, wait) {
+		function defer(entry, err, wait, hinted) {
 			if (scope !== _offlineScope()) return;
-			const retryAt = now() + wait;
-			// Expired by the time it may go, it could only be dropped: drop it now.
+			const at = now();
+			let retryAt = at + wait;
 			if (expiredAt(entry, retryAt)) {
-				/** @type {any} */
-				const stale = new RpcError('STALE', 'Offline mutation expired: the server asked to retry it after its retention ends');
-				stale.cause = err;
-				settleFail(entry, stale);
-				return;
+				// The client's own backoff gets one last try within the retention;
+				// a server that names a later time can only see it expire.
+				const last = Math.min(maxAge > 0 ? entry.queuedAt + maxAge : Infinity, entry.expiresAt !== undefined ? entry.expiresAt - 1 : Infinity);
+				if (hinted || last <= at) {
+					/** @type {any} */
+					const stale = new RpcError('STALE', hinted ? 'Offline mutation expired: the server asked to retry it after its retention ends' : 'Offline mutation expired');
+					stale.cause = err;
+					settleFail(entry, stale);
+					return;
+				}
+				retryAt = last;
 			}
 			deferred.add(entry);
 			clean = false;
@@ -350,15 +369,18 @@ async function _drainOfflineQueue() {
 						// The server's hint says when the call can be admitted; without
 						// one the call backs off. Holding the queue longer than the hold
 						// in all would stall every call queued behind it.
+						const hinted = typeof err.retryAfter === 'number';
 						let wait;
-						if (typeof err.retryAfter === 'number') wait = Math.max(1000, err.retryAfter);
+						if (hinted) wait = Math.max(1000, err.retryAfter);
 						else wait = entry.idempotencyBackoff = entry.idempotencyBackoff ? Math.min(entry.idempotencyBackoff * 2, _IDEMPOTENCY_BACKOFF_MAX_MS) : 1000;
-						entry.idempotencyHeld = (entry.idempotencyHeld || 0) + wait;
-						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS || entry.idempotencyHeld > _IDEMPOTENCY_REPLAY_HOLD_MS) {
+						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS || (entry.idempotencyHeld || 0) + wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
 							entry.idempotencyHeld = 0;
-							defer(entry, err, wait);
+							defer(entry, err, wait, hinted);
 							return;
 						}
+						// Held for the drain's wait once every refusal is in: with
+						// concurrent replay that is the longest of them.
+						held.add(entry);
 						cut = true;
 						retryIdempotency = true;
 						retryDelay = Math.max(retryDelay, wait);
@@ -549,6 +571,8 @@ async function _drainOfflineQueue() {
 			}
 		}
 
+		// Each held call waits as long as the drain does.
+		for (const entry of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + retryDelay;
 		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (closed()) cut = true;
@@ -613,7 +637,10 @@ async function _drainOfflineQueue() {
 		if (!retryIdempotency && (again || (due && reachedQueue && clientState.socketUp))) void _drainOfflineQueue();
 		else {
 			_setUploading(false);
-			if (again) _scheduleRedrain(retryDelay);
+			if (again) {
+				if (retryIdempotency) _redrainNotBefore = Math.max(_redrainNotBefore, at + retryDelay);
+				_scheduleRedrain(retryDelay);
+			}
 		}
 		if (wakeAt !== Infinity) _scheduleRedrain(wakeAt - at);
 	}
