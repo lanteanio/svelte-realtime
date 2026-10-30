@@ -337,6 +337,12 @@ export const EVENT_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. The erasure is not retried automatically, although owner changes the store already committed are still announced. With a job store the `job` attribute names the job recorded as failed.',
 		nextAction: 'Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant, or `resumeForgetJobs()` with a job store.'
 	}),
+	'forget.job-exhausted': Object.freeze({
+		cause: 'An erasure job failed on 24 runs. The `job` attribute is the job reference, `code` the last failure code and `attempts` the runs made.',
+		consequence: 'The job stays listed with status `exhausted` and keeps the user id, but no longer runs by itself. The surfaces in its last error may still hold the user data.',
+		automaticRecovery: 'None. An exhausted job only runs again on request.',
+		nextAction: 'Find the cause from the error surfaces of the job (a store outage, a dead-letter store without `purgeUser`, an aggregate without a reset policy), fix it, and run `resumeForgetJobs({ id })`. If the erasure cannot be finished, record why and call `abandonForgetJob(id)`.'
+	}),
 	'forget.job-unrecorded': Object.freeze({
 		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',
 		consequence: 'The erasure result returned to the caller is accurate, but the job stays unfinished in the store and still holds the user id until a later run completes it.',

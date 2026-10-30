@@ -77,7 +77,11 @@ let _forgetHashKey = null;
  */
 let _forgetJobs = null;
 
-const _JOB_METHODS = ['beat', 'begin', 'claim', 'complete', 'fail', 'list', 'due'];
+const _JOB_METHODS = ['beat', 'begin', 'claim', 'complete', 'fail', 'abandon', 'list', 'due'];
+
+// After this many runs a job that still fails stops running by itself and is
+// reported, so a job that cannot finish does not retry forever.
+const _MAX_ATTEMPTS = 24;
 
 const _MAX_TIMEOUT_MS = 600_000;
 
@@ -172,7 +176,7 @@ let _forgetTimeoutMs = null;
 
 const _RETRY_BASE_MS = 1000;
 const _RETRY_MAX_MS = 60 * 60_000;
-const _JOB_STATUSES = ['pending', 'failed', 'completed'];
+const _JOB_STATUSES = ['pending', 'failed', 'exhausted', 'completed', 'abandoned'];
 const _MAX_JOB_LIMIT = 1000;
 
 /** @param {unknown} key @returns {import('node:crypto').KeyObject | null} */
@@ -396,6 +400,18 @@ function _reportIncomplete(failedSurfaces, rowsAffected, job) {
 	} catch { /* Diagnostic failures must not interrupt the remaining cleanup. */ }
 }
 
+/** @param {string} job @param {string} code @param {number} attempts */
+function _reportJobExhausted(job, code, attempts) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.forget', event: 'forget.job-exhausted',
+			severity: 'error', dataClass: 'operational',
+			message: 'An erasure job failed on every attempt and no longer runs by itself; fix the cause and resume it by id, or abandon it.',
+			attributes: { job, code, attempts }
+		});
+	} catch { /* Diagnostic failures must not change the erasure outcome. */ }
+}
+
 /** @param {string} job @param {'completed' | 'failed'} outcome */
 function _reportJobUnrecorded(job, outcome) {
 	try {
@@ -576,15 +592,17 @@ async function _runErasure(jobs, job, run, onForget) {
 				// Left for the owner when this run did its part and only a live
 				// owner's in-memory steps remain: due again at once for it.
 				const waiting = error === null;
+				const exhausted = !waiting && job.attempts >= _MAX_ATTEMPTS;
+				const code = waiting ? 'FORGET_INCOMPLETE' : String(/** @type {any} */ (error)?.code || 'INTERNAL_ERROR');
 				const recorded = await _recordOutcome(jobs, 'fail', {
 					id: job.id, runId: job.runId, at,
-					code: waiting ? 'FORGET_INCOMPLETE' : /** @type {any} */ (error)?.code || 'INTERNAL_ERROR',
-					failedSurfaces: waiting ? localOpen : failure.failedSurfaces,
+					code, failedSurfaces: waiting ? localOpen : failure.failedSurfaces,
 					sharedDone, localDone: job.owner ? [...localDone] : [],
 					rowsAffected: failure.rowsAffected,
-					retryAt: waiting ? at : at + _retryDelay(job.attempts)
+					retryAt: waiting ? at : at + _retryDelay(job.attempts), exhausted
 				});
 				if (recorded && job.owner) _localDone.delete(job.id);
+				if (recorded && exhausted) _reportJobExhausted(job.id, code, job.attempts);
 				if (error !== null) throw _withJob(error, jobId);
 				run.waiting = true;
 			} else {
@@ -979,11 +997,34 @@ export async function resumeForgetJobs(opts = {}) {
 			// with a failure, so it stays listed and backs off like any other.
 			if (!started) {
 				const failedAt = wallEpoch();
-				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], sharedDone: [], localDone: [], rowsAffected: 0, retryAt: failedAt + _retryDelay(job.attempts) });
+				const exhausted = job.attempts >= _MAX_ATTEMPTS;
+				const recorded = await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], sharedDone: [], localDone: [], rowsAffected: 0, retryAt: failedAt + _retryDelay(job.attempts), exhausted });
+				if (recorded && exhausted) _reportJobExhausted(jobId, code, job.attempts);
 			}
 			out.failed++;
 			out.results.push({ id: jobId, status: 'failed', code });
 		}
 	}
 	return out;
+}
+
+/**
+ * Give up an unfinished erasure job: it is marked abandoned, never runs again,
+ * and the store drops its user id. A job a run is working on - in this
+ * process or in another live one - is not abandoned. Resolves whether the job
+ * was abandoned; false without a job store.
+ * @param {string} id
+ * @returns {Promise<boolean>}
+ */
+export async function abandonForgetJob(id) {
+	if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
+		throw _invalidJobRequest('abandonForgetJob: id must be a non-empty string of at most 256 characters');
+	}
+	const jobs = _forgetJobs;
+	if (jobs === null || _running.has(id)) return false;
+	try {
+		return (await _bounded(jobs.abandon({ id, at: wallEpoch() }))) === true;
+	} catch {
+		throw new LiveError('FORGET_JOB_FAILED', 'abandonForgetJob: the erasure job store could not be written');
+	}
 }

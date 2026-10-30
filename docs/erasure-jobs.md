@@ -17,7 +17,7 @@ A process with a job store reports that it is alive every 10 seconds; a process 
 
 ## Listing and resuming
 
-`listForgetJobs({ status, limit })` lists jobs with their owner (`processId`), status (`pending`, `failed`, `completed`), attempt count, timestamps, `retryAt`, total rows removed and last failure code and surfaces. A job holds the raw user id only until it completes.
+`listForgetJobs({ status, limit })` lists jobs with their owner (`processId`), status (`pending`, `failed`, `exhausted`, `completed`, `abandoned`), attempt count, timestamps, `retryAt`, total rows removed and last failure code and surfaces. A job holds the raw user id only until it completes.
 
 `resumeForgetJobs({ id, limit, onForget })` runs unfinished jobs this process has work in. Run it at startup and on a schedule on every process. Without `id` it takes the jobs that are due, earliest due first:
 
@@ -26,13 +26,17 @@ A process with a job store reports that it is alive every 10 seconds; a process 
 
 With `id` it runs that job whatever its retry time. A run first claims the job, so a job a run of another live process holds reports `skipped`, and two processes never run one job together. A run reports `waiting` when it did its part and only a live owner's in-memory steps remain; the owner then finds the job due at once. The stored `cascade` is replayed only in a shape `live.forget` accepts; a damaged record fails with `INVALID_REQUEST` and stays listed as a failed job.
 
+## Jobs that cannot finish
+
+A job that fails on 24 runs stops running by itself: it becomes `exhausted`, stays listed with its last error, and `forget.job-exhausted` reports it. Exhausted jobs no longer count against the in-memory store's capacity. Fix the cause and run it with `resumeForgetJobs({ id })`, or give it up with `abandonForgetJob(id)`, which marks it `abandoned` and drops its user id. A job a live run is working on is not abandoned. A shared step whose store has since been removed from the configuration fails on every run until the store is configured again or the job is abandoned.
+
 ## Time bounds
 
 Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - can be bounded with `configureForget({ timeoutMs })`, with or without a job store; without it (the default) an erasure waits as long as the store takes. A call that does not answer in time fails its surface, so a hung store cannot hold `live.forget` forever and does not keep the other surfaces from running. A durable purge that commits after its timeout still announces the owner changes it reports. The call itself keeps running in the store, so every surface must tolerate a late finish.
 
 ## In-memory store
 
-`createForgetJobStore({ max })` holds at most `max` jobs (default 10000). A new job makes room by dropping the oldest completed job. An unfinished job is never dropped: while every held job is unfinished, `live.forget` rejects with `FORGET_JOB_FAILED` before erasing anything, so no erasure goes unrecorded. Resume the unfinished jobs to make room. The store lives in one process and does not survive a restart.
+`createForgetJobStore({ max })` holds at most `max` jobs (default 10000). A new job makes room by dropping the oldest job that will not run by itself again: completed or abandoned first, then exhausted ones, which were reported when they stopped. A pending or failed job is never dropped: while every held job is one, `live.forget` rejects with `FORGET_JOB_FAILED` before erasing anything, so no erasure goes unrecorded. Resume the open jobs to make room. The store lives in one process and does not survive a restart.
 
 ## Store contract
 
@@ -46,9 +50,10 @@ A process is alive while the latest `aliveUntil` it reported - through `beat`, `
 | `begin({ id, runId, processId, aliveUntil, userIdHash, tenantId, userId, cascade, shared, local, at })` | Record the process as alive, then create a `pending` job with `attempts: 1` and `rowsAffected: 0`, owned by `processId`, with open steps `shared` and `local`, whose run `runId` holds the lease. Durable before it resolves. Reject when `id` exists. |
 | `claim({ id, runId, processId, aliveUntil, at })` | Record the process as alive. If it may claim the job, give the lease to `runId`, set `pending`, increment `attempts`, set `updatedAt`, and resolve `{ userId, userIdHash, tenantId, cascade, attempts, owner, ownerAlive, shared, local }`. Otherwise resolve `null` and change nothing. A failed job is claimable before its `retryAt`. |
 | `complete({ id, runId, at, rowsAffected })` | Only when `runId` holds the lease: set `completed`, `completedAt` and `updatedAt`, add `rowsAffected`, clear `error`, release the lease, delete `userId`, `cascade` and the step lists, resolve `true`. Otherwise resolve `false`. |
-| `fail({ id, runId, at, code, failedSurfaces, sharedDone, localDone, rowsAffected, retryAt })` | Only when `runId` holds the lease: set `failed`, `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, remove `sharedDone` from the open shared steps and `localDone` from the open in-memory steps, add `rowsAffected`, release the lease, keep `userId` and `cascade`, resolve `true`. Otherwise resolve `false`. |
+| `fail({ id, runId, at, code, failedSurfaces, sharedDone, localDone, rowsAffected, retryAt, exhausted })` | Only when `runId` holds the lease: set `failed` (or `exhausted`, never due again but still claimable), `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, remove `sharedDone` from the open shared steps and `localDone` from the open in-memory steps, add `rowsAffected`, release the lease, keep `userId` and `cascade`, resolve `true`. Otherwise resolve `false`. |
+| `abandon({ id, at, runId })` | When the job is pending, failed or exhausted and no run of a live process holds it (or `runId` does): set `abandoned`, release the lease, delete `userId`, `cascade` and the step lists, resolve `true`. Otherwise resolve `false`. An abandoned job is never claimed. |
 | `list({ status, limit })` | Jobs oldest `createdAt` first, optionally one status, at most `limit`, without `userId`, `cascade` or step lists. |
-| `due({ at, limit, processId })` | Unfinished jobs `processId` may claim at `at` whose due time has come - a failed job's `retryAt`, a pending job's creation - earliest due first, then `createdAt`; at most `limit`. |
+| `due({ at, limit, processId })` | Pending or failed jobs `processId` may claim at `at` whose due time has come - a failed job's `retryAt`, a pending job's creation - earliest due first, then `createdAt`; at most `limit`. |
 
 In PostgreSQL the liveness reports are a table of `(process_id, alive_until)`, and `claim` is one `UPDATE ... WHERE id = $id AND status <> 'completed' AND (lease_run_id IS NULL OR lease_process_id = $processId OR <lease process not alive>) AND (cardinality(shared) > 0 OR owner = $processId OR <owner not alive>) RETURNING ...`; `complete` and `fail` add `AND lease_run_id = $runId`. In Redis each method is one script over the job hash, a due sorted set and a hash of liveness times.
 

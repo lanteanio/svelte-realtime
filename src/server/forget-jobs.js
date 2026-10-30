@@ -14,7 +14,10 @@
 // A process restart loses this store, so a cluster or any deployment that must
 // survive a crash wires a durable store with the same methods.
 
-const _STATUSES = ['pending', 'failed', 'completed'];
+const _STATUSES = ['pending', 'failed', 'exhausted', 'completed', 'abandoned'];
+// A live job may still run by itself; the others only by explicit request or never.
+const _LIVE = new Set(['pending', 'failed']);
+const _FINISHED = new Set(['completed', 'abandoned']);
 
 /**
  * @typedef {object} ForgetJobIntent
@@ -33,17 +36,19 @@ const _STATUSES = ['pending', 'failed', 'completed'];
 
 /**
  * Create an in-memory erasure job store holding at most `max` jobs (default
- * 10000). A new job makes room by dropping the oldest completed job; an
- * unfinished job is never dropped, so when every held job is unfinished
- * `begin` throws and the erasure is refused before it touches anything.
+ * 10000). A new job makes room by dropping the oldest job that will not run
+ * by itself again - completed or abandoned first, then exhausted ones, which
+ * were reported when they stopped. A live (pending or failed) job is never
+ * dropped, so when every held job is live `begin` throws and the erasure is
+ * refused before it touches anything.
  * @param {{ max?: number }} [options]
  */
 export function createForgetJobStore(options = {}) {
 	const max = Number.isInteger(options?.max) && /** @type {number} */ (options.max) > 0 ? /** @type {number} */ (options.max) : 10000;
 	/** @type {Map<string, any>} */
 	const jobs = new Map();
-	/** @type {Set<string>} completed job ids, oldest completion first */
-	const completed = new Set();
+	/** @type {Set<string>} ids of jobs that will not run by themselves, oldest first */
+	const settled = new Set();
 	/** @type {Map<string, number>} process id -> alive until */
 	const beats = new Map();
 	let seq = 0;
@@ -65,7 +70,7 @@ export function createForgetJobStore(options = {}) {
 	 * @param {any} j @param {string} processId @param {number} at
 	 */
 	function _claimable(j, processId, at) {
-		if (j.status === 'completed') return false;
+		if (_FINISHED.has(j.status)) return false;
 		if (j.leaseRunId !== null && j.leaseProcessId !== processId && _alive(j.leaseProcessId, at)) return false;
 		return j.shared.length > 0 || j.processId === processId || !_alive(j.processId, at);
 	}
@@ -91,7 +96,7 @@ export function createForgetJobStore(options = {}) {
 	/** @param {string} id @param {string} runId */
 	function _held(id, runId) {
 		const j = jobs.get(id);
-		return j !== undefined && j.status !== 'completed' && j.leaseRunId === runId ? j : undefined;
+		return j !== undefined && !_FINISHED.has(j.status) && j.leaseRunId === runId ? j : undefined;
 	}
 
 	/** @param {unknown} list */
@@ -117,10 +122,12 @@ export function createForgetJobStore(options = {}) {
 		begin(intent) {
 			if (jobs.has(intent.id)) throw new Error('forget job store: the job already exists');
 			if (jobs.size >= max) {
-				const oldest = completed.values().next().value;
-				if (oldest === undefined) throw new Error('forget job store: full of unfinished jobs (max ' + max + ')');
-				completed.delete(oldest);
-				jobs.delete(oldest);
+				let drop;
+				for (const id of settled) if (_FINISHED.has(jobs.get(id).status)) { drop = id; break; }
+				if (drop === undefined) drop = settled.values().next().value;
+				if (drop === undefined) throw new Error('forget job store: full of unfinished jobs (max ' + max + ')');
+				settled.delete(drop);
+				jobs.delete(drop);
 			}
 			_beat(intent.processId, intent.aliveUntil);
 			jobs.set(intent.id, {
@@ -144,6 +151,7 @@ export function createForgetJobStore(options = {}) {
 			_beat(req.processId, req.aliveUntil);
 			const j = jobs.get(req.id);
 			if (j === undefined || !_claimable(j, req.processId, req.at)) return null;
+			settled.delete(j.id);
 			Object.assign(j, { status: 'pending', attempts: j.attempts + 1, updatedAt: req.at, leaseRunId: req.runId, leaseProcessId: req.processId });
 			return {
 				userId: j.userId, userIdHash: j.userIdHash, tenantId: j.tenantId,
@@ -167,15 +175,16 @@ export function createForgetJobStore(options = {}) {
 				userId: null, cascade: null, shared: [], local: [],
 				leaseRunId: null, leaseProcessId: null, dueAt: null
 			});
-			completed.add(j.id);
+			settled.add(j.id);
 			return true;
 		},
 
 		/**
 		 * Mark the job failed, drop the steps the run finished from `shared` and
-		 * `local`, release the lease and make it due again at `retryAt`.
+		 * `local`, release the lease and make it due again at `retryAt` - or,
+		 * with `exhausted`, mark it exhausted and never due by itself again.
 		 * Returns false, changing nothing, unless `runId` holds the lease.
-		 * @param {{ id: string, runId: string, at: number, code: string, failedSurfaces: string[], sharedDone: string[], localDone: string[], rowsAffected: number, retryAt: number }} outcome
+		 * @param {{ id: string, runId: string, at: number, code: string, failedSurfaces: string[], sharedDone: string[], localDone: string[], rowsAffected: number, retryAt: number, exhausted?: boolean }} outcome
 		 */
 		fail(outcome) {
 			const j = _held(outcome.id, outcome.runId);
@@ -183,19 +192,40 @@ export function createForgetJobStore(options = {}) {
 			const sharedDone = new Set(_names(outcome.sharedDone));
 			const localDone = new Set(_names(outcome.localDone));
 			Object.assign(j, {
-				status: 'failed', updatedAt: outcome.at, leaseRunId: null, leaseProcessId: null, dueAt: outcome.retryAt,
+				status: outcome.exhausted === true ? 'exhausted' : 'failed', updatedAt: outcome.at,
+				leaseRunId: null, leaseProcessId: null, dueAt: outcome.exhausted === true ? null : outcome.retryAt,
 				shared: j.shared.filter((/** @type {string} */ n) => !sharedDone.has(n)),
 				local: j.local.filter((/** @type {string} */ n) => !localDone.has(n)),
 				rowsAffected: j.rowsAffected + (Number(outcome.rowsAffected) || 0),
 				error: { code: outcome.code, failedSurfaces: _names(outcome.failedSurfaces) }
 			});
+			if (j.status === 'exhausted') settled.add(j.id);
+			return true;
+		},
+
+		/**
+		 * Give up an unfinished job that no run of a live process holds (or that
+		 * `runId` holds): mark it abandoned, drop the raw user id, cascade and
+		 * step lists. Returns whether it did.
+		 * @param {{ id: string, at: number, runId?: string }} req
+		 */
+		abandon(req) {
+			const j = jobs.get(req.id);
+			if (j === undefined || _FINISHED.has(j.status)) return false;
+			if (j.leaseRunId !== null && j.leaseRunId !== req.runId && _alive(j.leaseProcessId, req.at)) return false;
+			Object.assign(j, {
+				status: 'abandoned', updatedAt: req.at, userId: null, cascade: null, shared: [], local: [],
+				leaseRunId: null, leaseProcessId: null, dueAt: null
+			});
+			settled.delete(j.id);
+			settled.add(j.id);
 			return true;
 		},
 
 		/**
 		 * Jobs oldest first (by creation), optionally one status, at most `limit`
 		 * (default 100). Never includes the raw user id.
-		 * @param {{ status?: 'pending' | 'failed' | 'completed', limit?: number }} [filter]
+		 * @param {{ status?: 'pending' | 'failed' | 'exhausted' | 'completed' | 'abandoned', limit?: number }} [filter]
 		 */
 		list(filter = {}) {
 			const limit = Number.isInteger(filter.limit) && /** @type {number} */ (filter.limit) > 0 ? /** @type {number} */ (filter.limit) : 100;
@@ -214,14 +244,14 @@ export function createForgetJobStore(options = {}) {
 		 */
 		due(req) {
 			const out = [];
-			for (const j of jobs.values()) if (j.dueAt !== null && j.dueAt <= req.at && _claimable(j, req.processId, req.at)) out.push(j);
+			for (const j of jobs.values()) if (_LIVE.has(j.status) && j.dueAt <= req.at && _claimable(j, req.processId, req.at)) out.push(j);
 			out.sort((a, b) => a.dueAt - b.dueAt || a.createdAt - b.createdAt || a.seq - b.seq);
 			return out.slice(0, req.limit).map(_public);
 		},
 
 		clear() {
 			jobs.clear();
-			completed.clear();
+			settled.clear();
 			beats.clear();
 		}
 	};

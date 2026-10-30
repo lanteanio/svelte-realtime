@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import {
 	live, configureForget, configureWebhooks, createForgetJobStore, createDeadLetterStore, listForgetJobs, resumeForgetJobs,
-	_resetForget, setOperationalEventSink
+	abandonForgetJob, _resetForget, setOperationalEventSink
 } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
 import { _crdtDecls } from '../src/server/crdt.js';
@@ -599,5 +599,53 @@ describe('erasure jobs across processes', () => {
 		const beat = vi.spyOn(jobs, 'beat');
 		configureForget({ jobs });
 		await vi.waitFor(() => expect(beat).toHaveBeenCalledWith(expect.objectContaining({ processId: expect.any(String) })));
+	});
+});
+
+describe('jobs that cannot finish', () => {
+	afterEach(() => configureWebhooks({ deadLetter: false }));
+	// A dead-letter store without purgeUser fails its surface on every run.
+	const brokenDeadLetter = () => configureWebhooks({ deadLetter: { add() { return null; } } });
+
+	it('stops retrying after a bounded number of attempts, reports it and keeps it listed', async () => {
+		brokenDeadLetter();
+		configureForget({ jobs: true });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		for (let i = 1; i < 24; i++) await resumeForgetJobs({ id: err.job });
+		const [job] = await listForgetJobs({ status: 'exhausted' });
+		expect(job).toMatchObject({ id: err.job, attempts: 24, retryAt: null, error: { code: 'FORGET_INCOMPLETE', failedSurfaces: ['webhookDeadLetter'] } });
+		expect(events.filter((e) => e.event === 'forget.job-exhausted').map((e) => e.attributes)).toEqual([{ job: err.job, code: 'FORGET_INCOMPLETE', attempts: 24 }]);
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		// An operator who fixed the cause runs it by id.
+		configureWebhooks({ deadLetter: { add() { return null; }, purgeUser: () => 0 } });
+		expect(await resumeForgetJobs({ id: err.job })).toMatchObject({ completed: 1 });
+	});
+
+	it('does not let exhausted jobs block new erasures in the in-memory store', async () => {
+		brokenDeadLetter();
+		const jobs = createForgetJobStore({ max: 1 });
+		configureForget({ jobs });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		for (let i = 1; i < 24; i++) await resumeForgetJobs({ id: err.job });
+		configureWebhooks({ deadLetter: false });
+		await expect(live.forget('bob', { tenantId: null })).resolves.toMatchObject({ ok: true });
+	});
+
+	it('abandons an unfinished job on request', async () => {
+		brokenDeadLetter();
+		configureForget({ jobs: true });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(await abandonForgetJob(err.job)).toBe(true);
+		expect(await abandonForgetJob(err.job)).toBe(false);
+		expect(await abandonForgetJob('unknown')).toBe(false);
+		const [job] = await listForgetJobs({ status: 'abandoned' });
+		expect(job.id).toBe(err.job);
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		expect(await resumeForgetJobs({ id: err.job })).toMatchObject({ results: [{ status: 'skipped' }] });
+		const done = await (configureWebhooks({ deadLetter: false }), live.forget('bob', { tenantId: null }));
+		expect(await abandonForgetJob(done.job)).toBe(false);
+		await expect(abandonForgetJob('')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
 	});
 });
