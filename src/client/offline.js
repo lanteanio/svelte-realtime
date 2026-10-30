@@ -422,6 +422,7 @@ async function _rehydrate(scope) {
 				reject: () => {},
 				idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
 				timeout: typeof value.timeout === 'number' ? value.timeout : undefined,
+				retryAt: Number.isFinite(value.retryAt) ? value.retryAt : undefined,
 				seq,
 				restored: true,
 				stored
@@ -571,6 +572,15 @@ function _stamp(entry, scope = _scope) {
 	if (!scope.store) return undefined;
 	const store = scope.store;
 	const durable = _isDurableStore(store);
+	const value = _rowValue(entry);
+	const key = _entryKey(entry.seq, scope);
+	return _write(store, key, () => store.put(key, value))
+		.then(() => durable, () => { scope.failedWrites++; return false; });
+}
+
+/** The stored copy of a queued call. */
+function _rowValue(entry) {
+	/** @type {any} */
 	const value = {
 		seq: entry.seq,
 		path: entry.path,
@@ -580,9 +590,24 @@ function _stamp(entry, scope = _scope) {
 		idempotencyKey: entry.idempotencyKey,
 		timeout: entry.timeout
 	};
+	if (entry.retryAt !== undefined) value.retryAt = entry.retryAt;
+	return value;
+}
+
+/**
+ * @internal Hold a queued call back until `retryAt` (wall-clock ms), and record
+ * that in its stored copy so a page load honours it too. The call stays queued.
+ * @param {any} entry
+ * @param {number} retryAt
+ */
+export function _deferPersist(entry, retryAt) {
+	entry.retryAt = retryAt;
+	const scope = _entryScopes.get(entry) || _scope;
+	if (scope.erased || !scope.store || typeof entry.seq !== 'number' || entry.seq <= 0) return;
+	const store = scope.store;
 	const key = _entryKey(entry.seq, scope);
-	return _write(store, key, () => store.put(key, value))
-		.then(() => durable, () => { scope.failedWrites++; return false; });
+	const value = _rowValue(entry);
+	void _write(store, key, () => store.put(key, value)).catch(() => { scope.failedWrites++; });
 }
 
 /**

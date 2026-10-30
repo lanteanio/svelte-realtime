@@ -93,33 +93,88 @@ describe('offline replay of retryable idempotency refusals', () => {
 });
 
 describe('offline replay of an idempotency refusal that names a wait', () => {
-	it('waits as long as the refusal asks when that fits the hold', async () => {
+	const rpcFrames = () => wire.filter(frame => frame.rpc);
+
+	async function refuseFirst(code, retryAfter, calls = 1) {
 		const observers = configure('server-win');
 		status('disconnected');
-		const call = client.__rpc('work/run')({ value: 1 });
+		const pending = [];
+		for (let i = 1; i <= calls; i++) {
+			const call = client.__rpc('work/run')({ value: i });
+			call.catch(() => {});
+			pending.push(call);
+		}
 		await turn(); status('open'); await turn();
-		const first = wire.find(frame => frame.rpc);
-		answer(first, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'share full', retryAfter: 5000 }); await turn();
-		await vi.advanceTimersByTimeAsync(4999); expect(wire.filter(frame => frame.rpc)).toHaveLength(1);
-		await vi.advanceTimersByTimeAsync(1);
-		const second = wire.filter(frame => frame.rpc)[1]; expect(second.idempotencyKey).toBe(first.idempotencyKey);
-		answer(second, { ok: true, data: 'done' }); await turn();
-		expect(await call).toBe('done'); expect(observers.onReplayError).not.toHaveBeenCalled();
+		const first = rpcFrames()[0];
+		answer(first, { ok: false, code, error: 'later', retryAfter }); await turn();
+		return { ...observers, pending, first };
+	}
+
+	for (const code of ['IDEMPOTENCY_IN_PROGRESS', 'IDEMPOTENCY_CAPACITY']) {
+		it(`${code} waits as long as its retryAfter asks, up to the hold`, async () => {
+			const { onReplayError, pending, first } = await refuseFirst(code, 30000);
+			await vi.advanceTimersByTimeAsync(29999); expect(rpcFrames()).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(1);
+			const second = rpcFrames()[1]; expect(second.idempotencyKey).toBe(first.idempotencyKey);
+			answer(second, { ok: true, data: 'done' }); await turn();
+			expect(await pending[0]).toBe('done'); expect(onReplayError).not.toHaveBeenCalled();
+		});
+	}
+
+	it('waits for the longest hint when concurrent replays are refused', async () => {
+		const onReplayError = vi.fn();
+		const persist = { async getAll() { return []; }, async put(key, value) { rows.set(key, value); }, async delete(key) { rows.delete(key); }, async clear() {} };
+		client.configure({ offline: { queue: true, persist, replay: 'concurrent', onReplayError } });
+		status('disconnected');
+		const calls = [1, 2].map(value => { const call = client.__rpc('work/run')({ value }); call.catch(() => {}); return call; });
+		await turn(); status('open'); await turn();
+		const [a, b] = rpcFrames();
+		answer(a, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter: 20000 });
+		answer(b, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter: 5000 });
+		await turn();
+		await vi.advanceTimersByTimeAsync(19999); expect(rpcFrames()).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1); expect(rpcFrames().length).toBeGreaterThan(2);
+		for (const frame of rpcFrames().slice(2)) answer(frame, { ok: true, data: frame.args[0].value });
+		await turn();
+		expect(await Promise.all(calls)).toEqual([1, 2]);
+		expect(onReplayError).not.toHaveBeenCalled();
 	});
 
-	it('fails a call whose refusal names a longer wait and replays the calls behind it', async () => {
-		const observers = configure('server-win');
-		status('disconnected');
-		const blocked = client.__rpc('work/run')({ value: 1 }); blocked.catch(() => {});
-		const next = client.__rpc('work/run')({ value: 2 });
-		await turn(); status('open'); await turn();
-		const first = wire.find(frame => frame.rpc);
-		answer(first, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'share full', retryAfter: 3600000 }); await turn();
-		await expect(blocked).rejects.toMatchObject({ code: 'IDEMPOTENCY_CAPACITY', retryAfter: 3600000 });
-		expect(observers.onReplayError).toHaveBeenCalledTimes(1);
-		const second = wire.filter(frame => frame.rpc)[1];
-		expect(second.args).toEqual([{ value: 2 }]);
+	it('sets a call aside past the hold, keeps its row and replays the calls behind it', async () => {
+		const { onReplayError, pending, first } = await refuseFirst('IDEMPOTENCY_CAPACITY', 30001, 2);
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(onReplayError.mock.calls[0][1]).toMatchObject({ code: 'IDEMPOTENCY_CAPACITY', retryAfter: 30001 });
+		const second = rpcFrames()[1]; expect(second.args).toEqual([{ value: 2 }]);
 		answer(second, { ok: true, data: 'second' }); await turn();
-		expect(await next).toBe('second');
+		expect(await pending[1]).toBe('second');
+		let settled = false; pending[0].then(() => { settled = true; }, () => { settled = true; });
+		await turn(); expect(settled).toBe(false);
+		expect(stored()).toHaveLength(1);
+		expect(rows.get(stored()[0]).retryAt).toBe(Date.now() + 30001);
+		await vi.advanceTimersByTimeAsync(30000); expect(rpcFrames()).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		const third = rpcFrames()[2]; expect(third.idempotencyKey).toBe(first.idempotencyKey);
+		answer(third, { ok: true, data: 'first' }); await turn();
+		expect(await pending[0]).toBe('first'); expect(stored()).toEqual([]);
+	});
+
+	it('keeps a call set aside through a page load until its retryAt', async () => {
+		const { first } = await refuseFirst('IDEMPOTENCY_CAPACITY', 3600000);
+		const retryAt = rows.get(stored()[0]).retryAt;
+		expect(retryAt).toBe(Date.now() + 3600000);
+		// A page load: the old page goes away, a fresh client reads the same rows.
+		client._resetOffline();
+		status('disconnected');
+		statuses.clear();
+		vi.resetModules();
+		client = await import('../src/client.js');
+		const { onReplayError } = configure('server-win');
+		status('disconnected'); await turn(); status('open'); await turn();
+		await vi.advanceTimersByTimeAsync(3600000 - 1);
+		expect(rpcFrames()).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		const again = rpcFrames()[1]; expect(again.idempotencyKey).toBe(first.idempotencyKey);
+		answer(again, { ok: true, data: 'applied' }); await turn();
+		expect(stored()).toEqual([]); expect(onReplayError).not.toHaveBeenCalled();
 	});
 });

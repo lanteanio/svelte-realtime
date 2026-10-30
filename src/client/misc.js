@@ -1,21 +1,43 @@
 // @ts-check
 import { connect as _connect } from 'svelte-adapter-uws/client';
-import { now, setTimer } from '../client-runtime.js';
+import { now, setTimer, clearTimer } from '../client-runtime.js';
 import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _deferPersist } from './offline.js';
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, restored?: boolean }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, restored?: boolean }} OfflineEntry
  */
 
 const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
 
 // The longest a replay waits on an idempotency refusal with the rest of the
-// queue behind it. A refusal that names a longer wait fails its call instead.
+// queue behind it. A refusal that names a longer wait sets its call aside
+// until then, and the calls behind it go ahead.
 const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
+
+/** A queued call set aside until its `retryAt`. */
+const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
+
+/** @type {{ handle: any, at: number } | null} The drain that wakes the next call set aside. */
+let _wakeTimer = null;
+
+/** Drain again when the first call set aside is due. */
+function _wakeForWaiting() {
+	let at = Infinity;
+	for (const entry of _offlineQueue) if (entry.retryAt !== undefined && entry.retryAt < at) at = entry.retryAt;
+	if (_wakeTimer && _wakeTimer.at <= at) return;
+	if (_wakeTimer) clearTimer(_wakeTimer.handle);
+	_wakeTimer = null;
+	if (at === Infinity) return;
+	const scope = _offlineScope();
+	_wakeTimer = { at, handle: setTimer(() => {
+		_wakeTimer = null;
+		if (scope === _offlineScope()) void _drainOfflineQueue();
+	}, Math.max(0, at - now())) };
+}
 
 /** @type {boolean} */
 let _configListenerAttached = false;
@@ -187,7 +209,8 @@ async function _drainOfflineQueue() {
 		// replaced (a replay is sent only on an open socket): the next open
 		// drains.
 		if (closed() || clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
-		if (!_offlineQueue.some(entry => !_isHeldAfterClose(entry))) return;
+		const readyAt = now();
+		if (!_offlineQueue.some(entry => !_isHeldAfterClose(entry) && !_waiting(entry, readyAt))) return;
 		_setUploading(true);
 		if (scope !== _offlineScope()) return;
 
@@ -212,6 +235,8 @@ async function _drainOfflineQueue() {
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
 		const settled = new Set();
+		/** @type {Set<OfflineEntry>} Calls set aside until their retryAt; still queued. */
+		const deferred = new Set();
 		/**
 		 * The path and args a replay function gave a call in place of its own.
 		 * @type {Map<OfflineEntry, { path: string, args: any[] }>}
@@ -225,6 +250,22 @@ async function _drainOfflineQueue() {
 			if (hole) clean = false;
 			_settlePersist(entry, true, hole);
 			entry.resolve(result);
+		}
+
+		/**
+		 * Set a call aside: reported like a failure and counted as a hole in the
+		 * upload order, but kept with its stored copy and pending caller.
+		 * @param {OfflineEntry} entry @param {any} err @param {number} wait
+		 */
+		function defer(entry, err, wait) {
+			if (scope !== _offlineScope()) return;
+			deferred.add(entry);
+			clean = false;
+			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
+			if (typeof entry.seq === 'number') _noteBatchFailure(entry.seq);
+			_deferPersist(entry, now() + wait);
+			const over = overrides.get(entry);
+			_notifyReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err);
 		}
 
 		/** @param {OfflineEntry} entry @param {any} err */
@@ -283,12 +324,12 @@ async function _drainOfflineQueue() {
 						// longer than the hold would stall every call queued behind it.
 						const wait = typeof err.retryAfter === 'number' ? err.retryAfter : 0;
 						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
-							settleFail(entry, err);
+							defer(entry, err, wait);
 							return;
 						}
 						cut = true;
 						retryIdempotency = true;
-						retryDelay = Math.max(1000, wait);
+						retryDelay = Math.max(retryDelay, wait);
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
@@ -332,7 +373,7 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry)));
+		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry) && !_waiting(entry, nowMs)));
 		for (const entry of captured) {
 			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
@@ -507,6 +548,8 @@ async function _drainOfflineQueue() {
 			if (clean) _clearGapIfClean();
 			if (scope !== _offlineScope()) return;
 			_endBatch();
+			// Calls set aside go back to the front of the queue, in seq order.
+			if (deferred.size) _offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
 		}
 	} finally {
 		// First, so nothing that runs app code below can leave every later
@@ -517,6 +560,7 @@ async function _drainOfflineQueue() {
 		_bumpPending();
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
+		_wakeForWaiting();
 		if (again && !retryIdempotency) void _drainOfflineQueue();
 		else {
 			_setUploading(false);
