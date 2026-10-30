@@ -48,14 +48,14 @@ export const CODE_GUIDANCE = Object.freeze({
 	FORGET_INCOMPLETE: Object.freeze({
 		cause: '`live.forget(userId)` tried every erasure surface, but at least one in-memory or named-document cleanup failed.',
 		consequence: '`live.forget` rejects with a FORGET_INCOMPLETE LiveError, a `forget.incomplete` event names the failed surfaces, and `onForget` does not run. The surfaces that succeeded stay erased.',
-		automaticRecovery: 'None. The erasure is not retried by itself. With a job store the job is recorded as failed under the reference in the `job` property of the error.',
+		automaticRecovery: 'Without a job store, none. With one, this process keeps the failed in-memory steps under the reference in the `job` property of the error and retries them by itself, and a failed shared step is recorded on the job.',
 		nextAction: 'Find the failing surface from the `forget.incomplete` event, fix it, and call `live.forget` again with the same arguments, or `resumeForgetJobs()` with a job store. It is safe to repeat.'
 	}),
 	FORGET_JOB_FAILED: Object.freeze({
-		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. A call that does not answer within the optional `configureForget({ timeoutMs })` counts as failed. The in-memory store also refuses a new job while it holds its `max` jobs and none of them is completed.',
+		cause: 'The erasure job store wired with `configureForget({ jobs })` throws or rejects when `live.forget` records the job before erasing, or when `listForgetJobs` or `resumeForgetJobs` reads it. A call that does not answer within the optional `configureForget({ timeoutMs })` counts as failed. The in-memory store also refuses a new job while it holds its `max` jobs and every one of them is pending or failed.',
 		consequence: 'From `live.forget` nothing was erased: the job is recorded before any surface is touched, so the call rejects with a FORGET_JOB_FAILED LiveError carrying the job reference in its non-enumerable `job` property. A listing or resume rejects without running anything.',
 		automaticRecovery: 'None. The erasure does not start without its job record.',
-		nextAction: 'Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish its unfinished jobs with `resumeForgetJobs()`, then call `live.forget` again.'
+		nextAction: 'Fix the job store (connectivity, permissions, schema), or for a full in-memory store finish or abandon its open jobs with `resumeForgetJobs()` or `abandonForgetJob(id)`, then call `live.forget` again.'
 	}),
 	FORGET_STORE_FAILED: Object.freeze({
 		cause: 'The durable erasure store wired with `configureForget({ store })` threw from `purgeUser` during `live.forget(userId)`, or did not answer within the optional `configureForget({ timeoutMs })`.',
@@ -337,16 +337,40 @@ export const EVENT_GUIDANCE = Object.freeze({
 		automaticRecovery: 'None. The erasure is not retried automatically, although owner changes the store already committed are still announced. With a job store the `job` attribute names the job recorded as failed.',
 		nextAction: 'Fix the failing surface: a missing dead-letter `purgeUser`, a missing aggregate reset policy, or a store outage. Then call `live.forget` again with the same user and tenant, or `resumeForgetJobs()` with a job store.'
 	}),
+	'forget.job-evicted': Object.freeze({
+		cause: 'The in-memory erasure job store was full and dropped an exhausted job to record a new erasure. The `job` attribute is the dropped job reference.',
+		consequence: 'The exhausted job is gone from the store, so it no longer lists or resumes. Its shared steps may still hold the user data it was meant to erase.',
+		automaticRecovery: 'None.',
+		nextAction: 'Resolve exhausted jobs promptly with `resumeForgetJobs({ exhausted: true })` or `abandonForgetJob(id)`, raise `max`, or use a durable job store. Rerun the erasure for the dropped job if it was not finished.'
+	}),
 	'forget.job-exhausted': Object.freeze({
 		cause: 'An erasure job failed on 24 runs. The `job` attribute is the job reference, `code` the last failure code and `attempts` the runs made.',
 		consequence: 'The job stays listed with status `exhausted` and keeps the user id, but no longer runs by itself. The surfaces in its last error may still hold the user data.',
 		automaticRecovery: 'None. An exhausted job only runs again on request.',
-		nextAction: 'Find the cause from the error surfaces of the job (a store outage, a dead-letter store without `purgeUser`, an aggregate without a reset policy), fix it, and run `resumeForgetJobs({ id })`. If the erasure cannot be finished, record why and call `abandonForgetJob(id)`.'
+		nextAction: 'Find the cause from the error surfaces of the job (a store outage, a dead-letter store without `purgeUser`, an aggregate without a reset policy), fix it, and run `resumeForgetJobs({ id })`, or `resumeForgetJobs({ exhausted: true })` for every exhausted job. If the erasure cannot be finished, record why and call `abandonForgetJob(id)`.'
+	}),
+	'forget.local-dropped': Object.freeze({
+		cause: 'A process already owed in-memory erasure steps for 10,000 jobs and dropped those of its oldest job to track a new erasure. The `job` attribute is the dropped job reference.',
+		consequence: 'This process no longer retries the in-memory steps of that job, so its in-memory state may still hold the user data.',
+		automaticRecovery: 'None.',
+		nextAction: 'Find why in-memory erasure keeps failing in this process (a dead-letter store without `purgeUser`, an aggregate without a reset policy) and fix it, then call `live.forget` again on this process for the affected user.'
+	}),
+	'forget.local-exhausted': Object.freeze({
+		cause: 'The in-memory erasure steps a process owes for a job failed on 24 tries. The `job` attribute is the job reference and `attempts` the tries made.',
+		consequence: 'The process no longer retries them by itself; they stay listed in the `local` field of the job on that process. Its in-memory state may still hold the user data.',
+		automaticRecovery: 'None. The steps only run again on request.',
+		nextAction: 'Fix the cause shown by the `forget.incomplete` events of the job, then call `resumeForgetJobs({ exhausted: true })` or `resumeForgetJobs({ id })` on the same process, or `abandonForgetJob(id)`.'
+	}),
+	'forget.run-overdue': Object.freeze({
+		cause: 'An erasure run was still going after 15 minutes, usually because a store call never returned and no `timeoutMs` is configured. The `job` attribute is the job reference.',
+		consequence: 'The run stops renewing its lease, so after the lease runs out another run may take the job and repeat its shared steps. The hung call may still finish later.',
+		automaticRecovery: 'Another run takes the job once the lease expires.',
+		nextAction: 'Find the store call that hangs, and set `configureForget({ timeoutMs })` so a hung call fails instead of holding the run.'
 	}),
 	'forget.job-unrecorded': Object.freeze({
 		cause: 'An erasure run finished, completed or failed, but the job store wired with `configureForget({ jobs })` threw, rejected or answered false (the run no longer held the job) when its outcome was recorded. The `job` attribute is the job reference and `outcome` the result that was not recorded.',
 		consequence: 'The erasure result returned to the caller is accurate, but the job stays unfinished in the store and still holds the user id until a later run completes it.',
-		automaticRecovery: 'None. The job is due again once no live run holds it; the next `resumeForgetJobs()` on its owning process, or on any process once the owner is gone, finishes the steps still open.',
+		automaticRecovery: 'None. The job is due again once the lease of its run expires; the next `resumeForgetJobs()` on any process (or the `resumeIntervalMs` timer) finishes the shared steps still open.',
 		nextAction: 'Fix the job store, then call `resumeForgetJobs()` so the job reaches a recorded outcome.'
 	}),
 	'forget.owner-succession-unannounced': Object.freeze({

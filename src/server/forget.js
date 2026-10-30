@@ -69,84 +69,61 @@ let _forgetHashKey = null;
 
 /**
  * Optional erasure job store (default null = no job records). Duck-typed:
- * `beat`, `begin`, `claim`, `complete`, `fail`, `list` and `due`, each sync or
- * async.
- * `createForgetJobStore()` is the in-memory reference; durable stores implement
- * the same methods. Set via `configureForget({ jobs })`.
+ * `begin`, `renew`, `claim`, `complete`, `fail`, `abandon`, `list` and `due`,
+ * each sync or async. `createForgetJobStore()` is the in-memory reference;
+ * durable stores implement the same methods. Set via `configureForget({ jobs })`.
  * @type {any}
  */
 let _forgetJobs = null;
 
-const _JOB_METHODS = ['beat', 'begin', 'claim', 'complete', 'fail', 'abandon', 'list', 'due'];
+const _JOB_METHODS = ['begin', 'renew', 'claim', 'complete', 'fail', 'abandon', 'list', 'due'];
 
-// After this many runs a job that still fails stops running by itself and is
-// reported, so a job that cannot finish does not retry forever.
+// After this many runs a job (or a process's in-memory retry of it) that still
+// fails stops running by itself and is reported, so work that cannot finish
+// does not retry forever.
 const _MAX_ATTEMPTS = 24;
 
 const _MAX_TIMEOUT_MS = 600_000;
+const _MIN_RESUME_INTERVAL_MS = 1000;
+const _MAX_RESUME_INTERVAL_MS = 24 * 60 * 60_000;
 
-// A process with a job store beats every `_BEAT_MS`; one whose last beat is
-// older than `_PROCESS_TTL_MS` is gone, and its in-memory state with it.
-const _BEAT_MS = 10_000;
-const _PROCESS_TTL_MS = 30_000;
+// A run's lease on a job lasts `_LEASE_MS` and is renewed every `_RENEW_MS`
+// while the run is going. A run older than `_MAX_RUN_MS` stops renewing and is
+// reported, so a hung run lets go of its job instead of holding it forever.
+const _LEASE_MS = 60_000;
+const _RENEW_MS = 20_000;
+const _MAX_RUN_MS = 15 * 60_000;
 
-/** @type {string | null} */
-let _processIdValue = null;
-/** @type {any} */
-let _beatTimer = null;
-
-/** This process's identity in the job store, drawn once. */
-function _processId() {
-	if (_processIdValue === null) _processIdValue = randomUuid();
-	return _processIdValue;
-}
+// In-memory erasure this process still owes: at most this many jobs.
+const _MAX_LOCAL_JOBS = 10_000;
 
 /** Jobs a run of this process is working on. */
 const _running = new Set();
 
 /**
- * Jobs whose `begin` timed out, so their caller was told nothing was erased,
- * and whose record may still land. Each is abandoned when its record lands,
- * or the next time this process meets it, so it never runs later.
- * @type {Map<string, string>} job id -> run id
+ * Jobs whose `begin` failed, so their caller was told nothing was erased, but
+ * whose record may have landed anyway (a lost reply, a timeout). Each is
+ * abandoned when the record shows up, so it never runs later; after a few
+ * tries a record that never landed is forgotten.
+ * @type {Map<string, { runId: string, tries: number }>}
  */
 const _refused = new Map();
-
-/** @param {any} jobs @param {string} id @param {string} runId */
-async function _abandonRefused(jobs, id, runId) {
-	try {
-		if ((await _bounded(jobs.abandon({ id, at: wallEpoch(), runId }))) === true) _refused.delete(id);
-	} catch { /* Kept in `_refused`: the next resume in this process tries again. */ }
-}
+const _MAX_REFUSED = 1000;
+const _REFUSED_TRIES = 3;
 
 /**
- * In-memory steps this process finished for jobs it owns whose outcome the
- * store has not recorded yet, so a later run of the same job does not repeat
- * them (a document dropped then may hold new edits by now).
- * @type {Map<string, Set<string>>}
+ * In-memory erasure this process still owes, by job id: the steps left, what
+ * running them needs, and when to try again. Only this process can finish
+ * them, and a step it finished is never run again here; a process that exits
+ * takes this state, and the data it describes, with it.
+ * @type {Map<string, { userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, open: Set<string>, attempts: number, retryAt: number, exhausted: boolean }>}
  */
-const _localDone = new Map();
+const _localJobs = new Map();
 
-/** Beat now and every `_BEAT_MS` while a job store is configured. */
-function _startBeat() {
-	_stopBeat();
-	const beat = () => {
-		const jobs = _forgetJobs;
-		if (jobs === null) return;
-		const at = wallEpoch();
-		Promise.resolve()
-			.then(() => jobs.beat({ processId: _processId(), at, aliveUntil: at + _PROCESS_TTL_MS }))
-			.catch(() => { /* A missed beat only shortens how long others see this process alive. */ });
-	};
-	beat();
-	_beatTimer = setIntervalTimer(beat, _BEAT_MS);
-	if (_beatTimer && typeof _beatTimer.unref === 'function') _beatTimer.unref();
-}
-
-function _stopBeat() {
-	if (_beatTimer !== null) clearIntervalTimer(_beatTimer);
-	_beatTimer = null;
-}
+/** @type {any} */
+let _localTimer = null;
+/** @type {any} */
+let _resumeTimer = null;
 
 /**
  * Steps of an erasure any process can finish: the durable store and a
@@ -241,22 +218,27 @@ function _bounded(value, late) {
  * Configure the forget subsystem. `store` plugs in durable erasure; `platform`
  * supplies the cluster Redis handle. `hashKey` opts audit records into HMAC.
  * `jobs` records each erasure as a resumable job (`true` = in-memory store).
- * `timeoutMs` bounds each store call an erasure waits on.
+ * `timeoutMs` bounds each store call an erasure waits on. `resumeIntervalMs`
+ * runs `resumeForgetJobs()` on that interval while a job store is configured.
  * Omitted settings are retained; `null` clears all of them.
  *
- * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null, timeoutMs?: number } | null} config
+ * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null, jobs?: boolean | object | null, timeoutMs?: number | null, resumeIntervalMs?: number | null } | null} config
  */
 export function configureForget(config) {
 	if (config === null) { _clearForgetConfig(); return; }
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
 	}
-	const { store, platform, hashKey, jobs, timeoutMs } = config;
-	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined && timeoutMs === undefined) {
-		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey, jobs or timeoutMs');
+	const { store, platform, hashKey, jobs, timeoutMs, resumeIntervalMs } = config;
+	if (store === undefined && platform === undefined && hashKey === undefined && jobs === undefined && timeoutMs === undefined && resumeIntervalMs === undefined) {
+		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform, hashKey, jobs, timeoutMs or resumeIntervalMs');
 	}
 	if (timeoutMs !== undefined && timeoutMs !== null && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > _MAX_TIMEOUT_MS)) {
 		throw new Error('[svelte-realtime] configureForget: timeoutMs must be an integer from 1 to ' + _MAX_TIMEOUT_MS + ', or null');
+	}
+	if (resumeIntervalMs !== undefined && resumeIntervalMs !== null &&
+		(!Number.isInteger(resumeIntervalMs) || resumeIntervalMs < _MIN_RESUME_INTERVAL_MS || resumeIntervalMs > _MAX_RESUME_INTERVAL_MS)) {
+		throw new Error('[svelte-realtime] configureForget: resumeIntervalMs must be an integer from ' + _MIN_RESUME_INTERVAL_MS + ' to ' + _MAX_RESUME_INTERVAL_MS + ', or null');
 	}
 	if (jobs !== undefined && jobs !== null && typeof jobs !== 'boolean' &&
 		(typeof jobs !== 'object' || _JOB_METHODS.some((m) => typeof (/** @type {any} */ (jobs))[m] !== 'function'))) {
@@ -274,12 +256,41 @@ export function configureForget(config) {
 		// `true` keeps a configured store, so a repeated call never discards
 		// the open jobs it holds.
 		_forgetJobs = jobs === true ? (_forgetJobs ?? createForgetJobStore()) : (jobs || null);
-		if (_forgetJobs === null) _stopBeat();
-		else _startBeat();
 	}
 	if (timeoutMs !== undefined) _forgetTimeoutMs = timeoutMs;
+	if (resumeIntervalMs !== undefined) _resumeIntervalMs = resumeIntervalMs;
+	_armResumeTimer();
 }
 
+/**
+ * How often to run `resumeForgetJobs()` by itself, or null (the default).
+ * @type {number | null}
+ */
+let _resumeIntervalMs = null;
+
+/** Run `resumeForgetJobs()` on the configured interval while a job store is set. */
+function _armResumeTimer() {
+	if (_resumeTimer !== null) clearIntervalTimer(_resumeTimer);
+	_resumeTimer = null;
+	if (_resumeIntervalMs === null || _forgetJobs === null) return;
+	_resumeTimer = setIntervalTimer(() => {
+		resumeForgetJobs().catch(() => { /* A store outage is retried on the next tick. */ });
+	}, _resumeIntervalMs);
+	if (_resumeTimer && typeof _resumeTimer.unref === 'function') _resumeTimer.unref();
+}
+
+/**
+ * Stop the timers this module runs (in-memory retries, the resume interval).
+ * Called on shutdown and module reloads; the next erasure or configuration
+ * arms them again.
+ * @internal
+ */
+export function _stopForgetTimers() {
+	if (_localTimer !== null) clearTimer(_localTimer);
+	_localTimer = null;
+	if (_resumeTimer !== null) clearIntervalTimer(_resumeTimer);
+	_resumeTimer = null;
+}
 /**
  * Stable pseudonymous audit fingerprint. Without a key this keeps the original
  * enumerable idempotency fingerprint; HMAC prevents candidate matching without
@@ -525,24 +536,21 @@ const _liveForget = async function forget(userId, opts) {
 	// nothing about the user.
 	const shared = jobs === null ? [] : _sharedSteps();
 	const job = jobs === null ? null : {
-		id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false,
-		owner: true, ownerAlive: true, shared, local: _localSteps(cascade, shared)
+		id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false, shared, local: _localSteps(cascade, shared)
 	};
 	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade }, onForget);
 };
 
 /**
  * One erasure run with its job bookkeeping. With a job store, a new call
- * records the job, owned by this process, before any surface is touched (a
- * failure to record it erases nothing); a resumed run has already claimed it.
- * The run does the job's shared steps that are still open and, in the owning
- * process only, the owner's in-memory steps that are still open. The job
- * completes once no shared step is open and its owner has nothing left or is
- * gone; while a live owner still has in-memory steps, a run elsewhere records
- * its progress and leaves them to the owner (`run.waiting`).
+ * records the job before any surface is touched (a failure to record it erases
+ * nothing); a resumed run has already claimed it. The run keeps its lease
+ * alive while it works, does the job's open shared steps and, for a new call,
+ * this process's in-memory steps, and records the shared outcome in the store.
+ * In-memory steps left open stay with this process, which retries them itself.
  * @param {any} jobs
- * @param {{ id: string, runId: string, attempts: number, claimed: boolean, owner: boolean, ownerAlive: boolean, shared: string[], local: string[] } | null} job
- * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, waiting?: boolean }} run
+ * @param {{ id: string, runId: string, attempts: number, claimed: boolean, shared: string[], local: string[] } | null} job
+ * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
  * @param {Function | undefined} onForget
  * @returns {Promise<ForgetResult>}
  */
@@ -554,39 +562,38 @@ async function _runErasure(jobs, job, run, onForget) {
 	// tick / an alarm fire). The `finally` drains exactly once on every exit.
 	_enterInFlight();
 	if (jobId !== null) _running.add(jobId);
+	/** @type {(() => void) | null} */
+	let stopRenewing = null;
 	try {
 		if (job !== null && !job.claimed) {
-			const at = wallEpoch();
 			try {
 				await _bounded(jobs.begin({
-					id: job.id, runId: job.runId, processId: _processId(), aliveUntil: at + _PROCESS_TTL_MS,
-					userIdHash, tenantId, userId, cascade, shared: job.shared, local: job.local, at
+					id: job.id, runId: job.runId, leaseMs: _LEASE_MS,
+					userIdHash, tenantId, userId, cascade, shared: job.shared
 				}), {
-					// The caller has been told nothing was erased; a record that
-					// lands after that is abandoned, not run later.
-					resolved: () => { _refused.set(job.id, job.runId); void _abandonRefused(jobs, job.id, job.runId); }
+					// The caller is told nothing was erased; a record that lands
+					// after that is abandoned, not run later.
+					resolved: () => { void _abandonRefused(jobs, job.id); },
+					rejected: () => { void _abandonRefused(jobs, job.id); }
 				});
 			} catch {
+				// A rejection can still hide a committed record (a lost reply).
+				_refuse(jobs, job.id, job.runId);
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
 		}
+		if (job !== null) stopRenewing = _keepLease(jobs, job.id, job.runId);
 		/** @type {{ failedSurfaces: string[], doneSurfaces: string[], rowsAffected: number }} */
 		const failure = { failedSurfaces: [], doneSurfaces: [], rowsAffected: 0 };
 		/** @type {Set<string> | null} */
 		let plan = null;
-		/** @type {Set<string>} */
-		let localDone = new Set();
 		if (job !== null) {
-			// In-memory steps this process finished for its own job are not run
-			// again, even when the store never heard of them.
-			localDone = job.owner ? new Set(_localDone.get(job.id)) : localDone;
-			plan = new Set();
+			plan = new Set(job.local);
 			for (const step of job.shared) {
 				// A shared step whose store is no longer configured cannot be done here.
 				if (_sharedStoreMissing(step)) failure.failedSurfaces.push(step);
 				else plan.add(step);
 			}
-			if (job.owner) for (const step of job.local) if (!localDone.has(step)) plan.add(step);
 		}
 		/** @type {{ surfaces: Record<string, number>, rowsAffected: number } | null} */
 		let erased = null;
@@ -597,44 +604,28 @@ async function _runErasure(jobs, job, run, onForget) {
 		} catch (err) {
 			error = err;
 		}
-		if (job === null) {
-			if (error !== null) throw error;
-		} else {
+		if (job !== null) {
+			stopRenewing?.();
+			stopRenewing = null;
 			const done = new Set(failure.doneSurfaces);
-			const sharedDone = job.shared.filter((step) => done.has(step));
-			if (job.owner) {
-				for (const step of job.local) if (done.has(step)) localDone.add(step);
-				_localDone.set(job.id, localDone);
-			}
+			// In-memory steps this run left open stay with this process.
+			const localOpen = job.local.filter((step) => !done.has(step));
+			if (localOpen.length > 0) _keepLocal(job.id, { userId, userIdHash, tenantId, cascade }, localOpen);
 			const sharedOpen = job.shared.filter((step) => !done.has(step));
-			const localOpen = job.owner ? job.local.filter((step) => !localDone.has(step)) : (job.ownerAlive ? job.local : []);
-			const at = wallEpoch();
-			if (error !== null || sharedOpen.length > 0 || localOpen.length > 0) {
-				// Left for the owner when this run did its part and only a live
-				// owner's in-memory steps remain: due again at once for it.
-				const waiting = error === null;
-				const exhausted = !waiting && job.attempts >= _MAX_ATTEMPTS;
-				const code = waiting ? 'FORGET_INCOMPLETE' : String(/** @type {any} */ (error)?.code || 'INTERNAL_ERROR');
+			if (sharedOpen.length > 0) {
+				const code = sharedOpen.includes('durable') ? 'FORGET_STORE_FAILED' : 'FORGET_INCOMPLETE';
+				const exhausted = job.attempts >= _MAX_ATTEMPTS;
 				const recorded = await _recordOutcome(jobs, 'fail', {
-					id: job.id, runId: job.runId, at,
-					code, failedSurfaces: waiting ? localOpen : failure.failedSurfaces,
-					sharedDone, localDone: job.owner ? [...localDone] : [],
-					rowsAffected: failure.rowsAffected,
-					retryAt: waiting ? at : at + _retryDelay(job.attempts), exhausted
+					id: job.id, runId: job.runId, code, failedSurfaces: sharedOpen,
+					sharedDone: job.shared.filter((step) => done.has(step)),
+					rowsAffected: failure.rowsAffected, retryAfterMs: _retryDelay(job.attempts), exhausted
 				});
-				if (recorded && job.owner) _localDone.delete(job.id);
 				if (recorded && exhausted) _reportJobExhausted(job.id, code, job.attempts);
-				if (error !== null) throw _withJob(error, jobId);
-				run.waiting = true;
 			} else {
-				await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, at, rowsAffected: failure.rowsAffected });
-				_localDone.delete(job.id);
-			}
-			if (error === null && run.waiting) {
-				const result = /** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */ (erased);
-				return { ok: true, at, rowsAffected: result.rowsAffected, surfaces: result.surfaces, job: job.id };
+				await _recordOutcome(jobs, 'complete', { id: job.id, runId: job.runId, rowsAffected: failure.rowsAffected });
 			}
 		}
+		if (error !== null) throw _withJob(error, jobId);
 		const { surfaces, rowsAffected } = /** @type {{ surfaces: Record<string, number>, rowsAffected: number }} */ (erased);
 		const at = wallEpoch();
 
@@ -653,15 +644,46 @@ async function _runErasure(jobs, job, run, onForget) {
 
 		return jobId === null ? { ok: true, at, rowsAffected, surfaces } : { ok: true, at, rowsAffected, surfaces, job: jobId };
 	} finally {
+		stopRenewing?.();
 		if (jobId !== null) _running.delete(jobId);
 		_exitInFlight();
 	}
 }
 
 /**
+ * Renew a run's lease every `_RENEW_MS` while it works. A run older than
+ * `_MAX_RUN_MS` stops renewing and is reported, so its lease expires and
+ * another run can take the job. Returns the stop function.
+ * @param {any} jobs @param {string} id @param {string} runId
+ * @returns {() => void}
+ */
+function _keepLease(jobs, id, runId) {
+	const started = wallEpoch();
+	let stopped = false;
+	const timer = setIntervalTimer(() => {
+		if (stopped) return;
+		if (wallEpoch() - started >= _MAX_RUN_MS) {
+			stop();
+			_reportRunOverdue(id);
+			return;
+		}
+		Promise.resolve()
+			.then(() => _bounded(jobs.renew({ id, runId, leaseMs: _LEASE_MS })))
+			.then((held) => { if (held === false) stop(); })
+			.catch(() => { /* The next tick tries again; an expired lease only lets another run take over. */ });
+	}, _RENEW_MS);
+	if (timer && typeof timer.unref === 'function') timer.unref();
+	function stop() {
+		stopped = true;
+		clearIntervalTimer(timer);
+	}
+	return stop;
+}
+
+/**
  * Record a run's outcome. A store that throws, or answers false because the
- * run no longer holds the lease, leaves the job unfinished; that is reported,
- * never thrown, so the caller still gets the erasure's own result.
+ * run no longer holds the lease, leaves the job open; that is reported, never
+ * thrown, so the caller still gets the erasure's own result.
  * @param {any} jobs @param {'complete' | 'fail'} method @param {any} outcome
  * @returns {Promise<boolean>} whether the store recorded it
  */
@@ -677,6 +699,34 @@ async function _recordOutcome(jobs, method, outcome) {
 }
 
 /**
+ * Remember a refused job whose record may have landed, and try to abandon it.
+ * @param {any} jobs @param {string} id @param {string} runId
+ */
+function _refuse(jobs, id, runId) {
+	if (!_refused.has(id) && _refused.size >= _MAX_REFUSED) {
+		const oldest = _refused.keys().next().value;
+		if (oldest !== undefined) _refused.delete(oldest);
+	}
+	if (!_refused.has(id)) _refused.set(id, { runId, tries: 0 });
+	void _abandonRefused(jobs, id);
+}
+
+/**
+ * Abandon a refused job's record, if it exists. Gives up after a few tries:
+ * a record that never landed has nothing to abandon.
+ * @param {any} jobs @param {string} id
+ */
+async function _abandonRefused(jobs, id) {
+	const entry = _refused.get(id);
+	if (entry === undefined) return;
+	entry.tries++;
+	try {
+		if ((await _bounded(jobs.abandon({ id, runId: entry.runId }))) === true) { _refused.delete(id); return; }
+	} catch { /* Counted as a try. */ }
+	if (entry.tries >= _REFUSED_TRIES) _refused.delete(id);
+}
+
+/**
  * How long a failed job waits before it is due again: doubling from one second
  * per attempt, at most an hour, so a job that keeps failing yields to others.
  * @param {number} attempts
@@ -684,6 +734,133 @@ async function _recordOutcome(jobs, method, outcome) {
 function _retryDelay(attempts) {
 	const n = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 1;
 	return Math.min(_RETRY_BASE_MS * 2 ** Math.min(n - 1, 30), _RETRY_MAX_MS);
+}
+
+/**
+ * Keep in-memory steps this process still owes for a job, and arm the retry.
+ * @param {string} id
+ * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
+ * @param {string[]} open
+ */
+function _keepLocal(id, run, open) {
+	const entry = _localJobs.get(id);
+	if (entry !== undefined) {
+		entry.open = new Set(open);
+		return;
+	}
+	if (_localJobs.size >= _MAX_LOCAL_JOBS) {
+		const oldest = _localJobs.keys().next().value;
+		if (oldest !== undefined) {
+			_localJobs.delete(oldest);
+			_reportLocal('forget.local-dropped', oldest, 0);
+		}
+	}
+	_localJobs.set(id, {
+		userId: run.userId, userIdHash: run.userIdHash, tenantId: run.tenantId, cascade: run.cascade,
+		open: new Set(open), attempts: 1, retryAt: wallEpoch() + _retryDelay(1), exhausted: false
+	});
+	_armLocalTimer();
+}
+
+/** Arm one timer for the earliest in-memory retry this process owes. */
+function _armLocalTimer() {
+	if (_localTimer !== null) clearTimer(_localTimer);
+	_localTimer = null;
+	let next = Infinity;
+	for (const entry of _localJobs.values()) if (!entry.exhausted && entry.retryAt < next) next = entry.retryAt;
+	if (next === Infinity) return;
+	_localTimer = setTimer(() => {
+		_localTimer = null;
+		_retryLocalDue().catch(() => { /* Each retry reports its own failure. */ });
+	}, Math.max(0, next - wallEpoch()));
+	if (_localTimer && typeof _localTimer.unref === 'function') _localTimer.unref();
+}
+
+/**
+ * Retry the in-memory steps this process owes whose time has come, or only
+ * job `id` whatever its time. Resolves one result per job tried.
+ * @param {string} [id]
+ * @returns {Promise<Array<{ id: string, status: 'completed' | 'failed' | 'skipped', code?: string }>>}
+ */
+async function _retryLocalDue(id) {
+	/** @type {Array<{ id: string, status: 'completed' | 'failed' | 'skipped', code?: string }>} */
+	const results = [];
+	const now = wallEpoch();
+	const ids = id !== undefined ? (_localJobs.has(id) ? [id] : []) : [..._localJobs].filter(([, e]) => !e.exhausted && e.retryAt <= now).map(([k]) => k);
+	for (const jobId of ids) {
+		const entry = _localJobs.get(jobId);
+		if (entry === undefined || _running.has(jobId)) {
+			results.push({ id: jobId, status: 'skipped' });
+			continue;
+		}
+		_running.add(jobId);
+		_enterInFlight();
+		try {
+			/** @type {{ failedSurfaces: string[], doneSurfaces: string[], rowsAffected: number }} */
+			const failure = { failedSurfaces: [], doneSurfaces: [], rowsAffected: 0 };
+			let code = null;
+			try {
+				await _erase(entry.userId, entry.tenantId, entry.cascade, jobId, failure, new Set(entry.open));
+			} catch (err) {
+				code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
+			}
+			for (const step of failure.doneSurfaces) entry.open.delete(step);
+			if (entry.open.size === 0) {
+				_localJobs.delete(jobId);
+				results.push({ id: jobId, status: 'completed' });
+			} else {
+				entry.attempts++;
+				entry.retryAt = wallEpoch() + _retryDelay(entry.attempts);
+				if (entry.attempts >= _MAX_ATTEMPTS && !entry.exhausted) {
+					entry.exhausted = true;
+					_reportLocal('forget.local-exhausted', jobId, entry.attempts);
+				}
+				results.push({ id: jobId, status: 'failed', code: code ?? 'FORGET_INCOMPLETE' });
+			}
+		} finally {
+			_running.delete(jobId);
+			_exitInFlight();
+		}
+	}
+	_armLocalTimer();
+	return results;
+}
+
+/**
+ * @param {'forget.local-exhausted' | 'forget.local-dropped'} event
+ * @param {string} job @param {number} attempts
+ */
+function _reportLocal(event, job, attempts) {
+	try {
+		emitOperationalEvent(event === 'forget.local-exhausted'
+			? {
+				source: 'svelte-realtime', component: 'server.forget', event: 'forget.local-exhausted',
+				severity: 'error', dataClass: 'operational',
+				message: 'In-memory erasure steps failed on every retry in this process and are no longer retried by themselves.',
+				attributes: { job, attempts }
+			}
+			: {
+				source: 'svelte-realtime', component: 'server.forget', event: 'forget.local-dropped',
+				severity: 'error', dataClass: 'operational',
+				message: 'This process dropped the open in-memory erasure steps of its oldest job to track a new erasure.',
+				attributes: { job }
+			});
+	} catch { /* Diagnostic failures must not change the erasure outcome. */ }
+}
+
+/**
+ * Report a run that passed the longest a run may hold a job.
+ * @param {string} job
+ */
+function _reportRunOverdue(job) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.forget', event: 'forget.run-overdue',
+			severity: 'error', dataClass: 'operational',
+			message: 'An erasure run is still going after the longest a run may hold its job; its lease is no longer renewed, so another run can take the job.',
+			attributes: { job }
+		});
+	} catch { /* Diagnostic failures must not change the erasure outcome. */ }
 }
 
 /**
@@ -843,21 +1020,20 @@ export function installForget(live) {
  */
 export function _resetForget() {
 	_clearForgetConfig();
-	// Tests use this to stand for a new process: a fresh identity and no memory
-	// of earlier runs.
-	_processIdValue = null;
-	_localDone.clear();
+	// Tests use this to stand for a new process: no memory of earlier runs.
+	_localJobs.clear();
 	_refused.clear();
 }
 
-/** Clear every forget setting and stop beating. */
+/** Clear every forget setting and stop the timers. */
 function _clearForgetConfig() {
 	_forgetStore = null;
 	_forgetPlatform = null;
 	_forgetHashKey = null;
 	_forgetJobs = null;
 	_forgetTimeoutMs = null;
-	_stopBeat();
+	_resumeIntervalMs = null;
+	_stopForgetTimers();
 }
 
 /** @param {string} message */
@@ -874,18 +1050,37 @@ function _jobLimit(limit, name) {
 	return /** @type {number} */ (limit);
 }
 
+/** @param {unknown} id @param {string} name */
+function _jobId(id, name) {
+	if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
+		throw _invalidJobRequest(name + ': id must be a non-empty string of at most 256 characters');
+	}
+	return id;
+}
+
+/**
+ * This process's open in-memory steps for a job, as listings show them.
+ * @param {string} id
+ */
+function _localView(id) {
+	const entry = _localJobs.get(id);
+	if (entry === undefined) return null;
+	return { open: [...entry.open], attempts: entry.attempts, retryAt: entry.exhausted ? null : entry.retryAt, exhausted: entry.exhausted };
+}
+
 /**
  * The public view of a stored job: a fixed set of fields, so a store that
- * keeps more (the raw user id of an unfinished job) never leaks it here.
+ * keeps more (the raw user id of an open job) never leaks it here, plus this
+ * process's open in-memory steps for it.
  * @param {any} j
  */
 function _publicJob(j) {
 	const error = j && j.error && typeof j.error === 'object'
 		? { code: String(j.error.code), failedSurfaces: Array.isArray(j.error.failedSurfaces) ? j.error.failedSurfaces.map(String) : [] }
 		: null;
+	const id = String(j.id);
 	return {
-		id: String(j.id),
-		processId: typeof j.processId === 'string' ? j.processId : null,
+		id,
 		userIdHash: typeof j.userIdHash === 'string' ? j.userIdHash : null,
 		tenantId: typeof j.tenantId === 'string' ? j.tenantId : null,
 		status: j.status,
@@ -895,14 +1090,16 @@ function _publicJob(j) {
 		completedAt: typeof j.completedAt === 'number' ? j.completedAt : null,
 		retryAt: j.status === 'failed' && typeof j.retryAt === 'number' ? j.retryAt : null,
 		rowsAffected: typeof j.rowsAffected === 'number' ? j.rowsAffected : 0,
-		error
+		error,
+		local: _localView(id)
 	};
 }
 
 /**
- * List recorded erasure jobs, oldest first. Each carries the pseudonymous job
- * reference and audit hash, never the user id. Empty without a job store.
- * @param {{ status?: 'pending' | 'failed' | 'completed', limit?: number }} [filter]
+ * List recorded erasure jobs, oldest first. Each carries the random job
+ * reference and, while open, the audit hash - never the user id - and the
+ * in-memory steps this process still owes for it. Empty without a job store.
+ * @param {{ status?: 'pending' | 'failed' | 'exhausted' | 'completed' | 'abandoned', limit?: number }} [filter]
  */
 export async function listForgetJobs(filter = {}) {
 	if (filter === null || typeof filter !== 'object') throw _invalidJobRequest('listForgetJobs: filter must be an object');
@@ -923,79 +1120,87 @@ export async function listForgetJobs(filter = {}) {
 }
 
 /**
- * Run unfinished erasure jobs again: failed ones whose retry time has come,
- * and pending ones whose run ended without recording an outcome (a crash, a
- * store outage) once its lease expired. Longest due first, at most `limit`
- * (default 100) per call, or just the job named by `id`, which runs regardless
- * of its retry time. Each run first claims the job's lease, so a job another
- * run holds, in this process or another, is skipped. Each run is the full
- * idempotent cascade under the job's stored tenant and cascade options.
- * @param {{ id?: string, limit?: number, onForget?: Function }} [opts]
+ * Run open erasure work again. First the in-memory steps this process still
+ * owes whose retry time has come (results with `steps: 'local'`), then the
+ * jobs whose shared steps are due: failed ones past their `retryAt` and
+ * pending ones whose run let its lease expire, earliest due first, at most
+ * `limit` (default 100). With `id`, just that job - its in-memory steps here
+ * and its shared steps - regardless of retry time; with `exhausted: true`,
+ * the exhausted jobs and this process's exhausted in-memory steps. Each shared
+ * run claims the job's lease first, so a job another live run holds is
+ * skipped.
+ * @param {{ id?: string, limit?: number, exhausted?: boolean, onForget?: Function }} [opts]
  */
 export async function resumeForgetJobs(opts = {}) {
 	if (opts === null || typeof opts !== 'object') throw _invalidJobRequest('resumeForgetJobs: options must be an object');
 	const { id, onForget } = opts;
-	if (id !== undefined && (typeof id !== 'string' || id.length === 0 || id.length > 256)) {
-		throw _invalidJobRequest('resumeForgetJobs: id must be a non-empty string of at most 256 characters');
-	}
+	if (id !== undefined) _jobId(id, 'resumeForgetJobs');
 	const limit = _jobLimit(opts.limit, 'resumeForgetJobs');
 	if (onForget !== undefined && typeof onForget !== 'function') {
 		throw _invalidJobRequest('resumeForgetJobs: onForget must be a function');
 	}
-	/** @type {{ total: number, completed: number, failed: number, results: Array<{ id: string, status: 'completed' | 'failed' | 'skipped' | 'waiting', code?: string }> }} */
+	if (opts.exhausted !== undefined && typeof opts.exhausted !== 'boolean') {
+		throw _invalidJobRequest('resumeForgetJobs: exhausted must be a boolean');
+	}
+	const exhausted = opts.exhausted === true;
+	/** @type {{ total: number, completed: number, failed: number, results: Array<{ id: string, steps: 'shared' | 'local', status: 'completed' | 'failed' | 'skipped', code?: string }> }} */
 	const out = { total: 0, completed: 0, failed: 0, results: [] };
 	const jobs = _forgetJobs;
 	if (jobs === null) return out;
+
+	// In-memory steps first: only this process can do them.
+	let local;
+	if (id !== undefined) local = await _retryLocalDue(id);
+	else if (exhausted) {
+		for (const entry of _localJobs.values()) if (entry.exhausted) { entry.exhausted = false; entry.retryAt = 0; }
+		local = await _retryLocalDue();
+	} else local = await _retryLocalDue();
+	for (const r of local) {
+		out.total++;
+		if (r.status === 'completed') out.completed++;
+		else if (r.status === 'failed') out.failed++;
+		out.results.push({ ...r, steps: 'local' });
+	}
+
 	/** @type {string[]} */
 	let ids;
 	if (id !== undefined) {
 		ids = [id];
 	} else {
 		try {
-			const due = await _bounded(jobs.due({ at: wallEpoch(), limit, processId: _processId() }));
+			const due = await _bounded(jobs.due(exhausted ? { limit, exhausted: true } : { limit }));
 			ids = (Array.isArray(due) ? due : []).slice(0, limit).map((j) => String(j.id));
 		} catch {
 			throw new LiveError('FORGET_JOB_FAILED', 'resumeForgetJobs: the erasure job store could not be read');
 		}
 	}
 	for (const jobId of ids) {
-		out.total++;
-		// A job a run of this process is still working on is not started twice,
-		// and a job whose caller was refused is abandoned, never run.
-		if (_running.has(jobId)) {
-			out.results.push({ id: jobId, status: 'skipped' });
-			continue;
+		// A job whose caller was refused is abandoned, never run, and a job a
+		// run of this process is still working on is not started twice.
+		if (_refused.has(jobId)) {
+			await _abandonRefused(jobs, jobId);
+			if (id === undefined) continue;
 		}
-		const refusedRun = _refused.get(jobId);
-		if (refusedRun !== undefined) {
-			await _abandonRefused(jobs, jobId, refusedRun);
-			out.results.push({ id: jobId, status: 'skipped' });
+		out.total++;
+		if (_running.has(jobId) || _refused.has(jobId)) {
+			out.results.push({ id: jobId, steps: 'shared', status: 'skipped' });
 			continue;
 		}
 		const runId = randomUuid();
-		const at = wallEpoch();
 		let claim;
 		try {
-			claim = await _bounded(jobs.claim({ id: jobId, runId, processId: _processId(), aliveUntil: at + _PROCESS_TTL_MS, at }));
+			claim = await _bounded(jobs.claim({ id: jobId, runId, leaseMs: _LEASE_MS, exhausted: exhausted || id !== undefined }));
 		} catch {
 			out.failed++;
-			out.results.push({ id: jobId, status: 'failed', code: 'FORGET_JOB_FAILED' });
+			out.results.push({ id: jobId, steps: 'shared', status: 'failed', code: 'FORGET_JOB_FAILED' });
 			continue;
 		}
 		if (!claim) {
-			out.results.push({ id: jobId, status: 'skipped' });
+			out.results.push({ id: jobId, steps: 'shared', status: 'skipped' });
 			continue;
 		}
-		// The steps still open: shared ones any process can finish, and the
-		// owner's in-memory ones, which only the owner runs. A step finished by
-		// an earlier run is not open and does not run again.
-		/** @param {unknown} list */
-		const names = (list) => Array.isArray(list) ? list.filter((n) => typeof n === 'string') : [];
-		const job = {
-			id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true,
-			owner: claim.owner === _processId(), ownerAlive: claim.ownerAlive !== false,
-			shared: names(claim.shared), local: names(claim.local)
-		};
+		const shared = Array.isArray(claim.shared) ? claim.shared.filter((/** @type {unknown} */ n) => typeof n === 'string') : [];
+		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true, shared, local: [] };
 		let started = false;
 		try {
 			const { userId, tenantId, cascade } = claim;
@@ -1011,48 +1216,44 @@ export async function resumeForgetJobs(opts = {}) {
 			}
 			const userIdHash = typeof claim.userIdHash === 'string' ? claim.userIdHash : _hashUserId(userId, _forgetHashKey);
 			started = true;
-			/** @type {{ userId: string, userIdHash: string, tenantId: string | null, cascade: any, waiting?: boolean }} */
-			const run = { userId, userIdHash, tenantId: scope, cascade: stored };
-			await _runErasure(jobs, job, run, onForget);
-			if (run.waiting) {
-				out.results.push({ id: jobId, status: 'waiting' });
-			} else {
-				out.completed++;
-				out.results.push({ id: jobId, status: 'completed' });
-			}
+			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: stored }, onForget);
+			out.completed++;
+			out.results.push({ id: jobId, steps: 'shared', status: 'completed' });
 		} catch (err) {
 			const code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
 			// A stored job this run cannot even start still releases its lease
 			// with a failure, so it stays listed and backs off like any other.
 			if (!started) {
-				const failedAt = wallEpoch();
-				const exhausted = job.attempts >= _MAX_ATTEMPTS;
-				const recorded = await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], sharedDone: [], localDone: [], rowsAffected: 0, retryAt: failedAt + _retryDelay(job.attempts), exhausted });
-				if (recorded && exhausted) _reportJobExhausted(jobId, code, job.attempts);
+				const isExhausted = job.attempts >= _MAX_ATTEMPTS;
+				const recorded = await _recordOutcome(jobs, 'fail', {
+					id: jobId, runId, code, failedSurfaces: [], sharedDone: [], rowsAffected: 0,
+					retryAfterMs: _retryDelay(job.attempts), exhausted: isExhausted
+				});
+				if (recorded && isExhausted) _reportJobExhausted(jobId, code, job.attempts);
 			}
 			out.failed++;
-			out.results.push({ id: jobId, status: 'failed', code });
+			out.results.push({ id: jobId, steps: 'shared', status: 'failed', code });
 		}
 	}
 	return out;
 }
 
 /**
- * Give up an unfinished erasure job: it is marked abandoned, never runs again,
- * and the store drops its user id. A job a run is working on - in this
- * process or in another live one - is not abandoned. Resolves whether the job
- * was abandoned; false without a job store.
+ * Give up an open erasure job: the store marks it `abandoned` and drops its
+ * user id, and this process drops the in-memory steps it still owes for it.
+ * A job a live run is working on is not abandoned. Resolves whether anything
+ * was given up; false without a job store.
  * @param {string} id
  * @returns {Promise<boolean>}
  */
 export async function abandonForgetJob(id) {
-	if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
-		throw _invalidJobRequest('abandonForgetJob: id must be a non-empty string of at most 256 characters');
-	}
+	_jobId(id, 'abandonForgetJob');
 	const jobs = _forgetJobs;
 	if (jobs === null || _running.has(id)) return false;
+	const local = _localJobs.delete(id);
+	if (local) _armLocalTimer();
 	try {
-		return (await _bounded(jobs.abandon({ id, at: wallEpoch() }))) === true;
+		return (await _bounded(jobs.abandon({ id }))) === true || local;
 	} catch {
 		throw new LiveError('FORGET_JOB_FAILED', 'abandonForgetJob: the erasure job store could not be written');
 	}

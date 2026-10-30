@@ -663,7 +663,8 @@ describe('live.forget - shape + descriptors', () => {
 			'idempotency.js': 'idempotency',
 			'dead-letter.js': 'webhookDeadLetter',
 			'reactive.js': 'aggregateCohorts',
-			'presence.js': 'presence'
+			'presence.js': 'presence',
+			'forget.js': 'exempt: holds the user id of an erasure only until this process has finished its in-memory steps, to retry them'
 		};
 		const descriptorNames = new Set(_forgetSurfaceNames());
 

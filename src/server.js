@@ -89,7 +89,7 @@ export { sourceGap } from './server/source-gap.js';
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
 export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';
-import { configureForget, _resetForget, installForget, listForgetJobs, resumeForgetJobs, abandonForgetJob } from './server/forget.js';
+import { configureForget, _resetForget, installForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, _stopForgetTimers } from './server/forget.js';
 import { createForgetJobStore } from './server/forget-jobs.js';
 export { configureForget, _resetForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, createForgetJobStore };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
@@ -938,6 +938,7 @@ export function _resetStaleWatch() {
  */
 function _stopBackgroundWork() {
 	_stopCronScheduler();
+	_stopForgetTimers();
 	for (const entry of _topicStaleWatch.values()) clearTimer(entry.timerId);
 }
 
@@ -3762,6 +3763,10 @@ export function _prepareHmr() {
 
 	// Clear pending alarm timers (live.alarm); keeps the store/leader config like cron.
 	_resetAlarms();
+
+	// Stop erasure retry timers; the forget config stays, and the next erasure
+	// or configureForget call arms them again.
+	_stopForgetTimers();
 
 	// Clear lazy queue and reset lazy init state
 	_lazyQueue.length = 0;

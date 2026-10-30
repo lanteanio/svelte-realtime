@@ -4631,8 +4631,6 @@ export interface ForgetJob {
 	 * reveals nothing about the user and a repeated erasure is a new job.
 	 */
 	id: string;
-	/** The process that called `live.forget`; it owns the job's in-memory steps. */
-	processId: string | null;
 	/**
 	 * The audit identifier `onForget` receives for this user, while the job is
 	 * open; null once it is completed or abandoned.
@@ -4640,27 +4638,36 @@ export interface ForgetJob {
 	userIdHash: string | null;
 	tenantId: string | null;
 	/**
-	 * `pending`: a run holds or held the job and recorded no outcome yet
-	 * (still running, or its process died). `failed`: the last run left steps
-	 * open; it runs again at `retryAt`. `exhausted`: it failed on 24 runs and
-	 * no longer runs by itself; `resumeForgetJobs({ id })` runs it, or
-	 * `abandonForgetJob` gives it up. `completed`: every step confirmed.
-	 * `abandoned`: given up on request. The last two keep nothing user-derived.
+	 * The state of the job's shared steps (the durable store, a shared
+	 * dead-letter store). `pending`: a run holds or held the job and recorded
+	 * no outcome yet. `failed`: steps are open; it runs again at `retryAt`.
+	 * `exhausted`: it failed on 24 runs and no longer runs by itself;
+	 * `resumeForgetJobs({ id })` or `resumeForgetJobs({ exhausted: true })`
+	 * runs it, or `abandonForgetJob` gives it up. `completed`: every shared
+	 * step confirmed. `abandoned`: given up on request. The last two keep
+	 * nothing user-derived. In-memory steps are reported in `local`.
 	 */
 	status: ForgetJobStatus;
 	/** Runs started, including the current one. */
 	attempts: number;
-	/** Wall-clock ms the job was first recorded. */
+	/** Store-clock ms the job was first recorded. */
 	createdAt: number;
-	/** Wall-clock ms of the last change. */
+	/** Store-clock ms of the last change. */
 	updatedAt: number;
 	completedAt: number | null;
-	/** Wall-clock ms a failed job is due again; null unless `failed`. */
+	/** Store-clock ms a failed job is due again; null unless `failed`. */
 	retryAt: number | null;
 	/** Rows removed by all of the job's runs together. */
 	rowsAffected: number;
-	/** The last failure, cleared on completion. Surface names only, never store errors. */
+	/** The last failure of a shared step, cleared on completion. Surface names only, never store errors. */
 	error: { code: string; failedSurfaces: string[] } | null;
+	/**
+	 * In-memory steps this process still owes for the job, which it retries
+	 * itself; null when it owes none. Other processes report their own.
+	 * `exhausted`: they failed on 24 tries and are no longer retried by
+	 * themselves.
+	 */
+	local: { open: string[]; attempts: number; retryAt: number | null; exhausted: boolean } | null;
 }
 
 /** What `ForgetJobStore.begin` receives. */
@@ -4669,22 +4676,16 @@ export interface ForgetJobIntent {
 	id: string;
 	/** The run that holds the lease from the start. */
 	runId: string;
-	/** The calling process, which owns the job and holds its lease. */
-	processId: string;
-	/** Wall-clock ms the calling process counts as alive, unless it beats again. */
-	aliveUntil: number;
+	/** How long the lease lasts from now, by the store's clock. */
+	leaseMs: number;
 	userIdHash: string;
 	tenantId: string | null;
-	/** Raw user id, kept only until the job completes. */
+	/** Raw user id, kept only until the job finishes. */
 	userId: string;
 	/** JSON-serializable cascade option to run again on resume. */
 	cascade: boolean | { crdt?: string[] };
-	/** Steps any process can finish: `durable`, and `webhookDeadLetter` for a shared dead-letter store. */
+	/** The shared steps to finish: `durable`, and `webhookDeadLetter` for a dead-letter store other than the built-in one. */
 	shared: string[];
-	/** In-memory steps that only the owning process can finish. */
-	local: string[];
-	/** Wall-clock ms. */
-	at: number;
 }
 
 /** What a successful `ForgetJobStore.claim` resolves: the input of the new run. */
@@ -4695,143 +4696,132 @@ export interface ForgetJobClaim {
 	cascade: boolean | { crdt?: string[] };
 	/** `attempts` after the claim, counting the new run. */
 	attempts: number;
-	/** The owning process. */
-	owner: string;
-	/** Whether the owning process is alive at the claim's `at`. */
-	ownerAlive: boolean;
 	/** Shared steps still open. */
 	shared: string[];
-	/** The owner's in-memory steps still open. */
-	local: string[];
 }
 
 /**
- * Storage for erasure jobs. `createForgetJobStore()` is the in-memory
- * implementation; a store that must survive a process restart persists the
- * same records (docs/erasure-jobs.md has the full contract). Every method may
- * return a promise and must be atomic per job `id`. Times are the wall-clock
- * values the caller passes.
- *
- * A process is alive while the latest `aliveUntil` it reported (through
- * `beat`, `begin` or `claim`) is later than the `at` of the question. A job's
- * lease belongs to one run of one process and holds while that process is
- * alive; `complete` and `fail` change nothing unless their `runId` holds it.
- * Process P may claim an unfinished job when no run of another live process
- * holds it and P has work there: an open shared step, its own job, or the job
- * of an owner that is gone.
+ * Storage for erasure jobs, which track an erasure's shared steps.
+ * `createForgetJobStore()` is the in-memory implementation; a store that must
+ * survive a process restart persists the same records (docs/erasure-jobs.md
+ * has the full contract). Every method may return a promise and must be atomic
+ * per job `id`. Times come from the store's own clock (Redis `TIME`,
+ * PostgreSQL `now()`), never from the caller. A run's lease lasts until the
+ * store-clock time `leaseMs` after it was granted or last renewed; `renew`,
+ * `complete` and `fail` change nothing unless their `runId` holds the lease.
  */
 export interface ForgetJobStore {
-	/** Record that `processId` is alive until `aliveUntil`. */
-	beat(req: { processId: string; at: number; aliveUntil: number }): void | Promise<void>;
 	/**
-	 * Create a new `pending` job with `attempts: 1`, `rowsAffected: 0`, owned
-	 * by `processId`, whose run `runId` holds the lease, and record the process
-	 * as alive until `aliveUntil` - durably, before resolving. Rejects when `id`
-	 * exists.
+	 * Create a new `pending` job with `attempts: 1` and `rowsAffected: 0`,
+	 * with open steps `shared`, whose run `runId` holds the lease for
+	 * `leaseMs` - durably, before resolving. Rejects when `id` exists.
 	 */
 	begin(intent: ForgetJobIntent): void | Promise<void>;
+	/** Extend the lease of `runId` to `leaseMs` from now; resolve whether it holds it. */
+	renew(req: { id: string; runId: string; leaseMs: number }): boolean | Promise<boolean>;
 	/**
-	 * Record `processId` as alive until `aliveUntil`. Then, when that process
-	 * may claim the job, give the lease to `runId`, set `pending`, increment
-	 * `attempts`, set `updatedAt` and resolve the run's input; otherwise resolve
-	 * null and change nothing. A failed job is claimable before its `retryAt`.
+	 * When the job is `pending` or `failed` (or `exhausted` and `exhausted` is
+	 * true) and no unexpired lease holds it: give the lease to `runId` for
+	 * `leaseMs`, set `pending`, increment `attempts`, set `updatedAt` and
+	 * resolve the run's input. Otherwise resolve null and change nothing. A
+	 * failed job is claimable before its `retryAt`.
 	 */
-	claim(req: { id: string; runId: string; processId: string; aliveUntil: number; at: number }): ForgetJobClaim | null | Promise<ForgetJobClaim | null>;
+	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null | Promise<ForgetJobClaim | null>;
 	/**
 	 * When `runId` holds the lease: mark the job `completed` (sets
 	 * `completedAt` and `updatedAt`, adds `rowsAffected`, clears `error`),
 	 * release the lease, delete `userId`, `userIdHash`, `cascade` and the step
-	 * lists, and resolve true. Otherwise resolve false. A store deletes
-	 * completed and abandoned jobs after a retention window of its own.
+	 * list, and resolve true. Otherwise resolve false.
 	 */
-	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number }): boolean | Promise<boolean>;
+	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean | Promise<boolean>;
 	/**
-	 * When `runId` holds the lease: mark the job `failed` with
-	 * `error: { code, failedSurfaces }`, `updatedAt` and `retryAt`, remove
-	 * `sharedDone` from the open shared steps and `localDone` from the owner's
-	 * open in-memory steps, add `rowsAffected`, release the lease, keep
-	 * `userId` and `cascade`, and resolve true. With `exhausted`, set
-	 * `exhausted` instead of `failed`: the job is never due again, though
-	 * still claimable. Otherwise resolve false.
+	 * When `runId` holds the lease: remove `sharedDone` from the open steps,
+	 * add `rowsAffected`, set `error: { code, failedSurfaces }` and
+	 * `updatedAt`, release the lease, keep `userId` and `cascade`, and resolve
+	 * true. The job becomes `failed`, due again `retryAfterMs` from now - or,
+	 * with `exhausted`, `exhausted`: never due again, still claimable on
+	 * request. Otherwise resolve false.
 	 */
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; sharedDone: string[]; localDone: string[]; rowsAffected: number; retryAt: number; exhausted: boolean }): boolean | Promise<boolean>;
+	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean | Promise<boolean>;
 	/**
-	 * When the job is pending, failed or exhausted and no run of a live
-	 * process holds it (or `runId` does): mark it `abandoned`, release the
-	 * lease, delete `userId`, `userIdHash`, `cascade` and the step lists, and
-	 * resolve true.
-	 * Otherwise resolve false. An abandoned job is never claimed.
+	 * When the job is pending, failed or exhausted and no unexpired lease
+	 * holds it (or `runId` does): mark it `abandoned`, release the lease,
+	 * delete `userId`, `userIdHash`, `cascade` and the step list, and resolve
+	 * true. Otherwise resolve false. An abandoned job is never claimed.
 	 */
-	abandon(req: { id: string; at: number; runId?: string }): boolean | Promise<boolean>;
+	abandon(req: { id: string; runId?: string }): boolean | Promise<boolean>;
 	/** Jobs oldest `createdAt` first, optionally one status, at most `limit` (default 100). */
-	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[] | Promise<ForgetJob[]>;
+	list(filter?: { status?: ForgetJobStatus; limit?: number }): Array<Omit<ForgetJob, 'local'>> | Promise<Array<Omit<ForgetJob, 'local'>>>;
 	/**
-	 * Unfinished jobs `processId` may claim at `at` whose due time has come: a
-	 * failed job's `retryAt`, a pending job's creation. Earliest due first,
-	 * then `createdAt`; at most `limit`.
+	 * Jobs a resume may claim now, at most `limit`: pending ones whose lease
+	 * expired and failed ones past `retryAt`, earliest due first, then
+	 * `createdAt`; with `exhausted`, the exhausted ones with no unexpired lease
+	 * instead, oldest first.
 	 */
-	due(req: { at: number; limit: number; processId: string }): ForgetJob[] | Promise<ForgetJob[]>;
+	due(req: { limit: number; exhausted?: boolean }): Array<Omit<ForgetJob, 'local'>> | Promise<Array<Omit<ForgetJob, 'local'>>>;
 }
 
 /** The in-memory job store; every method is synchronous. */
 export interface MemoryForgetJobStore extends ForgetJobStore {
-	beat(req: { processId: string; at: number; aliveUntil: number }): void;
 	begin(intent: ForgetJobIntent): void;
-	claim(req: { id: string; runId: string; processId: string; aliveUntil: number; at: number }): ForgetJobClaim | null;
-	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number }): boolean;
-	fail(outcome: { id: string; runId: string; at: number; code: string; failedSurfaces: string[]; sharedDone: string[]; localDone: string[]; rowsAffected: number; retryAt: number; exhausted: boolean }): boolean;
-	abandon(req: { id: string; at: number; runId?: string }): boolean;
-	list(filter?: { status?: ForgetJobStatus; limit?: number }): ForgetJob[];
-	due(req: { at: number; limit: number; processId: string }): ForgetJob[];
+	renew(req: { id: string; runId: string; leaseMs: number }): boolean;
+	claim(req: { id: string; runId: string; leaseMs: number; exhausted?: boolean }): ForgetJobClaim | null;
+	complete(outcome: { id: string; runId: string; rowsAffected: number }): boolean;
+	fail(outcome: { id: string; runId: string; code: string; failedSurfaces: string[]; sharedDone: string[]; rowsAffected: number; retryAfterMs: number; exhausted: boolean }): boolean;
+	abandon(req: { id: string; runId?: string }): boolean;
+	list(filter?: { status?: ForgetJobStatus; limit?: number }): Array<Omit<ForgetJob, 'local'>>;
+	due(req: { limit: number; exhausted?: boolean }): Array<Omit<ForgetJob, 'local'>>;
 	clear(): void;
 }
 
 /**
  * Create the in-memory erasure job store, holding at most `max` jobs (default
- * 10000). A new job makes room by dropping the oldest job that will not run
- * by itself again - completed or abandoned first, then exhausted. A pending or
- * failed job is never dropped, so when every held job is one `begin` throws
- * and `live.forget` rejects with FORGET_JOB_FAILED before erasing anything. It does not survive a restart, so deployments that must
- * resume after a crash wire a durable store instead.
+ * 10000) and timing leases by the process clock. A new job makes room by
+ * dropping the oldest job that will not run by itself again - completed or
+ * abandoned first, then exhausted, each exhausted one reported as
+ * `forget.job-evicted`. A pending or failed job is never dropped, so when
+ * every held job is one `begin` throws and `live.forget` rejects with
+ * FORGET_JOB_FAILED before erasing anything. It does not survive a restart,
+ * so deployments that must resume after a crash wire a durable store instead.
  */
 export function createForgetJobStore(options?: { max?: number }): MemoryForgetJobStore;
 
 /**
- * Give up an unfinished erasure job: it is marked `abandoned`, never runs
- * again, and the store drops its user id. A job a run of a live process is
- * working on is not abandoned. Resolves whether it was; false without a job
- * store. Rejects with INVALID_REQUEST on a bad id and FORGET_JOB_FAILED when
- * the store cannot be written.
+ * Give up an open erasure job: the store marks it `abandoned` and drops its
+ * user id, and this process drops the in-memory steps it still owes for it. A
+ * job a live run is working on is not abandoned. Resolves whether anything was
+ * given up; false without a job store. Rejects with INVALID_REQUEST on a bad
+ * id and FORGET_JOB_FAILED when the store cannot be written.
  */
 export function abandonForgetJob(id: string): Promise<boolean>;
 
 /**
- * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100).
- * Resolves `[]` without a job store. Rejects with INVALID_REQUEST on a bad
- * filter and FORGET_JOB_FAILED when the store cannot be read.
+ * List recorded erasure jobs, oldest first (`limit` 1 to 1000, default 100),
+ * each with the in-memory steps this process still owes for it. Resolves `[]`
+ * without a job store. Rejects with INVALID_REQUEST on a bad filter and
+ * FORGET_JOB_FAILED when the store cannot be read.
  */
 export function listForgetJobs(filter?: { status?: ForgetJobStatus; limit?: number }): Promise<ForgetJob[]>;
 
 /**
- * Run unfinished erasure jobs this process has work in: its own jobs, jobs
- * with an open shared step (the durable store, a shared dead-letter store),
- * and jobs whose owning process is gone. Without `id` it takes the due ones -
- * failed jobs whose `retryAt` has come and pending jobs no live run holds -
- * earliest due first, at most `limit` (1 to 1000, default 100); with `id`
- * only that job, regardless of its retry time, including an exhausted one. A
- * failed run makes the job due again after a delay that doubles per attempt
- * from one second up to an hour; after 24 runs it is exhausted and reported
- * as `forget.job-exhausted`.
- * A run does the open shared steps and, in the owning process only, the
- * owner's open in-memory steps; a step an earlier run finished is not run
- * again. `completed`: the job is done. `waiting`: this run did its part and
- * only a live owner's in-memory steps remain. `skipped`: unknown or finished,
- * held by another live run, or nothing for this process to do. `onForget`
- * fires for each completed job. Resolves zero counts without a job store.
+ * Run open erasure work again. First the in-memory steps this process still
+ * owes whose retry time has come (results with `steps: 'local'`; only this
+ * process can do them, and it also retries them by itself), then jobs whose
+ * shared steps are due (`steps: 'shared'`): failed ones past their `retryAt`
+ * and pending ones whose run let its lease expire, earliest due first, at most
+ * `limit` (1 to 1000, default 100). With `id`, only that job, regardless of
+ * retry time; with `exhausted: true`, every exhausted job and this process's
+ * exhausted in-memory steps. A failed run makes a job due again after a delay
+ * that doubles per attempt from one second up to an hour; after 24 runs it is
+ * exhausted and reported. A shared run claims the job's lease first, so a job
+ * another live run holds reports `skipped`, as does an unknown or finished
+ * one. `onForget` fires for each job whose shared steps complete. Resolves
+ * zero counts without a job store.
  */
 export function resumeForgetJobs(opts?: {
 	id?: string;
 	limit?: number;
+	exhausted?: boolean;
 	onForget?: (record: {
 		userIdHash: string;
 		tenantId: string | null;
@@ -4844,7 +4834,7 @@ export function resumeForgetJobs(opts?: {
 	total: number;
 	completed: number;
 	failed: number;
-	results: Array<{ id: string; status: 'completed' | 'failed' | 'skipped' | 'waiting'; code?: string }>;
+	results: Array<{ id: string; steps: 'shared' | 'local'; status: 'completed' | 'failed' | 'skipped'; code?: string }>;
 }>;
 
 /**
@@ -4885,10 +4875,13 @@ export interface ForgetStore {
  * Keys are copied at configuration; active erasures retain their starting key.
  * `jobs` records every erasure as a resumable job: `true` for the in-memory
  * store (or to keep the store already configured), a `ForgetJobStore` that
- * survives restarts, or `null`/`false` for none (the default). With a job store, `live.forget` requires `tenantId`, and a
- * `hashKey` is strongly recommended: an open job stores the audit hash, which
- * without a key is an unkeyed SHA-256 that anyone can match against
- * candidate user ids.
+ * survives restarts, or `null`/`false` for none (the default). With a job
+ * store, `live.forget` requires `tenantId`, and a `hashKey` is strongly
+ * recommended: an open job stores the audit hash, which without a key is an
+ * unkeyed SHA-256 that anyone can match against candidate user ids. The store
+ * tracks the shared steps; each process keeps and retries its own in-memory
+ * steps. `resumeIntervalMs` (1000 to 86400000, default null) runs
+ * `resumeForgetJobs()` on that interval while a job store is configured.
  * `timeoutMs` (1 to 600000; unset or null waits as long as the store takes,
  * the default) bounds each store call an erasure waits on - the job record,
  * each in-memory surface, the durable store and the outcome write - so a
@@ -4906,6 +4899,8 @@ export function configureForget(
 			jobs?: boolean | ForgetJobStore | null;
 			/** Longest wait on one store call, in ms (1 to 600000); null or unset waits without a bound. */
 			timeoutMs?: number | null;
+			/** Run `resumeForgetJobs()` every this many ms (1000 to 86400000); null or unset never does. */
+			resumeIntervalMs?: number | null;
 		}
 		| null
 ): void;
