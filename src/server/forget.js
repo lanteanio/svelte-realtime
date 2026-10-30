@@ -864,7 +864,7 @@ function _publicJob(j) {
 	return {
 		id: String(j.id),
 		processId: typeof j.processId === 'string' ? j.processId : null,
-		userIdHash: String(j.userIdHash),
+		userIdHash: typeof j.userIdHash === 'string' ? j.userIdHash : null,
 		tenantId: typeof j.tenantId === 'string' ? j.tenantId : null,
 		status: j.status,
 		attempts: Number(j.attempts) || 0,

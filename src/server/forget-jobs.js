@@ -162,7 +162,8 @@ export function createForgetJobStore(options = {}) {
 		},
 
 		/**
-		 * Mark the job completed and drop the raw user id, cascade and step lists.
+		 * Mark the job completed and drop the raw user id, its audit hash, the
+		 * cascade and the step lists: a finished job keeps nothing user-derived.
 		 * Returns false, changing nothing, unless `runId` holds the lease.
 		 * @param {{ id: string, runId: string, at: number, rowsAffected: number }} outcome
 		 */
@@ -172,7 +173,7 @@ export function createForgetJobStore(options = {}) {
 			Object.assign(j, {
 				status: 'completed', updatedAt: outcome.at, completedAt: outcome.at,
 				rowsAffected: j.rowsAffected + (Number(outcome.rowsAffected) || 0), error: null,
-				userId: null, cascade: null, shared: [], local: [],
+				userId: null, userIdHash: null, cascade: null, shared: [], local: [],
 				leaseRunId: null, leaseProcessId: null, dueAt: null
 			});
 			settled.add(j.id);
@@ -205,8 +206,8 @@ export function createForgetJobStore(options = {}) {
 
 		/**
 		 * Give up an unfinished job that no run of a live process holds (or that
-		 * `runId` holds): mark it abandoned, drop the raw user id, cascade and
-		 * step lists. Returns whether it did.
+		 * `runId` holds): mark it abandoned, drop the raw user id, its audit
+		 * hash, the cascade and step lists. Returns whether it did.
 		 * @param {{ id: string, at: number, runId?: string }} req
 		 */
 		abandon(req) {
@@ -214,7 +215,7 @@ export function createForgetJobStore(options = {}) {
 			if (j === undefined || _FINISHED.has(j.status)) return false;
 			if (j.leaseRunId !== null && j.leaseRunId !== req.runId && _alive(j.leaseProcessId, req.at)) return false;
 			Object.assign(j, {
-				status: 'abandoned', updatedAt: req.at, userId: null, cascade: null, shared: [], local: [],
+				status: 'abandoned', updatedAt: req.at, userId: null, userIdHash: null, cascade: null, shared: [], local: [],
 				leaseRunId: null, leaseProcessId: null, dueAt: null
 			});
 			settled.delete(j.id);

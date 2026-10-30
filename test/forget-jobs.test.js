@@ -649,3 +649,19 @@ describe('jobs that cannot finish', () => {
 		await expect(abandonForgetJob('')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
 	});
 });
+
+describe('erasure job retention', () => {
+	afterEach(() => configureWebhooks({ deadLetter: false }));
+
+	it('keeps no user-derived field once a job is completed or abandoned', async () => {
+		configureForget({ store: durable(), jobs: true });
+		const done = await live.forget('alice', { tenantId: null });
+		configureWebhooks({ deadLetter: { add() { return null; } } });
+		const err = await live.forget('bob', { tenantId: null }).catch((e) => e);
+		expect((await listForgetJobs({ status: 'failed' }))[0].userIdHash).toBe(sha('bob'));
+		await abandonForgetJob(err.job);
+		const byId = Object.fromEntries((await listForgetJobs()).map((j) => [j.id, j]));
+		expect(byId[done.job]).toMatchObject({ status: 'completed', userIdHash: null });
+		expect(byId[err.job]).toMatchObject({ status: 'abandoned', userIdHash: null });
+	});
+});

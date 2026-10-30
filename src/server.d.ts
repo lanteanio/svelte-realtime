@@ -4633,8 +4633,11 @@ export interface ForgetJob {
 	id: string;
 	/** The process that called `live.forget`; it owns the job's in-memory steps. */
 	processId: string | null;
-	/** The audit identifier `onForget` receives for this user. */
-	userIdHash: string;
+	/**
+	 * The audit identifier `onForget` receives for this user, while the job is
+	 * open; null once it is completed or abandoned.
+	 */
+	userIdHash: string | null;
 	tenantId: string | null;
 	/**
 	 * `pending`: a run holds or held the job and recorded no outcome yet
@@ -4642,7 +4645,7 @@ export interface ForgetJob {
 	 * open; it runs again at `retryAt`. `exhausted`: it failed on 24 runs and
 	 * no longer runs by itself; `resumeForgetJobs({ id })` runs it, or
 	 * `abandonForgetJob` gives it up. `completed`: every step confirmed.
-	 * `abandoned`: given up on request. The last two hold no user id.
+	 * `abandoned`: given up on request. The last two keep nothing user-derived.
 	 */
 	status: ForgetJobStatus;
 	/** Runs started, including the current one. */
@@ -4737,8 +4740,9 @@ export interface ForgetJobStore {
 	/**
 	 * When `runId` holds the lease: mark the job `completed` (sets
 	 * `completedAt` and `updatedAt`, adds `rowsAffected`, clears `error`),
-	 * release the lease, delete `userId`, `cascade` and the step lists, and
-	 * resolve true. Otherwise resolve false.
+	 * release the lease, delete `userId`, `userIdHash`, `cascade` and the step
+	 * lists, and resolve true. Otherwise resolve false. A store deletes
+	 * completed and abandoned jobs after a retention window of its own.
 	 */
 	complete(outcome: { id: string; runId: string; at: number; rowsAffected: number }): boolean | Promise<boolean>;
 	/**
@@ -4754,7 +4758,8 @@ export interface ForgetJobStore {
 	/**
 	 * When the job is pending, failed or exhausted and no run of a live
 	 * process holds it (or `runId` does): mark it `abandoned`, release the
-	 * lease, delete `userId`, `cascade` and the step lists, and resolve true.
+	 * lease, delete `userId`, `userIdHash`, `cascade` and the step lists, and
+	 * resolve true.
 	 * Otherwise resolve false. An abandoned job is never claimed.
 	 */
 	abandon(req: { id: string; at: number; runId?: string }): boolean | Promise<boolean>;
@@ -4880,7 +4885,10 @@ export interface ForgetStore {
  * Keys are copied at configuration; active erasures retain their starting key.
  * `jobs` records every erasure as a resumable job: `true` for the in-memory
  * store, a `ForgetJobStore` that survives restarts, or `null`/`false` for none
- * (the default). With a job store, `live.forget` requires `tenantId`.
+ * (the default). With a job store, `live.forget` requires `tenantId`, and a
+ * `hashKey` is strongly recommended: an open job stores the audit hash, which
+ * without a key is an unkeyed SHA-256 that anyone can match against
+ * candidate user ids.
  * `timeoutMs` (1 to 600000; unset or null waits as long as the store takes,
  * the default) bounds each store call an erasure waits on - the job record,
  * each in-memory surface, the durable store and the outcome write - so a
