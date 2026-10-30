@@ -5630,7 +5630,10 @@ export interface DeadLetterStore {
 	/**
 	 * Retain an event. Resolves the record id, which is also the receipt for
 	 * every repeat of a keyed add while the record is retained, or null when an
-	 * erasure tombstone suppresses the capture.
+	 * erasure tombstone suppresses the capture. An asynchronous `add` must
+	 * time out on its own: a write that never settles keeps its place among
+	 * the 1000 dead-letter writes a process allows in flight until the process
+	 * restarts.
 	 */
 	add(rec: DeadLetterCapture): string | null | Promise<string | null>;
 	get(id: string): DeadLetterRecord | null | Promise<DeadLetterRecord | null>;

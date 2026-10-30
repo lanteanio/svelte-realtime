@@ -9,6 +9,7 @@ import { createServer } from 'node:http';
 import { createDeadLetterStore, configureWebhooks, getDeadLetter, setOperationalEventSink } from '../src/server.js';
 import { _fireWebhookOut, _submitWebhookOut, _MAX_DEAD_LETTER_CAPTURES, _deadLetterCapturesSettled } from '../src/server/webhook-out.js';
 import { _webhookOutById } from '../src/server/state.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 const rec = (over = {}) => ({ webhookId: 'w', topic: 'orders', event: 'created', data: { id: 1, author: 'u1' }, attempts: 3, error: 'x', failedAt: 1, ...over });
 const failingEntry = { id: 'test/wh', config: { url: 'http://127.0.0.1:9/blocked' } }; // loopback -> SSRF-blocked
@@ -312,6 +313,17 @@ describe('dead-letter capture outside the delivery lane', () => {
 		const lost = events.filter((e) => e.event === 'webhook.dead-letter.persist-failed');
 		expect(lost).toHaveLength(3);
 		expect(lost[0].attributes.webhookId).toBe(failingEntry.id);
+	});
+
+	it('reports a capture that throws before its write as a lost record', async () => {
+		configureWebhooks({ deadLetter: true });
+		setRuntimeEnv({ clock: { now: () => { throw new Error('clock unavailable'); } } });
+		try {
+			await expect(_fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null)).resolves.not.toThrow();
+		} finally {
+			resetRuntimeEnv();
+		}
+		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(1);
 	});
 
 	it('reports a synchronous throw from the store once, without retrying it', async () => {

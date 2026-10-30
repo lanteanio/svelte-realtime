@@ -10,6 +10,7 @@ import {
 	__registerWebhookOut, _prepareHmr, onError, setOperationalEventSink, configureWebhooks, replayDeadLetter, getDeadLetter
 } from '../src/server.js';
 import { _bindAlarmCtx } from '../src/server/alarm.js';
+import { _fireWebhookOut, _deadLetterCapturesSettled } from '../src/server/webhook-out.js';
 import { createTestEnv } from '../src/testing.js';
 import { state, registry as liveRegistry, _webhookOutById } from '../src/server/state.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
@@ -410,6 +411,41 @@ describe('outbound webhook and dead-letter queue', () => {
 		const writes = metrics.sets.length;
 		configureWebhooks({ deadLetter: false });
 		expect(metrics.labelSets.slice(-(metrics.sets.length - writes)).filter(([, l]) => l.kind === 'dlq')).toEqual([]);
+	}, 10000);
+
+	const blocked = { id: 'test/blocked', config: { url: 'http://127.0.0.1:9/blocked' } }; // loopback -> SSRF-blocked
+
+	it('reports the dead-letter depth when a repeated keyed write lands', async () => {
+		setOperationalEventSink(() => {});
+		configureWebhooks({ deadLetter: true });
+		const store = getDeadLetter();
+		const add = store.add.bind(store);
+		let lose = true;
+		store.add = (rec) => {
+			if (lose) { lose = false; return Promise.reject(new Error('connection reset')); }
+			return add(rec);
+		};
+		await _fireWebhookOut(blocked, 'orders', 'created', { id: 1 }, null);
+		await _deadLetterCapturesSettled();
+		expect(store.count()).toBe(1);
+		expect(gauge(QUEUED, 'dlq')).toBe(1);
+	}, 10000);
+
+	it('keeps a dead-letter write when the metrics registry throws', async () => {
+		const events = [];
+		setOperationalEventSink((e) => events.push(e));
+		configureWebhooks({ deadLetter: true });
+		const gaugeOf = metrics.gauge;
+		let broken = false;
+		live.metrics({ ...metrics, gauge(def) { const g = gaugeOf(def); return { ...g, set(...args) { if (broken) throw new Error('registry down'); return g.set(...args); } }; } });
+		broken = true;
+		try {
+			await expect(_fireWebhookOut(blocked, 'orders', 'created', { id: 1 }, null)).resolves.not.toThrow();
+		} finally {
+			broken = false;
+		}
+		expect(getDeadLetter().count()).toBe(1);
+		expect(events.filter((e) => e.event === 'webhook.dead-letter.persist-failed')).toHaveLength(0);
 	}, 10000);
 });
 

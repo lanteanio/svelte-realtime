@@ -247,7 +247,13 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 		if (_captures.size >= _MAX_DEAD_LETTER_CAPTURES) {
 			_reportDeadLetterFailure(entry, new Error('too many dead-letter writes in flight (' + _MAX_DEAD_LETTER_CAPTURES + ')'));
 		} else {
-			const pending = _captureDeadLetter(entry, slot, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+			let pending;
+			try {
+				pending = _captureDeadLetter(entry, slot, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+			} catch (e) {
+				// Anything that throws before the write leaves the record unwritten.
+				_reportDeadLetterFailure(entry, e);
+			}
 			if (pending !== undefined) {
 				const capture = pending
 					.catch((e) => _reportDeadLetterFailure(entry, e))
@@ -329,7 +335,7 @@ function _addDeadLetter(entry, store, rec, key) {
 		return undefined;
 	}
 	if (!added || typeof added.then !== 'function') {
-		_bgDeadLetterChanged();
+		_deadLetterChanged();
 		return undefined;
 	}
 	return _awaitDeadLetter(entry, store, rec, key !== null, added);
@@ -357,7 +363,20 @@ async function _awaitDeadLetter(entry, store, rec, keyed, added) {
 			_reportDeadLetterFailure(entry, e);
 			return;
 		}
+		if (!added || typeof added.then !== 'function') {
+			_deadLetterChanged();
+			return;
+		}
 	}
+}
+
+/**
+ * Tell the background metrics a synchronous store took a record. The record
+ * is written by then, so a failing metrics registry must not turn the write
+ * into a reported loss.
+ */
+function _deadLetterChanged() {
+	try { _bgDeadLetterChanged(); } catch { /* The write stands; metrics are best-effort. */ }
 }
 
 /**
