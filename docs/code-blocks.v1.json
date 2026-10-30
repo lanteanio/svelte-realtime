@@ -6,13 +6,13 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 248,
+		"total": 245,
 		"classifications": {
 			"command": 4,
 			"tutorial": 75,
 			"executed": 33,
 			"output": 5,
-			"syntax": 129,
+			"syntax": 126,
 			"fragment": 1,
 			"config": 1
 		},
@@ -21,7 +21,7 @@
 			"app-context": 75,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
-			"acorn": 122,
+			"acorn": 119,
 			"svelte": 6,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
@@ -29,7 +29,7 @@
 		},
 		"notRunnable": {
 			"app-context": 75,
-			"ambient-identifiers": 120,
+			"ambient-identifiers": 117,
 			"browser-component": 6,
 			"type-declarations-only": 1,
 			"requires-browser": 1
@@ -1329,36 +1329,6 @@
 			"classification": "syntax",
 			"channel": "acorn",
 			"reason": "not runnable: ambient-identifiers app, metrics"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "be3ce7a74d419572d34eccd703e97c81f6f0b660ad52ff5ed0bcf1b9401097a1",
-			"occurrence": 1,
-			"language": "js",
-			"section": "Prometheus metrics > Cohort-stratified metrics - never trust the aggregate",
-			"classification": "syntax",
-			"channel": "acorn",
-			"reason": "not runnable: ambient-identifiers live"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "4c6bd842db8f597346d74d79db3a51bfc61a7e3777675f3fea1728c629d5cfc3",
-			"occurrence": 1,
-			"language": "js",
-			"section": "Prometheus metrics > Per-subsystem performance budgets",
-			"classification": "syntax",
-			"channel": "acorn",
-			"reason": "not runnable: ambient-identifiers live"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "d4a4654176c87f32f0930ef0c648c244238382372dc988f30e67c08ea35b9c17",
-			"occurrence": 1,
-			"language": "js",
-			"section": "Prometheus metrics > Pause-aware lifeline `/metrics`",
-			"classification": "syntax",
-			"channel": "acorn",
-			"reason": "not runnable: ambient-identifiers live"
 		},
 		{
 			"document": "README.md",

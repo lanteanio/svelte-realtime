@@ -3,8 +3,9 @@ import { deliverWebhook, redactUrl } from 'svelte-adapter-uws/plugins/webhooks';
 import { now, monotonicNow } from '../shared/runtime.js';
 import { state } from './state.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
-import { _createLane, _laneSubmit, WEBHOOK_MAX_CONCURRENT, WEBHOOK_MAX_QUEUED } from './work-lane.js';
+import { _createLane, _laneSubmit, LANE_FAILED, WEBHOOK_MAX_CONCURRENT, WEBHOOK_MAX_QUEUED } from './work-lane.js';
 import { LiveError } from './live-error.js';
+import { _bgRetryExhausted, _bgDeadLetterChanged } from './background-metrics.js';
 
 // The generic SSRF-gated, retrying delivery engine now lives in the adapter
 // plugin (svelte-adapter-uws/plugins/webhooks); this module is the realtime glue
@@ -76,8 +77,23 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	const startedAt = monotonicNow();
 	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry, traceContext));
 	if (r.ok) return;
+	// Every attempt the retry policy allows was made and the last one failed. A
+	// delivery the gate, the breaker, the retry budget or a non-retryable status
+	// stopped earlier is not counted.
+	if (r.attempts >= _retryAttempts(entry.config)) _bgRetryExhausted('webhook');
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	_captureDeadLetter(entry, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+	return LANE_FAILED;
+}
+
+/**
+ * The attempt limit the delivery engine applies for this config: `retry.attempts`
+ * when it is a positive integer, else the engine's default of 3.
+ * @param {any} config
+ */
+function _retryAttempts(config) {
+	const n = config.retry?.attempts;
+	return Number.isInteger(n) && n > 0 ? n : 3;
 }
 
 /** Keep an undelivered event in the dead-letter store, when one is configured. */
@@ -97,6 +113,7 @@ function _captureDeadLetter(entry, topic, event, data, attempts, err, startedAt,
 			traceContext
 		});
 		if (added && typeof added.then === 'function') added.catch((e) => _reportDeadLetterFailure(entry, e));
+		else _bgDeadLetterChanged();
 	} catch (e) {
 		_reportDeadLetterFailure(entry, e);
 	}

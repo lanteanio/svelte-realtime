@@ -2638,7 +2638,7 @@ Single-instance setups without a registry continue to throw `LiveError('NOT_FOUN
 
 ## Prometheus metrics
 
-Opt-in instrumentation for RPC calls, stream subscriptions, and cron executions. Zero overhead if not called.
+Opt-in instrumentation for RPC calls, stream subscriptions, and background work. Zero overhead if not called.
 
 `live.metrics(registry)` is a one-time setup call. The top of `src/hooks.ws.{js,ts}` is a natural place, since it loads once when the server boots. Pair it with the `createMetrics()` registry from `svelte-adapter-uws-extensions/prometheus`:
 
@@ -2666,59 +2666,7 @@ app.get('/metrics', metrics.handler);
 
 The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, preserving that range independently of the extensions registry's configured defaults. The registry's generic default uses fractional seconds through 1 s. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
 
-### Registered metrics
-
-- `svelte_realtime_rpc_total` - RPC call count by path and status
-- `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
-- `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
-- `svelte_realtime_stream_subscriptions` - active stream subscription gauge
-- `svelte_realtime_cron_total` - cron execution count by path and status
-- `svelte_realtime_cron_errors_total` - cron errors by path
-- `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
-- `svelte_realtime_webhook_dead_letter_failures_total` - failed webhook deliveries the dead-letter store could not persist (see "Dead-letter queue")
-- `svelte_realtime_background_inflight` - background work running in this process by `kind` (`derived`, `effect`, `webhook`); needs a gauge with `set`
-- `svelte_realtime_background_queued` - background work waiting for a slot by `kind` (`effect`, `webhook`); needs a gauge with `set`
-- `svelte_realtime_background_total` - background work by `kind` and `result`: `rejected` or `coalesced` when an effect or webhook is past its limits
-
-### Cohort-stratified metrics - never trust the aggregate
-
-An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC execution series carries the caller's cohort label:
-<!-- doc-code: ambient names="live" -->
-```js
-live.metrics(registry, {
-  // Classified ONCE per connection from whatever your upgrade hook stashed
-  // on the connection's user data. Keep the cardinality SMALL.
-  cohort: (userData) => `${userData.deviceClass}-${userData.netClass}` // 'desktop-fast', 'mobile-3g', ...
-});
-```
-
-Distinct labels are bounded at 16 (overflow folds into `'other'`; a pre-identification guard path or a throwing classifier reads `'unknown'`). The unlabeled aggregate stays derivable by summing - dashboard the per-cohort series first and the aggregate as context, not the other way around.
-
-### Per-subsystem performance budgets
-
-Declare how long a subsystem is ALLOWED to take, measure what it ACTUALLY takes, and let the dashboard render budget vs actual over time - the drift is the early warning, the exceeded counter is the alert:
-<!-- doc-code: ambient names="live" -->
-```js
-const tickBudget = live.perfBudget('tick', 8); // 8ms per game tick
-
-// Per iteration - either wrap:
-tickBudget.measure(() => runTick());
-// ...or record a duration you already have:
-tickBudget.track(elapsedMs);
-```
-
-Emits `svelte_realtime_perf_budget_seconds` (gauge - the declaration), `svelte_realtime_perf_actual_seconds` (histogram), and `svelte_realtime_perf_budget_exceeded_total` (counter), all labeled by `subsystem`. Requires `live.metrics()` first.
-
-### Pause-aware lifeline `/metrics`
-
-A `/metrics` handler that serializes the registry inline competes with whatever is melting the event loop - exactly when you need the numbers most, the scrape adds work or stalls. The lifeline decouples them: the registry is pre-serialized on a background interval into an in-memory snapshot, and the admin route serves THAT string in O(1):
-<!-- doc-code: ambient names="live" -->
-```js
-live.metrics(registry, { lifeline: true }); // or { lifeline: { intervalMs: 5000 } }
-```
-
-`GET <adminPath>/metrics` (behind the same fail-closed `realtime({ admin })` auth gate as `/dlq` and `/introspect`) answers with the snapshot; its age rides the `x-snapshot-age-ms` header, so the scraper can tell a fresh read from a wedged renderer. Requires a registry with `serialize()` - the extensions `createMetrics()` qualifies. The plain `app.get('/metrics', metrics.handler)` mount above remains fine for normal operation; the lifeline is the degraded-day path.
+The [metrics reference](docs/metrics.md) lists every registered series and covers cohort-stratified RPC series (`cohort`), per-subsystem performance budgets (`live.perfBudget`) and the pause-aware lifeline scrape (`lifeline`). Cron, alarms, polls, derived streams, effects, outbound webhooks and dead-letter replays report through one bounded schema, the `svelte_realtime_background_*` series described in [Background work metrics](docs/background-metrics.md) and exported as `BACKGROUND_METRICS`.
 
 ### Push, not poll
 

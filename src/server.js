@@ -70,6 +70,7 @@ import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeRe
 import { _recordRpcMetrics, _rpcClosedSockets, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
 export { PRESSURE_REASONS } from './server/admission.js';
+export { BACKGROUND_METRICS } from './server/background-metrics.js';
 import { _getIdentityKey, _getAuthenticatedId, _isIdentityValue, _resetUnusableIdWarning } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
 import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';

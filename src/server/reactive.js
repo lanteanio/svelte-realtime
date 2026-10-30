@@ -6,7 +6,8 @@ import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggrega
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _submitWebhookOut } from './webhook-out.js';
-import { _createLane, _laneSubmit, _derivedInflight, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED } from './work-lane.js';
+import { _createLane, _laneSubmit, LANE_FAILED, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED } from './work-lane.js';
+import { _bgClock, _bgDone, _bgInflight } from './background-metrics.js';
 import { LiveError } from './live-error.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish, UNSEQUENCED } from './publish-helpers.js';
@@ -766,7 +767,10 @@ async function _recomputeDerived(entry, platform) {
 	if (entry.running || !entry.active) return;
 	entry.running = true;
 	entry.pending = false;
-	_derivedInflight(1);
+	_bgInflight('derived', 1);
+	const startedAt = _bgClock();
+	/** @type {'ok' | 'error'} */
+	let outcome = 'ok';
 	let generation = entry.generation;
 	try {
 		let result;
@@ -813,6 +817,7 @@ async function _recomputeDerived(entry, platform) {
 		const wire = _redactOrDrop(entry.topic, result);
 		if (wire !== REDACT_DROP) _platformPublish(platform, entry.topic, 'set', wire, UNSEQUENCED);
 	} catch (err) {
+		outcome = 'error';
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}
 		}
@@ -827,7 +832,8 @@ async function _recomputeDerived(entry, platform) {
 		});
 	} finally {
 		entry.running = false;
-		_derivedInflight(-1);
+		_bgInflight('derived', -1);
+		_bgDone('derived', startedAt, outcome);
 		if (entry.active && entry.pending && !entry.timer) _recomputeDerived(entry, platform);
 	}
 }
@@ -1109,18 +1115,17 @@ function _effectOverflowEnded(lane, rejected) {
  */
 function _fireEffect(entry, event, data, platform) {
 	// Not an async function: a handler that returns without a promise settles
-	// here and frees its lane slot at once.
+	// here and frees its lane slot at once. A failure ends in LANE_FAILED.
 	let result;
 	try {
 		result = entry.fn(event, data, platform);
 	} catch (err) {
-		_reportEffectFailure(err);
-		return;
+		return _reportEffectFailure(err);
 	}
 	if (result && typeof result.then === 'function') return Promise.resolve(result).then(undefined, _reportEffectFailure);
 }
 
-/** @param {unknown} err */
+/** @param {unknown} err @returns {typeof LANE_FAILED} */
 function _reportEffectFailure(err) {
 	if (state.serverErrorHandler) {
 		try { state.serverErrorHandler('effect', err); } catch {}
@@ -1134,4 +1139,5 @@ function _reportEffectFailure(err) {
 		message: 'A reactive effect handler failed.',
 		attributes: { error: diagnosticErrorMessage(err) }
 	});
+	return LANE_FAILED;
 }

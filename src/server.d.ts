@@ -13,6 +13,45 @@ export const PRESSURE_REASONS: readonly [
 	'MEMORY'
 ];
 
+/** A metric descriptor of the background work schema. */
+export interface BackgroundMetricDescriptor<T extends 'counter' | 'histogram' | 'gauge', L extends readonly string[]> {
+	readonly type: T;
+	readonly name: string;
+	readonly help: string;
+	readonly labelNames: L;
+}
+
+/**
+ * The background work metric schema: one set of series for cron, alarm, poll,
+ * derived, effect, outbound webhook and dead-letter work in this package and
+ * for the durable jobs and tasks of svelte-adapter-uws-extensions. `kind` and
+ * `result` take only the listed values, and no label carries a topic, path,
+ * tenant, user or payload. Every producer registers these exact descriptors
+ * and reports only its own kinds. See docs/background-metrics.md.
+ */
+export const BACKGROUND_METRICS: {
+	readonly kinds: readonly ['cron', 'alarm', 'poll', 'derived', 'effect', 'webhook', 'dlq', 'job', 'task'];
+	readonly results: readonly ['ok', 'error', 'timeout', 'skipped', 'rejected', 'coalesced'];
+	/** Items by how they ended. */
+	readonly total: BackgroundMetricDescriptor<'counter', readonly ['kind', 'result']>;
+	/** Run time in seconds of items that ran (`ok`, `error`, `timeout`). */
+	readonly duration: BackgroundMetricDescriptor<'histogram', readonly ['kind', 'result']> & { readonly buckets: readonly number[] };
+	/** Items running in this process. */
+	readonly inflight: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Items waiting to start. */
+	readonly queued: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Age in seconds of the oldest waiting item, 0 when none waits. */
+	readonly oldestAge: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
+	/** Items that failed on the last attempt their retry policy allows. */
+	readonly retriesExhausted: BackgroundMetricDescriptor<'counter', readonly ['kind']>;
+};
+
+/** The `kind` label of the background work metrics. */
+export type BackgroundWorkKind = (typeof BACKGROUND_METRICS.kinds)[number];
+
+/** The `result` label of the background work count and duration. */
+export type BackgroundWorkResult = (typeof BACKGROUND_METRICS.results)[number];
+
 /** Validated W3C distributed-trace carrier. */
 export interface OperationTraceContext {
 	readonly traceparent: string;
@@ -2978,9 +3017,14 @@ export namespace live {
 
 	/**
 	 * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
-	 * subscriptions, and cron executions. Disabled until called. RPC delivery
+	 * subscriptions, and background work. Disabled until called. RPC delivery
 	 * outcomes are separate from execution: delivered, backpressure, closed,
 	 * or exception. Delivery acceptance is not a client acknowledgement.
+	 *
+	 * Background work (cron, alarm, poll, derived, effect, outbound webhook and
+	 * dead-letter replay) is reported through the `svelte_realtime_background_*`
+	 * series described by {@link BACKGROUND_METRICS}. Their gauges are written
+	 * with `set`, so a registry gauge without it leaves them empty.
 	 *
 	 * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
 	 * See the README "Prometheus metrics" section for a working example

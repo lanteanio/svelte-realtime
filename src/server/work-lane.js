@@ -1,5 +1,5 @@
 // @ts-check
-import { state } from './state.js';
+import { _bgClock, _bgDone, _bgCount, _bgInflight, _bgQueued, _bgQueuedAt, _bgQueueWaiting, _bgQueueIdle } from './background-metrics.js';
 
 // Bounded execution for work a publish schedules off its own path: effect
 // handlers and outbound webhook deliveries. Each effect and each outbound
@@ -9,10 +9,10 @@ import { state } from './state.js';
 // HTTP endpoint) turns every later publish into one more pending promise and
 // one more held payload, with no limit.
 //
-// A job is admitted in a microtask after its publish, exactly when it used to
-// start, so the publish path pays one scheduled callback as before. A job that
-// finishes synchronously gives its slot back at once; only work that is still
-// pending holds a slot, so a burst of fast handlers never queues.
+// A job is admitted in a microtask after its publish, so the publish path pays
+// one scheduled callback. A job that finishes synchronously gives its slot
+// back at once; only work that is still pending holds a slot, so a burst of
+// fast handlers never queues.
 
 /** Default limits for `live.effect`: high enough that a small app never meets them. */
 export const EFFECT_MAX_CONCURRENT = 32;
@@ -21,18 +21,14 @@ export const EFFECT_MAX_QUEUED = 10000;
 export const WEBHOOK_MAX_CONCURRENT = 8;
 export const WEBHOOK_MAX_QUEUED = 10000;
 
+/**
+ * What a lane's `run` returns, or resolves to, for a job that failed after
+ * reporting its own error. No value a handler returns can equal it.
+ */
+export const LANE_FAILED = Symbol('lane-failed');
+
 /** Queue slots consumed at the front before the backing array is compacted. */
 const _COMPACT_AT = 1024;
-
-/**
- * Process-wide totals per kind, mirrored into the `live.metrics` gauges. The
- * label set is closed: `kind` is one of these keys and nothing else.
- */
-const _totals = {
-	derived: { inflight: 0, queued: 0 },
-	effect: { inflight: 0, queued: 0 },
-	webhook: { inflight: 0, queued: 0 }
-};
 
 /**
  * @typedef {object} WorkLane
@@ -42,11 +38,12 @@ const _totals = {
  * @property {number} maxQueued
  * @property {'reject' | 'coalesce'} overflow
  * @property {boolean} metered - false for framework-internal watchers kept out of the app's series
- * @property {(a: any, b: any, c: any, d: any) => any} run
+ * @property {(a: any, b: any, c: any, d: any) => any} run - returns `LANE_FAILED` (or a promise of it) when the job failed
  * @property {(lane: WorkLane, a: any, b: any, c: any, d: any) => void} [onReject]
  * @property {(lane: WorkLane, rejected: number) => void} [onDrained]
  * @property {number} active
  * @property {Array<(go: boolean) => void>} queue - waiting jobs, as the resolvers of their waits
+ * @property {number[]} since - when each waiting job was queued (monotonic ms, 0 while metrics are off), aligned with `queue`
  * @property {number} head
  * @property {number} rejected - jobs rejected since the queue last had room
  */
@@ -54,7 +51,7 @@ const _totals = {
 /**
  * @param {'effect' | 'webhook'} kind
  * @param {{ maxConcurrent: number, maxQueued: number, overflow?: 'reject' | 'coalesce', metered?: boolean }} limits
- * @param {(a: any, b: any, c: any, d: any) => any} run - starts one job from its submitted arguments; a returned promise holds its slot until it settles
+ * @param {(a: any, b: any, c: any, d: any) => any} run - starts one job from its submitted arguments; a returned promise holds its slot until it settles. A result of `LANE_FAILED` counts the job as an error.
  * @param {{ onReject?: (lane: WorkLane, a: any, b: any, c: any, d: any) => void, onDrained?: (lane: WorkLane, rejected: number) => void }} [hooks]
  *   `onReject` hears each rejected job (`lane.rejected` is 1 for the first of
  *   an overflow episode); `onDrained` hears when the queue has room again after
@@ -73,6 +70,7 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		onDrained: hooks.onDrained,
 		active: 0,
 		queue: [],
+		since: [],
 		head: 0,
 		rejected: 0
 	};
@@ -103,8 +101,11 @@ export function _validateLaneLimit(where, name, value, min) {
  * @param {any} [d]
  */
 export function _laneSubmit(lane, a, b, c, d) {
-	Promise.resolve().then(() => _admit(lane, a, b, c, d));
+	_resolved.then(() => _admit(lane, a, b, c, d));
 }
+
+/** One settled promise to schedule admissions on, instead of a new one per job. */
+const _resolved = Promise.resolve();
 
 /**
  * Start the job when a slot is free and nothing waits ahead of it, else queue
@@ -126,10 +127,12 @@ function _admit(lane, a, b, c, d) {
 	if (depth < lane.maxQueued) {
 		_wait(lane, a, b, c, d);
 		_move(lane, 'queued', 1);
+		if (depth === 0 && lane.metered) _bgQueueWaiting(lane);
 		return;
 	}
 	if (lane.overflow === 'coalesce' && depth > 0) {
 		/** @type {(go: boolean) => void} */ (lane.queue.pop())(false);
+		lane.since.pop();
 		_wait(lane, a, b, c, d);
 		_countOverflow(lane, 'coalesced');
 		return;
@@ -147,9 +150,7 @@ function _admit(lane, a, b, c, d) {
  * @param {'rejected' | 'coalesced'} result
  */
 function _countOverflow(lane, result) {
-	if (!lane.metered) return;
-	const mi = state.metricsInstruments;
-	if (mi && mi.backgroundTotal) mi.backgroundTotal.inc({ kind: lane.kind, result });
+	if (lane.metered) _bgCount(lane.kind, result);
 }
 
 /**
@@ -165,7 +166,10 @@ function _countOverflow(lane, result) {
  * @param {any} d
  */
 async function _wait(lane, a, b, c, d) {
-	const go = await new Promise((resolve) => { lane.queue.push(resolve); });
+	const go = await new Promise((resolve) => {
+		lane.queue.push(resolve);
+		lane.since.push(_bgQueuedAt());
+	});
 	if (go) _start(lane, a, b, c, d);
 }
 
@@ -177,29 +181,40 @@ async function _wait(lane, a, b, c, d) {
  * @param {any} d
  */
 function _start(lane, a, b, c, d) {
+	const startedAt = lane.metered ? _bgClock() : 0;
 	let result;
 	try {
 		result = lane.run(a, b, c, d);
 	} catch {
 		// run() owns error reporting; a synchronous throw only frees the slot.
+		result = LANE_FAILED;
 	}
 	if (result && typeof result.then === 'function') {
-		result.then(() => _settle(lane), () => _settle(lane));
+		result.then((v) => _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok'), () => _settle(lane, startedAt, 'error'));
 	} else {
-		_settle(lane);
+		_settle(lane, startedAt, result === LANE_FAILED ? 'error' : 'ok');
 	}
 }
 
-/** @param {WorkLane} lane */
-function _settle(lane) {
+/**
+ * @param {WorkLane} lane
+ * @param {number} startedAt
+ * @param {'ok' | 'error'} result
+ */
+function _settle(lane, startedAt, result) {
+	if (lane.metered) _bgDone(lane.kind, startedAt, result);
 	if (lane.head < lane.queue.length) {
 		const next = lane.queue[lane.head];
-		lane.queue[lane.head++] = undefined;
+		lane.queue[lane.head] = undefined;
+		lane.since[lane.head++] = undefined;
 		if (lane.head === lane.queue.length) {
 			lane.queue.length = 0;
+			lane.since.length = 0;
 			lane.head = 0;
+			if (lane.metered) _bgQueueIdle(lane);
 		} else if (lane.head >= _COMPACT_AT && lane.head * 2 >= lane.queue.length) {
 			lane.queue.splice(0, lane.head);
+			lane.since.splice(0, lane.head);
 			lane.head = 0;
 		}
 		_move(lane, 'queued', -1);
@@ -229,34 +244,6 @@ function _drained(lane) {
  */
 function _move(lane, field, delta) {
 	if (!lane.metered) return;
-	_totals[lane.kind][field] += delta;
-	_publishGauge(lane.kind, field);
-}
-
-/**
- * Track a derived recompute starting (`+1`) or settling (`-1`).
- * @param {number} delta
- */
-export function _derivedInflight(delta) {
-	_totals.derived.inflight += delta;
-	_publishGauge('derived', 'inflight');
-}
-
-/**
- * @param {'derived' | 'effect' | 'webhook'} kind
- * @param {'inflight' | 'queued'} field
- */
-function _publishGauge(kind, field) {
-	const mi = state.metricsInstruments;
-	if (!mi) return;
-	const gauge = field === 'inflight' ? mi.backgroundInflight : mi.backgroundQueued;
-	if (gauge && typeof gauge.set === 'function') gauge.set({ kind }, _totals[kind][field]);
-}
-
-/** Seed the gauges with the current totals when `live.metrics()` installs them. */
-export function _publishLaneGauges() {
-	for (const kind of /** @type {const} */ (['derived', 'effect', 'webhook'])) {
-		_publishGauge(kind, 'inflight');
-		if (kind !== 'derived') _publishGauge(kind, 'queued');
-	}
+	if (field === 'inflight') _bgInflight(lane.kind, delta);
+	else _bgQueued(lane.kind, delta);
 }
