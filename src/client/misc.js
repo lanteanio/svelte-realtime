@@ -21,28 +21,34 @@ const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
 /** A queued call set aside until its `retryAt`. */
 const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
 
-// The longest delay a timer can take; a later wake re-arms in steps.
+// The longest delay a timer can take; a later drain re-arms for the rest.
 const _MAX_TIMER_MS = 2147483647;
 
-/** @type {any} The timer that drains when the first call set aside is due. */
-let _wakeTimer = null;
+/** @type {{ handle: any, at: number } | null} The one pending re-drain of the queue. */
+let _redrain = null;
 
 /**
- * Drain again when the first call set aside in the current queue is due. Not
- * while offline or closed for good: the next open drains anyway.
+ * Drain the current queue again after `delay` ms, unless a pending re-drain
+ * comes sooner. Only while connected: the next open drains anyway.
+ * @param {number} delay
  */
-function _wakeForWaiting() {
-	if (_wakeTimer !== null) clearTimer(_wakeTimer);
-	_wakeTimer = null;
+function _scheduleRedrain(delay) {
 	if (clientState.isOffline || clientState.terminated) return;
-	const at = now();
-	let first = Infinity;
-	for (const entry of _offlineQueue) if (_waiting(entry, at) && entry.retryAt < first) first = entry.retryAt;
-	if (first === Infinity) return;
-	_wakeTimer = setTimer(() => {
-		_wakeTimer = null;
+	const at = now() + delay;
+	if (_redrain !== null) {
+		if (_redrain.at <= at) return;
+		clearTimer(_redrain.handle);
+	}
+	_redrain = { at, handle: setTimer(() => {
+		_redrain = null;
 		void _drainOfflineQueue();
-	}, Math.min(_MAX_TIMER_MS, first - at));
+	}, Math.min(_MAX_TIMER_MS, delay)) };
+}
+
+function _cancelRedrain() {
+	if (_redrain === null) return;
+	clearTimer(_redrain.handle);
+	_redrain = null;
 }
 
 /** @type {boolean} */
@@ -167,6 +173,7 @@ export function configure(config) {
 			}
 			if (s === 'disconnected' || s === 'failed') {
 				clientState.isOffline = true;
+				_cancelRedrain();
 				_callConnectionHook('onDisconnect');
 			}
 		});
@@ -207,7 +214,7 @@ async function _drainOfflineQueue() {
 	if (_replayingScope === scope) return;
 	_replayingScope = scope;
 	_startOfflineDrain(scope);
-	let again = false, retryIdempotency = false, retryDelay = 1000;
+	let again = false, retryIdempotency = false, retryDelay = 1000, reachedQueue = false;
 	try {
 		await _offlineReady();
 		if (scope !== _offlineScope()) return;
@@ -226,6 +233,8 @@ async function _drainOfflineQueue() {
 		const conflictResolution = offlineOpts?.conflictResolution || 'server-win';
 		const maxAge = offlineOpts?.maxAge || 0;
 		const nowMs = now();
+		// Whether a call is past its retention at `at`.
+		const expiredAt = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => (maxAge > 0 && at - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= at);
 
 		// Whether the batch went up in order with nothing failing (a clean
 		// drain closes the gap), and the lowest seq that failed in it: a
@@ -266,9 +275,8 @@ async function _drainOfflineQueue() {
 		function defer(entry, err, wait) {
 			if (scope !== _offlineScope()) return;
 			const retryAt = now() + wait;
-			// Held past its retention it could only expire: drop it now.
-			const keptUntil = Math.min(entry.expiresAt ?? Infinity, maxAge > 0 ? entry.queuedAt + maxAge : Infinity);
-			if (retryAt >= keptUntil) {
+			// Expired by the time it may go, it could only be dropped: drop it now.
+			if (expiredAt(entry, retryAt)) {
 				/** @type {any} */
 				const stale = new RpcError('STALE', 'Offline mutation expired: the server asked to retry it after its retention ends');
 				stale.cause = err;
@@ -389,8 +397,9 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		const expired = (/** @type {OfflineEntry} */ entry) => (maxAge > 0 && nowMs - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= nowMs);
+		const expired = (/** @type {OfflineEntry} */ entry) => expiredAt(entry, nowMs);
 		// A call set aside stays queued until it is due, unless it expired.
+		reachedQueue = true;
 		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry) && (!_waiting(entry, nowMs) || expired(entry))));
 		for (const entry of captured) {
 			if (entry.settled) continue;
@@ -567,16 +576,12 @@ async function _drainOfflineQueue() {
 			// app to act on. The next drain starts a new batch.
 			if (clean) _clearGapIfClean();
 			if (scope !== _offlineScope()) return;
-			if (deferred.size) {
-				// Calls set aside go back to the front of the queue, in seq order,
-				// and the batch carries on: one of them going up after calls queued
-				// behind it is an upload-order hole the next drain must not close.
-				_carryBatch(lowestFailedSeq);
-				if (scope !== _offlineScope()) return;
-				_offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
-			} else {
-				_endBatch();
-			}
+			// Calls set aside go back to the front of the queue, in seq order.
+			if (deferred.size) _offlineQueue.unshift(...[...deferred].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
+			// While any call is set aside the batch carries on: one going up after
+			// calls queued behind it is an upload-order hole no drain may close.
+			if (_offlineQueue.some(entry => entry.retryAt !== undefined)) _carryBatch(lowestFailedSeq);
+			else _endBatch();
 		}
 	} finally {
 		// First, so nothing that runs app code below can leave every later
@@ -585,16 +590,24 @@ async function _drainOfflineQueue() {
 		if (_replayingScope !== scope) return;
 		_replayingScope = null;
 		_bumpPending();
+		// Calls set aside: one that came due while this drain ran goes next, a
+		// later one when it is due. A drain that returned before reading the
+		// queue leaves due calls to the next open, so this never spins.
+		const at = now();
+		let due = false, wakeAt = Infinity;
+		for (const entry of _offlineQueue) {
+			if (entry.retryAt === undefined || _isHeldAfterClose(entry)) continue;
+			if (entry.retryAt <= at) due = true;
+			else if (entry.retryAt < wakeAt) wakeAt = entry.retryAt;
+		}
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
-		_wakeForWaiting();
-		if (again && !retryIdempotency) void _drainOfflineQueue();
+		if ((again && !retryIdempotency) || (due && reachedQueue && clientState.socketUp)) void _drainOfflineQueue();
 		else {
 			_setUploading(false);
-			if (again) setTimer(() => {
-				if (scope === _offlineScope()) void _drainOfflineQueue();
-			}, retryDelay);
+			if (again) _scheduleRedrain(retryDelay);
 		}
+		if (wakeAt !== Infinity) _scheduleRedrain(wakeAt - at);
 	}
 }
 

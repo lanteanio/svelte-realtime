@@ -201,10 +201,12 @@ describe('offline calls set aside by an idempotency refusal', () => {
 
 	it('arms no wake while offline and replays on the next open', async () => {
 		const { first } = await setAside(31000);
+		const armed = vi.getTimerCount();
 		status('disconnected'); await turn();
-		const timers = vi.getTimerCount();
+		// The one re-drain timer is gone, and nothing re-arms while offline.
+		expect(vi.getTimerCount()).toBe(armed - 1);
 		await vi.advanceTimersByTimeAsync(120000);
-		expect(vi.getTimerCount()).toBeLessThanOrEqual(timers);
+		expect(vi.getTimerCount()).toBe(armed - 1);
 		expect(rpcFrames()).toHaveLength(1);
 		status('open'); await turn();
 		const again = rpcFrames()[1]; expect(again.idempotencyKey).toBe(first.idempotencyKey);
@@ -263,5 +265,75 @@ describe('offline calls set aside by an idempotency refusal', () => {
 		answer(rpcFrames()[2], { ok: true, data: 'first' }); await turn();
 		expect(await pending[0]).toBe('first');
 		expect(client.offlineCheckpoint()).toMatchObject({ lastUploadedSeq: 2, gapDetected: true });
+	});
+});
+
+describe('calls set aside that come due during another drain', () => {
+	const rpcFrames = () => wire.filter(frame => frame.rpc);
+	const persist = () => ({
+		async getAll(prefix) { return [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })); },
+		async put(key, value) { rows.set(key, value); }, async delete(key) { rows.delete(key); },
+		async clear(prefix) { for (const key of rows.keys()) if (key.startsWith(prefix)) rows.delete(key); }
+	});
+	const later = (frame, retryAfter, code = 'IDEMPOTENCY_CAPACITY') => answer(frame, { ok: false, code, error: 'later', retryAfter });
+
+	it('replays a call that came due while the same drain was still running', async () => {
+		client.configure({ offline: { queue: true, persist: persist() } });
+		status('disconnected');
+		const a = client.__rpc('work/run')({ value: 'a' }); a.catch(() => {});
+		const b = client.__rpc('work/run').with({ timeout: 120000 })({ value: 'b' });
+		await turn(); status('open'); await turn();
+		const [first] = rpcFrames();
+		later(first, 31000); await turn();
+		const slow = rpcFrames()[1]; expect(slow.args).toEqual([{ value: 'b' }]);
+		await vi.advanceTimersByTimeAsync(40000);
+		expect(rpcFrames()).toHaveLength(2);
+		answer(slow, { ok: true, data: 'b' }); await turn();
+		const again = rpcFrames()[2]; expect(again?.idempotencyKey).toBe(first.idempotencyKey);
+		answer(again, { ok: true, data: 'a' }); await turn();
+		expect(await a).toBe('a'); expect(await b).toBe('b');
+	});
+
+	it('replays a call that came due while a retry drain was running', async () => {
+		client.configure({ offline: { queue: true, persist: persist() } });
+		status('disconnected');
+		const a = client.__rpc('work/run')({ value: 'a' }); a.catch(() => {});
+		const b = client.__rpc('work/run').with({ timeout: 120000 })({ value: 'b' });
+		await turn(); status('open'); await turn();
+		const [first] = rpcFrames();
+		later(first, 31000); await turn();
+		later(rpcFrames()[1], 20000, 'IDEMPOTENCY_IN_PROGRESS'); await turn();
+		await vi.advanceTimersByTimeAsync(20000);
+		const retried = rpcFrames()[2]; expect(retried.args).toEqual([{ value: 'b' }]);
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(rpcFrames()).toHaveLength(3);
+		answer(retried, { ok: true, data: 'b' }); await turn();
+		const again = rpcFrames()[3]; expect(again?.idempotencyKey).toBe(first.idempotencyKey);
+		answer(again, { ok: true, data: 'a' }); await turn();
+		expect(await a).toBe('a'); expect(await b).toBe('b');
+	});
+
+	it('keeps the gap while a set-aside call waits through other drains', async () => {
+		client.configure({ offline: { queue: true, persist: persist() } });
+		status('disconnected');
+		const a = client.__rpc('work/run')({ value: 'a' }); a.catch(() => {});
+		const b = client.__rpc('work/run')({ value: 'b' });
+		await turn(); status('open'); await turn();
+		later(rpcFrames()[0], 60000); await turn();
+		answer(rpcFrames()[1], { ok: true, data: 'b' }); await turn();
+		expect(await b).toBe('b');
+		expect(client.offlineCheckpoint().gapDetected).toBe(true);
+		status('disconnected'); await turn();
+		const c = client.__rpc('work/run')({ value: 'c' });
+		await turn(); status('open'); await turn();
+		const sentC = rpcFrames().find(frame => frame.args[0].value === 'c');
+		answer(sentC, { ok: true, data: 'c' }); await turn();
+		expect(await c).toBe('c');
+		expect(client.offlineCheckpoint().gapDetected).toBe(true);
+		await vi.advanceTimersByTimeAsync(60000);
+		const sentA = rpcFrames().filter(frame => frame.args[0].value === 'a')[1];
+		answer(sentA, { ok: true, data: 'a' }); await turn();
+		expect(await a).toBe('a');
+		expect(client.offlineCheckpoint().gapDetected).toBe(true);
 	});
 });
