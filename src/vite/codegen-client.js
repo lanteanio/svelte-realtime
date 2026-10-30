@@ -115,7 +115,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__binaryRpc');
-			lines.push(`export const ${name} = __binaryRpc(${safeModulePath(name)});`);
+			lines.push(`export const ${name} = __binaryRpc(${safeModulePath(name)}${timeoutArgument(name)});`);
 		}
 	}
 

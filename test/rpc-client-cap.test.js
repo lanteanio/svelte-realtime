@@ -104,6 +104,27 @@ describe('rpc.maxPending', () => {
 		expect(() => client.configure({ rpc: { maxPending: Infinity } })).toThrow(/rpc\.maxPending/);
 		expect(() => client.configure({ rpc: null })).toThrow(/configure\(\{ rpc \}\)/);
 	});
+
+	it('does not count offline replays against the cap', async () => {
+		client.configure({ rpc: { maxPending: 2 } });
+		const { _sendRpc } = await import('../src/client/rpc.js');
+		// What the offline drain sends after a reconnect.
+		for (let i = 0; i < 5; i++) _sendRpc('cap/replay', [i], undefined, undefined, true).catch(() => {});
+		expect(H.sent).toHaveLength(5);
+		const fresh = client.__rpc('cap/fresh')();
+		fresh.catch(() => {});
+		expect(H.sent).toHaveLength(6);
+		expect(H.sent.at(-1).rpc).toBe('cap/fresh');
+	});
+
+	it('records a refused call in DevTools', async () => {
+		client.configure({ rpc: { maxPending: 1 } });
+		const call = client.__rpc('cap/devtools');
+		call.fresh(1).catch(() => {});
+		await expect(call.fresh(2)).rejects.toMatchObject({ code: 'OVERLOADED' });
+		const failed = client.__devtools.history.filter(Boolean).filter(entry => entry.path === 'cap/devtools' && entry.ok === false);
+		expect(failed).toHaveLength(1);
+	});
 });
 
 describe('a server admission refusal', () => {

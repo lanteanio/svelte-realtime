@@ -537,7 +537,7 @@ export function createReactiveStream<T = any>(
  *
  * @internal
  */
-export function __binaryRpc(path: string): (buffer: ArrayBuffer | ArrayBufferView, ...args: any[]) => Promise<any>;
+export function __binaryRpc(path: string, defaults?: { timeout?: number }): (buffer: ArrayBuffer | ArrayBufferView, ...args: any[]) => Promise<any>;
 
 /**
  * Progress event payload emitted by `UploadHandle.on('progress', ...)`.

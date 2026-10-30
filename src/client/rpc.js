@@ -511,6 +511,22 @@ function _atPendingCap() {
 }
 
 /**
+ * Refuse a call at the `rpc.maxPending` cap. It is never sent, but DevTools
+ * still records it as a failed call. Inside `batch()` only this call is
+ * refused; the rest of the batch is sent, as each call of a batch succeeds
+ * or fails on its own.
+ * @param {string} path
+ * @param {any} args
+ */
+function _refuseAtCap(path, args) {
+	const id = _nextId();
+	const error = _clientOverloaded();
+	_devtoolsStart(path, id, args);
+	_devtoolsEnd(id, false, error);
+	return Promise.reject(error);
+}
+
+/**
  * Internal: send an RPC request over the WebSocket.
  * @param {string} path
  * @param {any[]} args
@@ -560,7 +576,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
 	}
 
 	// A replay from the offline drain is bounded by the offline queue instead.
-	if (!replay && _atPendingCap()) return Promise.reject(_clientOverloaded());
+	if (!replay && _atPendingCap()) return _refuseAtCap(path, args);
 
 	const id = _nextId();
 
@@ -626,7 +642,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
 			reject(e) { _devtoolsEnd(id, false, e); reject(e); },
 			timer,
 			replay: replay === true,
-			call: true
+			// An offline replay is bounded by the offline queue, not rpc.maxPending.
+			call: replay !== true
 		});
 		try {
 			if (text !== undefined) {
@@ -645,9 +662,10 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
  * Sends the first argument as raw binary and remaining args as JSON in a header.
  *
  * @param {string} path - e.g. 'upload/avatar'
+ * @param {{ timeout?: number }} [defaults] - the function's declared budget
  * @returns {(buffer: ArrayBuffer, ...args: any[]) => Promise<any>}
  */
-export function __binaryRpc(path) {
+export function __binaryRpc(path, defaults) {
 	return function binaryRpcCall(buffer, ...args) {
 		let serialized;
 		try {
@@ -659,7 +677,7 @@ export function __binaryRpc(path) {
 		if (clientState.terminated) {
 			return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 		}
-		if (_atPendingCap()) return Promise.reject(_clientOverloaded());
+		if (_atPendingCap()) return _refuseAtCap(path, args);
 
 		const id = _nextId();
 
@@ -669,9 +687,9 @@ export function __binaryRpc(path) {
 
 		return new Promise((resolve, reject) => {
 			const _startTime = now();
-			const timeout = _getTimeout();
+			const timeout = defaults?.timeout || _getTimeout();
 			const timer = setTimer(() => {
-				if (now() - _startTime > 90000) {
+				if (now() - _startTime > Math.max(timeout * 3, 90000)) {
 					pending.delete(id);
 					_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
 					reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));

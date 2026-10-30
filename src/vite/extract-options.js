@@ -27,7 +27,7 @@ export function _extractFunctionTimeout(source, name) {
 			at = end + 1;
 		}
 		const optionIndex = call.callee === 'live.stream' ? 2 : 1;
-		if (['live', 'live.stream', 'live.upload'].includes(call.callee)) {
+		if (['live', 'live.stream', 'live.upload', 'live.binary'].includes(call.callee)) {
 			const options = args[optionIndex];
 			if (!options || options === 'undefined') return undefined;
 			const object = _exactObject(source, options, 0, false);
