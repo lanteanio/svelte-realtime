@@ -6,7 +6,7 @@ import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggrega
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _submitWebhookOut } from './webhook-out.js';
-import { _createLane, _laneSubmit, LANE_FAILED, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
+import { _createLane, _laneSubmit, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
 import { _bgClock, _bgDone, _bgInflight } from './background-metrics.js';
 import { LiveError } from './live-error.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
@@ -1049,7 +1049,10 @@ export function _deactivateDynamicDerived(fn, resolvedTopic, ctx) {
  */
 function _effectLane(entry) {
 	const limits = entry.limits || { maxConcurrent: EFFECT_MAX_CONCURRENT, maxQueued: EFFECT_MAX_QUEUED, timeoutMs: EFFECT_TIMEOUT_MS };
-	const lane = _createLane('effect', limits, (event, data, platform) => _fireEffect(entry, event, data, platform), {
+	// The lane calls the handler directly and reports a throw or a rejection
+	// through onError, so an effect call costs no wrapper and no extra promise.
+	const lane = _createLane('effect', limits, (event, data, platform) => entry.fn(event, data, platform), {
+		onError: _reportEffectFailure,
 		onReject: _effectRejected,
 		onOverflowEnded: _effectOverflowEnded,
 		onTimeout: _effectTimedOut
@@ -1130,26 +1133,7 @@ function _effectOverflowEnded(lane, rejected) {
 	});
 }
 
-/**
- * Fire an effect handler. Errors are caught and routed to the error handler.
- * @param {{ fn: Function }} entry
- * @param {string} event
- * @param {any} data
- * @param {import('svelte-adapter-uws').Platform} platform
- */
-function _fireEffect(entry, event, data, platform) {
-	// Not an async function: a handler that returns without a promise settles
-	// here and frees its lane slot at once. A failure ends in LANE_FAILED.
-	let result;
-	try {
-		result = entry.fn(event, data, platform);
-	} catch (err) {
-		return _reportEffectFailure(err);
-	}
-	if (result && typeof result.then === 'function') return Promise.resolve(result).then(undefined, _reportEffectFailure);
-}
-
-/** @param {unknown} err @returns {typeof LANE_FAILED} */
+/** @param {unknown} err */
 function _reportEffectFailure(err) {
 	if (state.serverErrorHandler) {
 		try { state.serverErrorHandler('effect', err); } catch {}
@@ -1163,5 +1147,4 @@ function _reportEffectFailure(err) {
 		message: 'A reactive effect handler failed.',
 		attributes: { error: diagnosticErrorMessage(err) }
 	});
-	return LANE_FAILED;
 }

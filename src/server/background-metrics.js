@@ -37,10 +37,28 @@ export const BACKGROUND_METRICS = Object.freeze({
 
 /** @typedef {'cron' | 'alarm' | 'poll' | 'derived' | 'effect' | 'webhook' | 'dlq'} OwnKind */
 
-/** Kinds this package runs, each with its running count. */
-const _inflight = { cron: 0, alarm: 0, poll: 0, derived: 0, effect: 0, webhook: 0, dlq: 0 };
-/** Kinds that queue in process memory, each with its waiting count. */
-const _queued = { effect: 0, webhook: 0 };
+/**
+ * Running and waiting counts of each kind this package runs. A work lane holds
+ * its kind's object and counts on it directly.
+ * @type {Record<OwnKind, { inflight: number, queued: number }>}
+ */
+const _totals = {
+	cron: { inflight: 0, queued: 0 },
+	alarm: { inflight: 0, queued: 0 },
+	poll: { inflight: 0, queued: 0 },
+	derived: { inflight: 0, queued: 0 },
+	effect: { inflight: 0, queued: 0 },
+	webhook: { inflight: 0, queued: 0 },
+	dlq: { inflight: 0, queued: 0 }
+};
+
+/**
+ * The running and waiting counts of `kind`, for a work lane to count on.
+ * @param {OwnKind} kind
+ */
+export function _bgTotals(kind) {
+	return _totals[kind];
+}
 
 /** One frozen label object per series, so recording allocates nothing. */
 const _kindLabels = /** @type {Record<string, { kind: string }>} */ ({});
@@ -115,7 +133,7 @@ export function _bgRetryExhausted(kind) {
  * @param {number} delta
  */
 export function _bgInflight(kind, delta) {
-	_inflight[kind] += delta;
+	_totals[kind].inflight += delta;
 	if (state.metricsInstruments && !_flushPending) _scheduleFlush();
 }
 
@@ -125,7 +143,12 @@ export function _bgInflight(kind, delta) {
  * @param {number} delta
  */
 export function _bgQueued(kind, delta) {
-	_queued[kind] += delta;
+	_totals[kind].queued += delta;
+	if (state.metricsInstruments && !_flushPending) _scheduleFlush();
+}
+
+/** A work lane changed its kind's counts. */
+export function _bgChanged() {
 	if (state.metricsInstruments && !_flushPending) _scheduleFlush();
 }
 
@@ -145,12 +168,12 @@ function _flushGauges() {
 	if (!mi) return;
 	const inflight = mi.backgroundInflight;
 	if (inflight && typeof inflight.set === 'function') {
-		for (const kind in _inflight) inflight.set(_kindLabels[kind], _inflight[/** @type {OwnKind} */ (kind)]);
+		for (const kind in _totals) inflight.set(_kindLabels[kind], _totals[/** @type {OwnKind} */ (kind)].inflight);
 	}
 	const queued = mi.backgroundQueued;
 	if (queued && typeof queued.set === 'function') {
-		queued.set(_kindLabels.effect, _queued.effect);
-		queued.set(_kindLabels.webhook, _queued.webhook);
+		queued.set(_kindLabels.effect, _totals.effect.queued);
+		queued.set(_kindLabels.webhook, _totals.webhook.queued);
 	}
 }
 

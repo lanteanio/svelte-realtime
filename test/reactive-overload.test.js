@@ -199,18 +199,21 @@ describe('live.effect concurrency and queue limits', () => {
 		}
 	});
 
-	it('a handler that throws synchronously frees its slot', async () => {
-		captureErrors();
+	it('a handler that throws or rejects frees its slot and is reported', async () => {
+		const { errors, events } = captureErrors();
 		const seen = [];
 		const effect = live.effect(['orders'], (event, data) => {
 			seen.push(data.i);
-			throw new Error('boom');
+			if (data.i % 2) return Promise.reject(new Error('boom ' + data.i));
+			throw new Error('boom ' + data.i);
 		}, { maxConcurrent: 1, maxQueued: 10 });
 		env = createTestEnv();
 		env.register('jobs', { notify: effect });
 		for (let i = 0; i < 5; i++) env.platform.publish('orders', 'created', { i });
 		await flush(30);
 		expect(seen).toEqual([0, 1, 2, 3, 4]);
+		expect(errors.map((e) => [e.path, e.err.message])).toEqual([0, 1, 2, 3, 4].map((i) => ['effect', 'boom ' + i]));
+		expect(events.filter((e) => e.event === 'reactive.effect.failed')).toHaveLength(5);
 	});
 
 	it('a call that never settles gives its slot back at its deadline, once', async () => {

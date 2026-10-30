@@ -1,6 +1,7 @@
 // @ts-check
-import { setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
-import { _bgClock, _bgDone, _bgCount, _bgInflight, _bgQueued, _bgQueuedAt, _bgQueueWaiting, _bgQueueIdle } from './background-metrics.js';
+import { setIntervalTimer, clearIntervalTimer, monotonicNow } from '../shared/runtime.js';
+import { state } from './state.js';
+import { _bgDone, _bgCount, _bgTotals, _bgChanged, _bgQueuedAt, _bgQueueWaiting, _bgQueueIdle } from './background-metrics.js';
 
 // Bounded execution for work a publish schedules off its own path: effect
 // handlers and outbound webhook deliveries. Each effect and each outbound
@@ -62,7 +63,9 @@ const _MAX_TIMEOUT_MS = 2147483647;
  * @property {number} maxQueued
  * @property {'reject' | 'coalesce'} overflow
  * @property {boolean} metered - false for framework-internal watchers kept out of the app's series
+ * @property {{ inflight: number, queued: number }} totals - the counts the lane adds to: its kind's, or its own when not metered
  * @property {(a: any, b: any, c: any, d: any) => any} run - returns `LANE_FAILED` (or a promise of it) when the job failed
+ * @property {((err: unknown) => void) | undefined} onError - hears a throw from `run` or the rejection of a promise it returned
  * @property {(lane: WorkLane, a: any, b: any, c: any, d: any) => void} [onReject]
  * @property {(lane: WorkLane, rejected: number) => void} [onOverflowEnded]
  * @property {(lane: WorkLane, released: number) => void} [onTimeout]
@@ -78,14 +81,16 @@ const _MAX_TIMEOUT_MS = 2147483647;
  * @property {number} tick
  * @property {number} releasedThrough - the newest start tick whose jobs were released
  * @property {any} ticker
+ * @property {{ tick: number, ok: (v: unknown) => void, err: (e: unknown) => void } | null} shared - settlement handlers shared by untimed jobs of one tick
  */
 
 /**
  * @param {'effect' | 'webhook'} kind
  * @param {{ maxConcurrent: number, maxQueued: number, overflow?: 'reject' | 'coalesce', metered?: boolean, timeoutMs?: number }} limits
  * @param {(a: any, b: any, c: any, d: any) => any} run - starts one job from its submitted arguments; a returned promise holds its slot until it settles. A result of `LANE_FAILED` counts the job as an error.
- * @param {{ onReject?: (lane: WorkLane, a: any, b: any, c: any, d: any) => void, onOverflowEnded?: (lane: WorkLane, rejected: number) => void, onTimeout?: (lane: WorkLane, released: number) => void }} [hooks]
- *   `onReject` hears each rejected job (`lane.rejected` is 1 for the first of
+ * @param {{ onError?: (err: unknown) => void, onReject?: (lane: WorkLane, a: any, b: any, c: any, d: any) => void, onOverflowEnded?: (lane: WorkLane, rejected: number) => void, onTimeout?: (lane: WorkLane, released: number) => void }} [hooks]
+ *   `onError` hears a throw from `run` or the rejection of a promise it
+ *   returned (the job then counts as an error); `onReject` hears each rejected job (`lane.rejected` is 1 for the first of
  *   an overflow episode); `onOverflowEnded` hears when the episode ends, with
  *   its count of rejections; `onTimeout` hears each deadline tick that
  *   released pending jobs, with their count.
@@ -98,7 +103,9 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		maxQueued: limits.maxQueued,
 		overflow: limits.overflow || 'reject',
 		metered: limits.metered !== false,
+		totals: limits.metered !== false ? _bgTotals(kind) : { inflight: 0, queued: 0 },
 		run,
+		onError: hooks.onError,
 		onReject: hooks.onReject,
 		onOverflowEnded: hooks.onOverflowEnded,
 		onTimeout: hooks.onTimeout,
@@ -113,7 +120,8 @@ export function _createLane(kind, limits, run, hooks = {}) {
 		pendingByTick: null,
 		tick: 0,
 		releasedThrough: -1,
-		ticker: null
+		ticker: null,
+		shared: null
 	};
 }
 
@@ -174,13 +182,15 @@ function _admit(lane, a, b, c, d) {
 	const depth = lane.queue.length - lane.head;
 	if (depth === 0 && lane.active < lane.maxConcurrent) {
 		lane.active++;
-		_move(lane, 'inflight', 1);
+		lane.totals.inflight++;
+		if (lane.metered) _bgChanged();
 		_start(lane, a, b, c, d);
 		return;
 	}
 	if (depth < lane.maxQueued) {
 		_wait(lane, a, b, c, d);
-		_move(lane, 'queued', 1);
+		lane.totals.queued++;
+		if (lane.metered) _bgChanged();
 		if (depth === 0 && lane.metered) _bgQueueWaiting(lane);
 		return;
 	}
@@ -209,8 +219,8 @@ function _countOverflow(lane, result) {
 
 /**
  * Hold a job in the queue until a slot passes to it (`true`) or a coalesce
- * drops it (`false`). Waiting in an async function, rather than parking the job
- * in a plain entry, resumes the job in the async context of its publish (the
+ * drops it (`false`). Waiting on a promise, rather than parking the job in a
+ * plain entry, resumes the job in the async context of its publish (the
  * active trace, for one), not in that of the job whose settlement freed the
  * slot.
  * @param {WorkLane} lane
@@ -219,12 +229,11 @@ function _countOverflow(lane, result) {
  * @param {any} c
  * @param {any} d
  */
-async function _wait(lane, a, b, c, d) {
-	const go = await new Promise((resolve) => {
+function _wait(lane, a, b, c, d) {
+	new Promise((resolve) => {
 		lane.queue.push(resolve);
 		lane.since.push(_bgQueuedAt());
-	});
-	if (go) _start(lane, a, b, c, d);
+	}).then((go) => { if (go) _start(lane, a, b, c, d); });
 }
 
 /**
@@ -235,26 +244,54 @@ async function _wait(lane, a, b, c, d) {
  * @param {any} d
  */
 function _start(lane, a, b, c, d) {
-	const startedAt = lane.metered ? _bgClock() : 0;
+	const startedAt = lane.metered && state.metricsInstruments ? monotonicNow() : 0;
 	let result;
 	try {
 		result = lane.run(a, b, c, d);
-	} catch {
-		// run() owns error reporting; a synchronous throw only frees the slot.
+	} catch (err) {
+		_reportRejection(lane, err);
 		result = LANE_FAILED;
 	}
 	if (result && typeof result.then === 'function') {
-		if (lane.timeoutMs === Infinity) {
-			result.then((v) => _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok'), () => _settle(lane, startedAt, 'error'));
-			return;
-		}
-		const tick = _holdPending(lane);
-		result.then(
-			(v) => { if (_releasePending(lane, tick)) _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok'); },
-			() => { if (_releasePending(lane, tick)) _settle(lane, startedAt, 'error'); }
-		);
+		const tick = lane.timeoutMs === Infinity ? -1 : _holdPending(lane);
+		// An untimed job needs nothing of its own to settle, so jobs that start
+		// in the same deadline tick share one pair of handlers and a pending job
+		// allocates no closures.
+		const h = startedAt ? _handlers(lane, tick, startedAt) : lane.shared && lane.shared.tick === tick ? lane.shared : (lane.shared = _handlers(lane, tick, 0));
+		result.then(h.ok, h.err);
 	} else {
 		_settle(lane, startedAt, result === LANE_FAILED ? 'error' : 'ok');
+	}
+}
+
+/**
+ * The settlement handlers of jobs that started in deadline tick `tick` (-1
+ * when the lane has no deadline) at `startedAt` (0 when not timed).
+ * @param {WorkLane} lane
+ * @param {number} tick
+ * @param {number} startedAt
+ * @returns {{ tick: number, ok: (v: unknown) => void, err: (e: unknown) => void }}
+ */
+function _handlers(lane, tick, startedAt) {
+	return {
+		tick,
+		ok: (v) => { if (tick < 0 || _releasePending(lane, tick)) _settle(lane, startedAt, v === LANE_FAILED ? 'error' : 'ok'); },
+		err: (e) => {
+			_reportRejection(lane, e);
+			if (tick < 0 || _releasePending(lane, tick)) _settle(lane, startedAt, 'error');
+		}
+	};
+}
+
+/**
+ * Hand a job's failure to the lane's `onError`; a job released at its
+ * deadline still reports how it failed.
+ * @param {WorkLane} lane
+ * @param {unknown} err
+ */
+function _reportRejection(lane, err) {
+	if (lane.onError) {
+		try { lane.onError(err); } catch {}
 	}
 }
 
@@ -321,7 +358,7 @@ function _deadlineTick(lane) {
  * @param {'ok' | 'error' | 'timeout'} result
  */
 function _settle(lane, startedAt, result) {
-	if (lane.metered) _bgDone(lane.kind, startedAt, result);
+	if (lane.metered && state.metricsInstruments) _bgDone(lane.kind, startedAt, result);
 	if (lane.head < lane.queue.length) {
 		const next = lane.queue[lane.head];
 		lane.queue[lane.head] = undefined;
@@ -336,14 +373,16 @@ function _settle(lane, startedAt, result) {
 			lane.since.splice(0, lane.head);
 			lane.head = 0;
 		}
-		_move(lane, 'queued', -1);
+		lane.totals.queued--;
+		if (lane.metered) _bgChanged();
 		if (lane.rejected && lane.queue.length - lane.head <= lane.resumeDepth) _overflowEnded(lane);
 		// The slot passes straight to the next job.
 		next(true);
 		return;
 	}
 	lane.active--;
-	_move(lane, 'inflight', -1);
+	lane.totals.inflight--;
+	if (lane.metered) _bgChanged();
 	if (lane.rejected) _overflowEnded(lane);
 }
 
@@ -359,15 +398,4 @@ function _overflowEnded(lane) {
 	if (lane.onOverflowEnded) {
 		try { lane.onOverflowEnded(lane, rejected); } catch {}
 	}
-}
-
-/**
- * @param {WorkLane} lane
- * @param {'inflight' | 'queued'} field
- * @param {number} delta
- */
-function _move(lane, field, delta) {
-	if (!lane.metered) return;
-	if (field === 'inflight') _bgInflight(lane.kind, delta);
-	else _bgQueued(lane.kind, delta);
 }
