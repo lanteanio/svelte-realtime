@@ -60,6 +60,23 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 // repeating one whose outcome is unknown cannot duplicate the record.
 const _DEAD_LETTER_RETRY_MS = [100, 500];
 
+// Dead-letter writes in flight at once in this process. A capture runs off the
+// delivery's lane slot, so a store that stops answering cannot stall delivery;
+// this bound keeps such a store from piling up pending writes instead. A
+// capture past it is lost and reported like a failed write.
+export const _MAX_DEAD_LETTER_CAPTURES = 1000;
+
+/** @type {Set<Promise<void>>} */
+const _captures = new Set();
+
+/**
+ * Resolves once every dead-letter write in flight now has settled.
+ * @internal
+ */
+export async function _deadLetterCapturesSettled() {
+	await Promise.allSettled([..._captures]);
+}
+
 // The idempotency key a delivery sends, recorded while the delivery runs so the
 // dead-letter capture is keyed by exactly the value the receiver saw.
 /** @type {AsyncLocalStorage<{ topic: string, payload: unknown, key: unknown }>} */
@@ -122,20 +139,34 @@ function _idempotencyKey(config, topic, event, data, payload) {
  * The capture key of a failed delivery: its idempotency key when it had a
  * valid one. A delivery that failed before the adapter asked for the key (an
  * open breaker, a url callback failure) derives it from the recorded payload.
- * Either wait is bounded like the adapter bounds callbacks. Resolves the key,
- * null for a delivery without one (capture unkeyed), or `unavailable` when the
- * key could not be had (a callback that threw or never settled).
+ * A key that is a promise is awaited, bounded like the adapter bounds
+ * callbacks; any other is had at once, so a capture into a synchronous store
+ * lands before the delivery returns. Gives the key, null for a delivery
+ * without one (capture unkeyed), or `unavailable` when the key could not be
+ * had (a callback that threw or never settled).
  * @param {any} config the registered config the delivery read
  * @param {{ topic: string, payload: unknown, key: unknown }} slot
  * @param {string} event @param {unknown} data
- * @returns {Promise<string | null | typeof _KEY_UNAVAILABLE>}
+ * @returns {string | null | typeof _KEY_UNAVAILABLE | Promise<string | null | typeof _KEY_UNAVAILABLE>}
  */
-async function _captureKey(config, slot, event, data) {
+function _captureKey(config, slot, event, data) {
 	let pending = slot.key;
 	if (pending === undefined) {
 		if (slot.payload === undefined) return null;
-		pending = Promise.resolve().then(() => _idempotencyKey(config, slot.topic, event, data, slot.payload));
+		try { pending = _idempotencyKey(config, slot.topic, event, data, slot.payload); }
+		catch { return _KEY_UNAVAILABLE; }
 	}
+	if (pending !== null && typeof pending === 'object' && typeof (/** @type {any} */ (pending)).then === 'function') {
+		return _awaitCaptureKey(config, /** @type {Promise<unknown>} */ (pending));
+	}
+	return _validCaptureKey(pending);
+}
+
+/**
+ * @param {any} config @param {Promise<unknown>} pending
+ * @returns {Promise<string | null | typeof _KEY_UNAVAILABLE>}
+ */
+async function _awaitCaptureKey(config, pending) {
 	let timer;
 	let key;
 	try {
@@ -148,6 +179,11 @@ async function _captureKey(config, slot, event, data) {
 	} finally {
 		clearTimer(timer);
 	}
+	return _validCaptureKey(key);
+}
+
+/** @param {unknown} key @returns {string | null | typeof _KEY_UNAVAILABLE} */
+function _validCaptureKey(key) {
 	if (key === _KEY_UNAVAILABLE) return key;
 	if (key == null) return null;
 	const s = String(key);
@@ -204,9 +240,22 @@ async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	// stopped earlier is not counted.
 	if (r.attempts >= _retryAttempts(entry.config)) _bgRetryExhausted('webhook');
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
-	// The capture runs inside the webhook's lane slot, so a slow dead-letter
-	// store holds this webhook's slots instead of piling up pending writes.
-	await _captureDeadLetter(entry, slot, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+	// The capture does not hold the delivery's lane slot: a slow dead-letter
+	// store must not stop this webhook's deliveries. Writes in flight are
+	// bounded per process instead.
+	if (state.webhookDeadLetter) {
+		if (_captures.size >= _MAX_DEAD_LETTER_CAPTURES) {
+			_reportDeadLetterFailure(entry, new Error('too many dead-letter writes in flight (' + _MAX_DEAD_LETTER_CAPTURES + ')'));
+		} else {
+			const pending = _captureDeadLetter(entry, slot, topic, event, data, r.attempts, r.err, startedAt, traceContext);
+			if (pending !== undefined) {
+				const capture = pending
+					.catch((e) => _reportDeadLetterFailure(entry, e))
+					.finally(() => { _captures.delete(capture); });
+				_captures.add(capture);
+			}
+		}
+	}
 	return LANE_FAILED;
 }
 
@@ -223,11 +272,15 @@ function _retryAttempts(config) {
 /**
  * Keep an undelivered event in the dead-letter store, when one is configured.
  * `slot` holds what the delivery recorded for its capture key, or null when
- * the store does not honor keys.
+ * the store does not honor keys. Runs synchronously as far as it can: a
+ * synchronous store with a key had at once returns undefined with the record
+ * written; otherwise the returned promise settles when the write is done or
+ * reported as failed.
+ * @returns {Promise<void> | undefined}
  */
-async function _captureDeadLetter(entry, slot, topic, event, data, attempts, err, startedAt, traceContext) {
+function _captureDeadLetter(entry, slot, topic, event, data, attempts, err, startedAt, traceContext) {
 	const store = state.webhookDeadLetter;
-	if (!store) return;
+	if (!store) return undefined;
 	/** @type {Record<string, unknown>} */
 	const rec = {
 		webhookId: entry.id,
@@ -245,24 +298,64 @@ async function _captureDeadLetter(entry, slot, topic, event, data, attempts, err
 	// can be sent again without creating a second record. Only a store that
 	// declares `keyedAdd` gets a key; any other store, and a delivery without a
 	// usable key, get one unkeyed write, which is all that can safely be repeated.
-	let key = slot !== null && store.keyedAdd === true ? await _captureKey(entry.config, slot, event, data) : null;
+	const key = slot !== null && store.keyedAdd === true ? _captureKey(entry.config, slot, event, data) : null;
+	if (key !== null && typeof key === 'object' && typeof key.then === 'function') {
+		return key.then((k) => _addDeadLetter(entry, store, rec, k));
+	}
+	return _addDeadLetter(entry, store, rec, /** @type {string | null | typeof _KEY_UNAVAILABLE} */ (key));
+}
+
+/**
+ * Write one capture. A synchronous store answers at once and the result is
+ * undefined; an asynchronous one is awaited, and a keyed write it rejects is
+ * repeated after the waits in `_DEAD_LETTER_RETRY_MS`. A synchronous throw (a
+ * malformed record, a throwing extractor) fails the same way every time, so it
+ * is reported at once and never repeated.
+ * @param {any} entry @param {any} store @param {Record<string, unknown>} rec
+ * @param {string | null | typeof _KEY_UNAVAILABLE} key
+ * @returns {Promise<void> | undefined}
+ */
+function _addDeadLetter(entry, store, rec, key) {
 	if (key === _KEY_UNAVAILABLE) {
 		_reportKeyUnavailable(entry);
 		key = null;
 	}
 	if (key !== null) rec.key = key;
+	let added;
+	try {
+		added = store.add(rec);
+	} catch (e) {
+		_reportDeadLetterFailure(entry, e);
+		return undefined;
+	}
+	if (!added || typeof added.then !== 'function') {
+		_bgDeadLetterChanged();
+		return undefined;
+	}
+	return _awaitDeadLetter(entry, store, rec, key !== null, added);
+}
+
+/**
+ * @param {any} entry @param {any} store @param {Record<string, unknown>} rec
+ * @param {boolean} keyed @param {Promise<unknown>} added
+ */
+async function _awaitDeadLetter(entry, store, rec, keyed, added) {
 	for (let attempt = 0; ; attempt++) {
 		try {
-			const added = store.add(rec);
-			if (added && typeof added.then === 'function') await added;
-			else _bgDeadLetterChanged();
+			await added;
 			return;
 		} catch (e) {
-			if (key === null || attempt >= _DEAD_LETTER_RETRY_MS.length) {
+			if (!keyed || attempt >= _DEAD_LETTER_RETRY_MS.length) {
 				_reportDeadLetterFailure(entry, e);
 				return;
 			}
-			await new Promise((resolve) => setTimer(resolve, _DEAD_LETTER_RETRY_MS[attempt]));
+		}
+		await new Promise((resolve) => setTimer(resolve, _DEAD_LETTER_RETRY_MS[attempt]));
+		try {
+			added = store.add(rec);
+		} catch (e) {
+			_reportDeadLetterFailure(entry, e);
+			return;
 		}
 	}
 }

@@ -518,9 +518,9 @@ export const EVENT_GUIDANCE = Object.freeze({
 		nextAction: 'Make the `idempotencyKey` callback return promptly and without throwing, for example by deriving it from the event data alone.'
 	}),
 	'webhook.dead-letter.persist-failed': Object.freeze({
-		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record.',
+		cause: 'An outbound webhook delivery has already failed, and the configured dead-letter store throws or rejects on every attempt to add the failed record, or 1000 dead-letter writes are already in flight in this process (a store that stopped answering), so the record is not written at all.',
 		consequence: 'The record was the only replay copy, so this webhook event is lost for good. The `svelte_realtime_webhook_dead_letter_failures_total` counter goes up.',
-		automaticRecovery: 'A keyed write to a store that declares `keyedAdd` is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. An unkeyed write is made once.',
+		automaticRecovery: 'A keyed write to a store that declares `keyedAdd` is repeated twice, after 100 ms and 500 ms, before this event fires; the key keeps a write that landed without a reply from being stored twice. An unkeyed write, and a write the store refuses by throwing at once, is made once. Writes run after the delivery has given its slot back, so a slow store never holds up deliveries.',
 		nextAction: 'Check the dead-letter store backend (connection, capacity, permissions). Alert on the failure counter. Rebuild lost events from your own source data if they matter.'
 	}),
 	'webhook.delivery.overflow': Object.freeze({
