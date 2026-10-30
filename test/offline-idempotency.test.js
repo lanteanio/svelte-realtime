@@ -438,9 +438,9 @@ describe('offline backoff around the hold and retention', () => {
 		refuse(last('a')); await turn();
 		for (const step of [1000, 2000, 4000, 8000]) { await vi.advanceTimersByTimeAsync(step); refuse(last('a')); await turn(); }
 		// The next backoff, 16 s, would pass the retention: it is cut to one
-		// last try a second before the retention ends.
+		// last try halfway to the end of the retention.
 		expect(onReplayError).not.toHaveBeenCalled();
-		await vi.advanceTimersByTimeAsync(start + 19000 - Date.now() - 1); expect(sent('a')).toBe(5);
+		await vi.advanceTimersByTimeAsync(start + 17500 - Date.now() - 1); expect(sent('a')).toBe(5);
 		await vi.advanceTimersByTimeAsync(1); expect(sent('a')).toBe(6);
 		refuse(last('a')); await turn();
 		await expect(calls[0]).rejects.toMatchObject({ code: 'STALE', message: 'Offline mutation expired' });
@@ -453,9 +453,9 @@ describe('offline backoff around the hold and retention', () => {
 		const start = Date.now();
 		refuse(last('a')); await turn();
 		for (const step of [1000, 2000, 4000, 8000]) { await vi.advanceTimersByTimeAsync(step); refuse(last('a')); await turn(); }
-		await vi.advanceTimersByTimeAsync(start + 19000 - Date.now() - 1);
+		await vi.advanceTimersByTimeAsync(start + 17500 - Date.now() - 1);
 		// The clock moves on while the timer is held back, as in a background tab.
-		vi.setSystemTime(Date.now() + 900);
+		vi.setSystemTime(Date.now() + 2000);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(sent('a')).toBe(6);
 		answer(last('a'), { ok: true, data: 'a' }); await turn();
@@ -488,7 +488,8 @@ describe('offline backoff around the hold and retention', () => {
 		const { calls } = await queued(['a'], { maxAge: 20000 });
 		await vi.advanceTimersByTimeAsync(19500);
 		refuse(last('a'), 400); await turn();
-		expect(sent('a')).toBe(2);
+		await vi.advanceTimersByTimeAsync(249); expect(sent('a')).toBe(1);
+		await vi.advanceTimersByTimeAsync(1); expect(sent('a')).toBe(2);
 		answer(last('a'), { ok: true, data: 'a' }); await turn();
 		expect(await calls[0]).toBe('a');
 	});
@@ -525,6 +526,74 @@ describe('offline backoff around the hold and retention', () => {
 		answer(last('a'), { ok: true, data: 'a' }); await turn();
 		expect(await a).toBe('a');
 		expect(client.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('replays the held head when a call sent ahead of it is answered after the hold', async () => {
+		client.configure({ offline: { queue: true, persist: persist(), maxAge: 60000 } });
+		status('disconnected');
+		const x = client.__rpc('work/run').with({ timeout: 600000 })({ value: 'x' }); x.catch(() => {});
+		await vi.advanceTimersByTimeAsync(20000);
+		const a = client.__rpc('work/run').with({ timeout: 600000 })({ value: 'a' }); a.catch(() => {});
+		await turn(); status('open'); await turn();
+		refuse(last('x'), 31000); await turn();
+		await vi.advanceTimersByTimeAsync(32000);
+		refuse(last('a'), 20000); await turn();
+		expect(sent('x')).toBe(2);
+		// x is answered at 77 s, after the hold of a ended at 72 s.
+		await vi.advanceTimersByTimeAsync(25000);
+		expect(sent('a')).toBe(1);
+		answer(last('x'), { ok: true, data: 'x' }); await turn();
+		expect(sent('a')).toBe(2);
+		answer(last('a'), { ok: true, data: 'a' }); await turn();
+		expect(await a).toBe('a');
+	});
+
+	it('sets aside a call refused while it goes up ahead of the held head', async () => {
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persist(), onReplayError, maxAge: 60000 } });
+		status('disconnected');
+		const x = client.__rpc('work/run').with({ timeout: 600000 })({ value: 'x' }); x.catch(() => {});
+		await vi.advanceTimersByTimeAsync(20000);
+		const a = client.__rpc('work/run').with({ timeout: 600000 })({ value: 'a' }); a.catch(() => {});
+		await turn(); status('open'); await turn();
+		refuse(last('x'), 31000); await turn();
+		await vi.advanceTimersByTimeAsync(32000);
+		refuse(last('a'), 20000); await turn();
+		expect(sent('x')).toBe(2);
+		// A 1 s backoff would fit the hold, but x expires before a's hold ends.
+		refuse(last('x')); await turn();
+		await vi.advanceTimersByTimeAsync(999); expect(sent('x')).toBe(2);
+		await vi.advanceTimersByTimeAsync(1); expect(sent('x')).toBe(3);
+		expect(sent('a')).toBe(1);
+		answer(last('x'), { ok: true, data: 'x' }); await turn();
+		expect(await x).toBe('x');
+	});
+
+	it('sets aside a held call that would expire before the queue goes again', async () => {
+		const at = Date.now();
+		const row = (seq, value, expiresAt) => ({ seq, path: 'work/run', args: [{ value }], queuedAt: at, expiresAt, idempotencyKey: 'key-' + value, timeout: 600000 });
+		rows.set('q:default:000000000001', row(1, 'h', at + 600000));
+		rows.set('q:default:000000000002', row(2, 'y', at + 10000));
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persist(), onReplayError, replay: 'concurrent' } });
+		status('disconnected'); await turn(); status('open'); await turn();
+		refuse(last('h'), 25000); refuse(last('y')); await turn();
+		// The queue waits 25 s for h; y expires at 10 s, so it goes on its own.
+		await vi.advanceTimersByTimeAsync(999); expect(sent('y')).toBe(1);
+		await vi.advanceTimersByTimeAsync(1); expect(sent('y')).toBe(2); expect(sent('h')).toBe(1);
+		answer(last('y'), { ok: true, data: 'y' }); await turn();
+		expect(rows.has('q:default:000000000002')).toBe(false);
+		await vi.advanceTimersByTimeAsync(24000); expect(sent('h')).toBe(2);
+	});
+
+	it('drops a call whose last try is refused, whatever the wait', async () => {
+		const { calls } = await queued(['a'], { maxAge: 20000 });
+		const start = Date.now();
+		refuse(last('a')); await turn();
+		for (const step of [1000, 2000, 4000, 8000]) { await vi.advanceTimersByTimeAsync(step); refuse(last('a')); await turn(); }
+		await vi.advanceTimersByTimeAsync(start + 17500 - Date.now()); expect(sent('a')).toBe(6);
+		refuse(last('a'), 400); await turn();
+		await expect(calls[0]).rejects.toMatchObject({ code: 'STALE', message: 'Offline mutation expired' });
 	});
 
 	it('keeps the gap when a set-aside call goes up ahead of the held head', async () => {

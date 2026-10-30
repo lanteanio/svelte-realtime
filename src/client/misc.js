@@ -20,9 +20,10 @@ const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
 // A refusal that names no wait backs off from one second, doubling up to this.
 const _IDEMPOTENCY_BACKOFF_MAX_MS = 300000;
 
-// A wait cut short by the retention retries this long before it ends, so a
-// timer that fires late (a background tab) still finds the call in it.
-const _LAST_TRY_MARGIN_MS = 1000;
+// A wait cut short by the retention retries up to this long before it ends
+// (half the time left, if that is less), so a timer that fires a few seconds
+// late (a background tab) still finds the call in it.
+const _LAST_TRY_MARGIN_MS = 5000;
 
 /** A queued call set aside until its `retryAt`. */
 const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
@@ -38,6 +39,15 @@ const _expiredAt = (entry, at, maxAge) => (maxAge > 0 && at - entry.queuedAt > m
  * @param {OfflineEntry} entry @param {number} maxAge
  */
 const _lastLegalAt = (entry, maxAge) => Math.min(maxAge > 0 ? entry.queuedAt + maxAge : Infinity, entry.expiresAt !== undefined ? entry.expiresAt - 1 : Infinity);
+
+/**
+ * When a call that runs out of retention gets its last try, as seen at `at`.
+ * @param {OfflineEntry} entry @param {number} maxAge @param {number} at
+ */
+const _lastTryAt = (entry, maxAge, at) => {
+	const last = _lastLegalAt(entry, maxAge);
+	return last - Math.min(_LAST_TRY_MARGIN_MS, Math.floor((last - at) / 2));
+};
 
 // The longest delay a timer can take; a later drain re-arms for the rest.
 const _MAX_TIMER_MS = 2147483647;
@@ -62,8 +72,9 @@ const _floorOf = (scope) => _redrainNotBefore.scope === scope ? _redrainNotBefor
  * Whether a set-aside call due by `at` would expire before `floorAt`, the end
  * of the latest backoff: it may go up ahead of the held head.
  * @param {OfflineEntry} entry @param {number} at @param {number} floorAt
+ * @param {number} maxAge
  */
-const _urgent = (entry, at, floorAt) => entry.retryAt !== undefined && entry.retryAt <= at && entry.retryAt < floorAt && _expiredAt(entry, floorAt, clientState.config.offline?.maxAge || 0);
+const _urgent = (entry, at, floorAt, maxAge) => entry.retryAt !== undefined && entry.retryAt <= at && entry.retryAt < floorAt && _expiredAt(entry, floorAt, maxAge);
 
 /**
  * Drain the current queue again after `delay` ms, unless a pending re-drain
@@ -77,7 +88,9 @@ function _scheduleRedrain(delay, early = false) {
 	const at = Math.max(now() + delay, early ? 0 : floor);
 	delay = at - now();
 	if (_redrain !== null) {
-		// A wake armed before the latest backoff moves out to its end.
+		// A wake armed before the latest backoff moves out to its end. A drain
+		// before then sends only urgent set-aside calls, which is what keeps
+		// the held head back; this saves the drain that would find none.
 		if (_redrain.at <= at && (_redrain.early || _redrain.at >= floor)) return;
 		clearTimer(_redrain.handle);
 	}
@@ -260,11 +273,15 @@ async function _drainOfflineQueue() {
 	_replayingScope = scope;
 	_startOfflineDrain(scope);
 	let again = false, retryIdempotency = false, reachedQueue = false;
-	// Calls an idempotency refusal holds the queue for, with when they were
-	// refused, and when the last of their waits ends.
-	/** @type {Map<OfflineEntry, number>} */
+	// Calls an idempotency refusal holds the queue for: when each was refused,
+	// when its wait ends and the refusal, and when the last of the waits ends.
+	/** @type {Map<OfflineEntry, { refusedAt: number, until: number, err: any }>} */
 	const held = new Map();
 	let heldUntil = 0;
+	// Whether the drain ran before the latest backoff ended, and the drain's
+	// retention.
+	let earlyDrain = false;
+	let maxAge = 0;
 	try {
 		await _offlineReady();
 		if (scope !== _offlineScope()) return;
@@ -276,8 +293,9 @@ async function _drainOfflineQueue() {
 		// Before the latest backoff ends only set-aside calls that are due and
 		// would expire by then go up: the held head and the rest wait for it.
 		const floorAt = _floorOf(scope);
-		const early = readyAt < floorAt;
-		const ready = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => !_isHeldAfterClose(entry) && (early ? _urgent(entry, at, floorAt) : !_waiting(entry, at));
+		const early = earlyDrain = readyAt < floorAt;
+		maxAge = clientState.config.offline?.maxAge || 0;
+		const ready = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => !_isHeldAfterClose(entry) && (early ? _urgent(entry, at, floorAt, maxAge) : !_waiting(entry, at));
 		if (!_offlineQueue.some(entry => ready(entry, readyAt))) return;
 		_setUploading(true);
 		if (scope !== _offlineScope()) return;
@@ -286,7 +304,6 @@ async function _drainOfflineQueue() {
 		const beforeReplay = offlineOpts?.beforeReplay;
 		const onConflict = offlineOpts?.onConflict;
 		const conflictResolution = offlineOpts?.conflictResolution || 'server-win';
-		const maxAge = offlineOpts?.maxAge || 0;
 		const nowMs = now();
 		// Whether a call is past its retention at `at`.
 		const expiredAt = (/** @type {OfflineEntry} */ entry, /** @type {number} */ at) => _expiredAt(entry, at, maxAge);
@@ -400,29 +417,32 @@ async function _drainOfflineQueue() {
 						if (hinted) wait = Math.max(1000, err.retryAfter);
 						else wait = entry.idempotencyBackoff = entry.idempotencyBackoff ? Math.min(entry.idempotencyBackoff * 2, _IDEMPOTENCY_BACKOFF_MAX_MS) : 1000;
 						const refusedAt = now();
-						if (expiredAt(entry, refusedAt + wait)) {
-							// Past its retention by then. A server that names that time
-							// can only see it expire; the client's own wait (its backoff,
-							// or the one-second minimum on a hint) is cut to one last try.
-							const serverLate = hinted && expiredAt(entry, refusedAt + err.retryAfter);
-							if (serverLate || entry.idempotencyLastTry || expiredAt(entry, refusedAt)) {
-								/** @type {any} */
-								const stale = new RpcError('STALE', serverLate ? 'Offline mutation expired: the server asked to retry it after its retention ends' : 'Offline mutation expired');
-								stale.cause = err;
-								settleFail(entry, stale);
-								return;
-							}
-							entry.idempotencyLastTry = true;
-							wait = Math.max(0, _lastLegalAt(entry, maxAge) - _LAST_TRY_MARGIN_MS - refusedAt);
+						// A server that names a time past the retention can only see
+						// the call expire, and so does a refused last try.
+						const serverLate = hinted && expiredAt(entry, refusedAt + err.retryAfter);
+						if (serverLate || entry.idempotencyLastTry || expiredAt(entry, refusedAt)) {
+							/** @type {any} */
+							const stale = new RpcError('STALE', serverLate ? 'Offline mutation expired: the server asked to retry it after its retention ends' : 'Offline mutation expired');
+							stale.cause = err;
+							settleFail(entry, stale);
+							return;
 						}
-						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS || (entry.idempotencyHeld || 0) + wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
+						// The client's own wait (its backoff, or the one-second
+						// minimum on a hint) is cut to one last try within it.
+						if (expiredAt(entry, refusedAt + wait)) {
+							entry.idempotencyLastTry = true;
+							wait = Math.max(0, _lastTryAt(entry, maxAge, refusedAt) - refusedAt);
+						}
+						// A call sent ahead of the held head is set aside again: a
+						// hold would keep it until the head's backoff ends.
+						if (early || wait > _IDEMPOTENCY_REPLAY_HOLD_MS || (entry.idempotencyHeld || 0) + wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
 							entry.idempotencyHeld = 0;
 							defer(entry, err, refusedAt + wait);
 							return;
 						}
 						// The queue waits for the last of the waits of the calls it
 						// holds, and for the rest of the drain.
-						held.set(entry, refusedAt);
+						held.set(entry, { refusedAt, until: refusedAt + wait, err });
 						heldUntil = Math.max(heldUntil, refusedAt + wait);
 						cut = true;
 						retryIdempotency = true;
@@ -614,6 +634,27 @@ async function _drainOfflineQueue() {
 			}
 		}
 
+		// A held call whose retention ends before the queue goes again is set
+		// aside instead, so its own wake still gives it its try.
+		if (held.size) {
+			const redrainAt = Math.max(now(), heldUntil);
+			heldUntil = 0;
+			for (const [entry, hold] of held) {
+				if (!expiredAt(entry, redrainAt)) {
+					heldUntil = Math.max(heldUntil, hold.until);
+					continue;
+				}
+				held.delete(entry);
+				entry.idempotencyHeld = 0;
+				let retryAt = hold.until;
+				const lastTry = _lastTryAt(entry, maxAge, hold.refusedAt);
+				if (retryAt > lastTry) {
+					entry.idempotencyLastTry = true;
+					retryAt = lastTry;
+				}
+				defer(entry, hold.err, retryAt);
+			}
+		}
 		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (closed()) cut = true;
@@ -673,7 +714,7 @@ async function _drainOfflineQueue() {
 		let due = false;
 		for (const entry of _offlineQueue) {
 			if (entry.retryAt === undefined || entry.retryAt > at || _isHeldAfterClose(entry)) continue;
-			if (at >= floorAt || _urgent(entry, at, floorAt)) due = true;
+			if (at >= floorAt || _urgent(entry, at, floorAt, maxAge)) due = true;
 		}
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
@@ -685,7 +726,7 @@ async function _drainOfflineQueue() {
 				// the drain if that took longer, and count it toward the hold.
 				const redrainAt = Math.max(at, heldUntil);
 				_redrainNotBefore = { scope, at: Math.max(_floorOf(scope), redrainAt) };
-				for (const [entry, refusedAt] of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + redrainAt - refusedAt;
+				for (const [entry, hold] of held) entry.idempotencyHeld = (entry.idempotencyHeld || 0) + redrainAt - hold.refusedAt;
 				_scheduleRedrain(redrainAt - at);
 			}
 		}
@@ -695,13 +736,15 @@ async function _drainOfflineQueue() {
 		let wakeAt = Infinity, urgentAt = Infinity, waitsForFloor = false;
 		for (const entry of _offlineQueue) {
 			if (_isHeldAfterClose(entry)) continue;
-			if (entry.retryAt !== undefined && _urgent(entry, entry.retryAt, floorAt)) urgentAt = Math.min(urgentAt, entry.retryAt);
+			if (entry.retryAt !== undefined && _urgent(entry, entry.retryAt, floorAt, maxAge)) urgentAt = Math.min(urgentAt, entry.retryAt);
 			else if (entry.retryAt !== undefined && entry.retryAt > at) wakeAt = Math.min(wakeAt, entry.retryAt);
 			else waitsForFloor = true;
 		}
 		if (urgentAt !== Infinity && (urgentAt > at || reachedQueue)) _scheduleRedrain(Math.max(0, urgentAt - at), true);
 		if (wakeAt !== Infinity) _scheduleRedrain(wakeAt - at);
-		if (waitsForFloor && floorAt > at) _scheduleRedrain(floorAt - at);
+		// A drain before the backoff ended may end after it, with no wake left
+		// for the held head.
+		if (waitsForFloor && (floorAt > at || earlyDrain)) _scheduleRedrain(Math.max(0, floorAt - at));
 	}
 }
 
