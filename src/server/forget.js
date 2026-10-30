@@ -772,6 +772,7 @@ export async function resumeForgetJobs(opts = {}) {
 		// may hold other users' data by now.
 		const done = Array.isArray(claim.doneSurfaces) ? claim.doneSurfaces.filter((n) => typeof n === 'string') : [];
 		const job = { id: jobId, runId, attempts: Number(claim.attempts) || 1, claimed: true, skip: new Set(done) };
+		let started = false;
 		try {
 			const { userId, tenantId, cascade } = claim;
 			if (typeof userId !== 'string' || userId.length === 0 || _validIdReason(userId, 'userId') !== null) {
@@ -785,6 +786,7 @@ export async function resumeForgetJobs(opts = {}) {
 				throw _invalidJobRequest('resumeForgetJobs: the stored job has an invalid cascade');
 			}
 			const userIdHash = typeof claim.userIdHash === 'string' ? claim.userIdHash : _hashUserId(userId, _forgetHashKey);
+			started = true;
 			await _runErasure(jobs, job, { userId, userIdHash, tenantId: scope, cascade: stored }, onForget);
 			out.completed++;
 			out.results.push({ id: jobId, status: 'completed' });
@@ -792,7 +794,7 @@ export async function resumeForgetJobs(opts = {}) {
 			const code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
 			// A stored job this run cannot even start still releases its lease
 			// with a failure, so it stays listed and backs off like any other.
-			if (code === 'INVALID_REQUEST') {
+			if (!started) {
 				const failedAt = wallEpoch();
 				await _recordOutcome(jobs, 'fail', { id: jobId, runId, at: failedAt, code, failedSurfaces: [], doneSurfaces: [], retryAt: failedAt + _retryDelay(job.attempts) });
 			}
