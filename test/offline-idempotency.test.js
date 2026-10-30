@@ -337,3 +337,63 @@ describe('calls set aside that come due during another drain', () => {
 		expect(client.offlineCheckpoint().gapDetected).toBe(true);
 	});
 });
+
+describe('offline replay of refusals that name no wait', () => {
+	const rpcFrames = () => wire.filter(frame => frame.rpc);
+	const persist = () => ({
+		async getAll(prefix) { return [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })); },
+		async put(key, value) { rows.set(key, value); }, async delete(key) { rows.delete(key); },
+		async clear(prefix) { for (const key of rows.keys()) if (key.startsWith(prefix)) rows.delete(key); }
+	});
+
+	it('backs off, then sets the call aside so the calls behind it replay', async () => {
+		const onReplayError = vi.fn();
+		client.configure({ offline: { queue: true, persist: persist(), onReplayError } });
+		status('disconnected');
+		const a = client.__rpc('work/run')({ value: 'a' }); a.catch(() => {});
+		const b = client.__rpc('work/run')({ value: 'b' });
+		await turn(); status('open'); await turn();
+		const sentA = [];
+		const refuse = async () => {
+			const frame = rpcFrames().at(-1); expect(frame.args).toEqual([{ value: 'a' }]);
+			sentA.push(Date.now());
+			answer(frame, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'own call running' }); await turn();
+		};
+		const start = Date.now();
+		await refuse();
+		for (const step of [1000, 2000, 4000, 8000]) {
+			await vi.advanceTimersByTimeAsync(step - 1); expect(rpcFrames()).toHaveLength(sentA.length);
+			await vi.advanceTimersByTimeAsync(1); await refuse();
+		}
+		expect(sentA.map(at => at - start)).toEqual([0, 1000, 3000, 7000, 15000]);
+		// The fifth refusal passes the hold in all: a is set aside and b goes up.
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		const sentB = rpcFrames().at(-1); expect(sentB.args).toEqual([{ value: 'b' }]);
+		answer(sentB, { ok: true, data: 'b' }); await turn();
+		expect(await b).toBe('b');
+		await vi.advanceTimersByTimeAsync(15999); expect(rpcFrames().at(-1).args).toEqual([{ value: 'b' }]);
+		await vi.advanceTimersByTimeAsync(1); await refuse();
+		// The next wait doubles again, past the hold, so it sets the call aside at once.
+		expect(onReplayError).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(32000);
+		const last = rpcFrames().at(-1); expect(last.args).toEqual([{ value: 'a' }]);
+		answer(last, { ok: true, data: 'a' }); await turn();
+		expect(await a).toBe('a');
+	});
+
+	it('keeps the backoff before replaying a set-aside call that came due', async () => {
+		client.configure({ offline: { queue: true, persist: persist() } });
+		status('disconnected');
+		const a = client.__rpc('work/run')({ value: 'a' }); a.catch(() => {});
+		const b = client.__rpc('work/run').with({ timeout: 120000 })({ value: 'b' }); b.catch(() => {});
+		await turn(); status('open'); await turn();
+		answer(rpcFrames()[0], { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'later', retryAfter: 31000 }); await turn();
+		const slow = rpcFrames()[1];
+		await vi.advanceTimersByTimeAsync(40000);
+		// a came due while b ran; b is refused with no wait, so the drain backs off first.
+		answer(slow, { ok: false, code: 'IDEMPOTENCY_IN_PROGRESS', error: 'later' }); await turn();
+		expect(rpcFrames()).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(999); expect(rpcFrames()).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1); expect(rpcFrames().length).toBeGreaterThan(2);
+	});
+});

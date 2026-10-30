@@ -880,11 +880,23 @@ function _putCheckpoint(scope = _scope) {
 	void _write(store, key, () => store.put(key, value)).catch(() => {});
 }
 
+/** @type {Array<() => void>} Other modules' offline state to reset with this one. */
+const _resetHooks = [];
+
+/**
+ * @internal Reset `fn`'s state along with the offline state.
+ * @param {() => void} fn
+ */
+export function _onOfflineReset(fn) {
+	_resetHooks.push(fn);
+}
+
 /**
  * Reset the offline durability state. Tests only.
  * @internal
  */
 export function _resetOffline() {
+	for (const hook of _resetHooks) hook();
 	_erasures = new WeakMap();
 	_scope = _newScope();
 	_retiredScopes.clear();

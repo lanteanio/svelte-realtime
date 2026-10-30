@@ -5,18 +5,20 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _setRetryAt } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped, _setRetryAt, _onOfflineReset } from './offline.js';
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, restored?: boolean }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, retryAt?: number, idempotencyBackoff?: number, idempotencyHeld?: number, restored?: boolean }} OfflineEntry
  */
 
 const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
 
-// The longest a replay waits on an idempotency refusal with the rest of the
-// queue behind it. A refusal that names a longer wait sets its call aside
-// until then, and the calls behind it go ahead.
+// The longest one call may hold the queue with idempotency refusals, in all.
+// A refusal that names a longer wait, or one past this total, sets the call
+// aside until then, and the calls behind it go ahead.
 const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
+// A refusal that names no wait backs off from one second, doubling up to this.
+const _IDEMPOTENCY_BACKOFF_MAX_MS = 300000;
 
 /** A queued call set aside until its `retryAt`. */
 const _waiting = (entry, at) => entry.retryAt !== undefined && entry.retryAt > at;
@@ -50,6 +52,7 @@ function _cancelRedrain() {
 	clearTimer(_redrain.handle);
 	_redrain = null;
 }
+_onOfflineReset(_cancelRedrain);
 
 /** @type {boolean} */
 let _configListenerAttached = false;
@@ -344,10 +347,15 @@ async function _drainOfflineQueue() {
 						return;
 					}
 					if (err && (err.code === 'IDEMPOTENCY_IN_PROGRESS' || err.code === 'IDEMPOTENCY_CAPACITY')) {
-						// The server's hint says when the call can be admitted. Waiting
-						// longer than the hold would stall every call queued behind it.
-						const wait = typeof err.retryAfter === 'number' ? err.retryAfter : 0;
-						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
+						// The server's hint says when the call can be admitted; without
+						// one the call backs off. Holding the queue longer than the hold
+						// in all would stall every call queued behind it.
+						let wait;
+						if (typeof err.retryAfter === 'number') wait = Math.max(1000, err.retryAfter);
+						else wait = entry.idempotencyBackoff = entry.idempotencyBackoff ? Math.min(entry.idempotencyBackoff * 2, _IDEMPOTENCY_BACKOFF_MAX_MS) : 1000;
+						entry.idempotencyHeld = (entry.idempotencyHeld || 0) + wait;
+						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS || entry.idempotencyHeld > _IDEMPOTENCY_REPLAY_HOLD_MS) {
+							entry.idempotencyHeld = 0;
 							defer(entry, err, wait);
 							return;
 						}
@@ -602,7 +610,7 @@ async function _drainOfflineQueue() {
 		}
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
-		if ((again && !retryIdempotency) || (due && reachedQueue && clientState.socketUp)) void _drainOfflineQueue();
+		if (!retryIdempotency && (again || (due && reachedQueue && clientState.socketUp))) void _drainOfflineQueue();
 		else {
 			_setUploading(false);
 			if (again) _scheduleRedrain(retryDelay);
