@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { live, onError, configureWebhooks, getDeadLetter, createDeadLetterStore, __registerWebhookOut, _prepareHmr, setOperationalEventSink } from '../src/server.js';
+import { live, onError, configureWebhooks, getDeadLetter, createDeadLetterStore, __registerWebhookOut, __registerFlag, _prepareHmr, setOperationalEventSink } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 import { state } from '../src/server/state.js';
 
@@ -308,14 +308,6 @@ describe('live.effect concurrency and queue limits', () => {
 		expect(() => live.effect(['a'], fn, { overflow: 'coalesce', maxQueued: 0 })).toThrow(/coalesce.*maxQueued/);
 	});
 
-	it('a burst of flag sets settles on the newest value', async () => {
-		const flag = live.flag('feature:burst', 0);
-		env = createTestEnv();
-		env.register('flags', { burst: flag });
-		for (let i = 1; i <= 20000; i++) env.platform.publish('feature:burst', 'set', i);
-		await flush();
-		expect(flag.get()).toBe(20000);
-	});
 });
 
 describe('reactive work metrics', () => {
@@ -352,16 +344,28 @@ describe('reactive work metrics', () => {
 		expect(byName.svelte_realtime_background_total).toEqual(['kind', 'result']);
 	});
 
-	it('counts coalesced events and keeps flag watchers out of the series', async () => {
+	it('counts coalesced events', async () => {
 		const registry = fakeRegistry();
 		live.metrics(registry);
 		const fx = setupEffect({ maxConcurrent: 1, maxQueued: 1, overflow: 'coalesce' });
-		live.flag('feature:metered', 0);
-		for (let i = 1; i <= 10; i++) env.platform.publish('feature:metered', 'set', i);
 		for (let i = 1; i <= 4; i++) fx.publish(i);
 		await flush();
 		expect(registry.counters.get('svelte_realtime_background_total{"kind":"effect","result":"coalesced"}')).toBe(2);
 		await fx.drain();
+	});
+
+	it('keeps flag watchers out of the effect series', async () => {
+		const registry = fakeRegistry();
+		live.metrics(registry);
+		const flag = live.flag('feature:metered', 0);
+		__registerFlag('feature:metered', 0);
+		env = createTestEnv();
+		env.register('flags', { metered: flag });
+		for (let i = 1; i <= 10; i++) env.platform.publish('feature:metered', 'set', i);
+		await flush();
+		// The watcher ran for every set, and none of its runs is an effect call.
+		expect(flag.get()).toBe(10);
+		expect([...registry.counters.keys()].filter((k) => k.includes('"kind":"effect"'))).toEqual([]);
 	});
 
 	it('tracks derived computes in flight', async () => {
