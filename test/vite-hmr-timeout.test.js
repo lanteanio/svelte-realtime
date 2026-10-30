@@ -19,6 +19,13 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 	let release;
 	globalThis[key] = { armed: false, entered: false, promise: new Promise(resolve => { release = resolve; }) };
 	let server, clock;
+	// Saves go through Vite's own change listener rather than the OS watcher.
+	// Chokidar drops a change to a path within 50 ms of the previous one, so a
+	// second save made right after the first update starts would never arrive.
+	const save = content => {
+		writeFileSync(file, content);
+		server.watcher.emit('change', file);
+	};
 	const pending = [], timers = [];
 	const outcomes = [];
 	try {
@@ -31,7 +38,7 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 			return work;
 		};
 		server = await createServer({ root, configFile: false, cacheDir: join(root, '.vite'), logLevel: 'silent',
-			server: { host: '127.0.0.1', port: 0, fs: { allow: [root, resolve(source, '..')] } },
+			server: { host: '127.0.0.1', port: 0, watch: null, fs: { allow: [root, resolve(source, '..')] } },
 			optimizeDeps: { noDiscovery: true },
 			resolve: { alias: { 'svelte-realtime/server': join(source, 'server.js'), 'svelte-realtime/client': join(source, 'client.js') } },
 			plugins: [plugin, { name: 'test-held-registry', enforce: 'post', transform(code, id) {
@@ -51,12 +58,10 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 			return handle;
 		});
 		globalThis[key].armed = true;
-		writeFileSync(file, moduleSource('late'));
+		save(moduleSource('late'));
 		await expect.poll(() => globalThis[key].entered, { timeout: 10000 }).toBe(true);
-		writeFileSync(file, moduleSource('newer'));
-		// The second edit reaches the plugin through the real file watcher, like
-		// the waits above, so it gets the same allowance.
-		await expect.poll(() => pending.length, { timeout: 10000 }).toBe(2);
+		save(moduleSource('newer'));
+		await expect.poll(() => pending.length).toBe(2);
 		expect(timers).toHaveLength(2);
 		for (const timer of timers) timer.fire();
 		await expect.poll(() => outcomes.length).toBe(2);
@@ -71,7 +76,7 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 		await expect.poll(() => log.mock.calls.some(([line]) => String(line).includes('Hot-reloaded')), { timeout: 10000 }).toBe(true);
 		log.mockRestore();
 		globalThis[key].armed = false;
-		writeFileSync(file, moduleSource('newer') + '\n');
+		save(moduleSource('newer') + '\n');
 		await expect.poll(paths, { timeout: 10000 }).toEqual(['count/newer']);
 		await new Promise(resolve => setImmediate(resolve));
 		expect(paths()).toEqual(['count/newer']);
