@@ -92,6 +92,8 @@ export { configureAlarm, _resetAlarms };
 import { normalizeProtocolPolicy } from './server/protocol-policy.js';
 import { configureForget, _resetForget, installForget } from './server/forget.js';
 export { configureForget, _resetForget };
+import { configureRpc, _validateRouteConcurrent, _closeRpcConnection } from './server/rpc-admission.js';
+export { configureRpc };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
 import { introspect } from './server/introspect.js';
@@ -1315,15 +1317,34 @@ async function _resolveGuard(modulePath) {
 
 /**
  * Mark a function as RPC-callable.
+ *
+ * `timeout` is the call's budget on both ends: the client rejects with
+ * `TIMEOUT` after it, and the server fires `ctx.abortSignal` at it.
+ * `perRouteConcurrent` bounds how many calls of this function run at once
+ * in a worker (0 for no bound); it replaces `realtime({ rpc })`'s default
+ * for this route.
  * @template {Function} T
  * @param {T} fn
- * @param {{ timeout?: number }} [options]
+ * @param {{ timeout?: number, perRouteConcurrent?: number }} [options]
  * @returns {T}
  */
 export function live(fn, options) {
 	validateFunctionTimeout(options?.timeout);
+	_markRoute(fn, options, 'live');
 	/** @type {any} */ (fn).__isLive = true;
 	return fn;
+}
+
+/**
+ * Record a route's own admission options on its function.
+ * @param {any} fn
+ * @param {{ timeout?: number, perRouteConcurrent?: number } | undefined} options
+ * @param {string} where
+ */
+function _markRoute(fn, options, where) {
+	const limit = _validateRouteConcurrent(options?.perRouteConcurrent, where);
+	if (limit !== undefined) fn.__perRouteConcurrent = limit;
+	if (options?.timeout !== undefined) fn.__rpcTimeout = options.timeout;
 }
 
 /**
@@ -1568,7 +1589,8 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, piiRedact, volatile: volatileOpt, staleAfterMs, onError: streamOnError, invalidateOn, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, piiRedact, volatile: volatileOpt, staleAfterMs, onError: streamOnError, invalidateOn, perRouteConcurrent, ...rest } = options || {};
+	_validateRouteConcurrent(perRouteConcurrent, 'live.stream');
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -1702,6 +1724,9 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
 	if (classOfService) /** @type {any} */ (initFn).__classOfService = classOfService;
+	// Admission covers the subscribe only: the permit goes back once the
+	// loader answered, never for the life of the subscription.
+	if (typeof initFn === 'function') _markRoute(initFn, { timeout: options?.timeout, perRouteConcurrent }, 'live.stream');
 	/** @type {any} */ (initFn).__isStream = true;
 	/** @type {any} */ (initFn).__isLive = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
@@ -1856,6 +1881,7 @@ live.channel = function channel(topic, options) {
  * @returns {Function}
  */
 live.binary = function binary(fn, options) {
+	_markRoute(fn, { perRouteConcurrent: options?.perRouteConcurrent }, 'live.binary');
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__isBinary = true;
 	if (options?.maxSize) /** @type {any} */ (fn).__maxBinarySize = options.maxSize;
@@ -4115,6 +4141,10 @@ const _firedUnsubscribes = new WeakMap();
 export function close(ws, { platform, subscriptions }) {
 	forgetDeliverySubscription(ws);
 	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
+	// Fire the abort signal of every call still running for this socket and
+	// refuse its queued calls; running calls keep their permits until their
+	// handlers settle.
+	_closeRpcConnection(ws);
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
 	// sync/command handler awoken after this call re-checks the mark and bails
@@ -4444,11 +4474,16 @@ export function publish(topic, event, data, options) {
  *   privacySecret?: string,
  *   authorizeDelivery?: (ctx: any, delivery: any) => unknown,
  *   deliveryAuthorizationOptions?: { maxPendingBytes?: number, timeoutMs?: number },
+ *   rpc?: { perConnectionConcurrent?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number },
  * }} [config]
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, authorizeDelivery, deliveryAuthorizationOptions } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, authorizeDelivery, deliveryAuthorizationOptions, rpc } = cfg;
+
+	// RPC admission limits for this worker. Validated here, so a bad value
+	// fails at startup; omitted keys keep their defaults.
+	if (rpc !== undefined) configureRpc(rpc);
 
 	// Per-recipient delivery authorization (opt-in). Validated here and installed
 	// at the first capture point: init fails without the adapter capability, and

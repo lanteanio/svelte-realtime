@@ -236,6 +236,15 @@ export type RegisteredUser = Register extends { user: infer User } ? User : any;
 export interface LiveContext<UserData = RegisteredUser> {
 	/** Cooperative execution deadline from live.lock({ maxExecutionMs }); pass to abort-aware work. */
 	lockSignal?: AbortSignal;
+	/**
+	 * Fires when a wire call passes its deadline (reason `LiveError('TIMEOUT')`)
+	 * or its connection closes (reason `LiveError('CONNECTION_CLOSED')`). Pass it
+	 * to abort-aware work such as `fetch` or a database driver. The call keeps
+	 * its admission permit until the handler settles, so a handler that ignores
+	 * the signal still holds its place. Work outside a wire call (cron,
+	 * effects, direct calls, loader re-runs) gets a signal that never fires.
+	 */
+	abortSignal: AbortSignal;
 	/** User data attached during the WebSocket upgrade handshake. */
 	user: UserData;
 	/** The raw WebSocket connection. */
@@ -1293,10 +1302,56 @@ export interface LiveOptions {
 	 * Default client request budget in milliseconds (integer, 1..2147483647).
 	 * The generated client stub waits this long before rejecting with
 	 * TIMEOUT; `.with({ timeout })` on a call overrides it, and functions that
-	 * declare none use `configure({ timeout })`.
+	 * declare none use `configure({ timeout })`. For `live()` and
+	 * `live.stream()` it is also the server deadline of the call:
+	 * `ctx.abortSignal` fires at it instead of at `realtime({ rpc: { timeout } })`.
+	 */
+	timeout?: number;
+	/**
+	 * Calls of this function that may run at once in a worker; further calls
+	 * wait in the shared admission queue. Replaces `realtime({ rpc: {
+	 * perRouteConcurrent } })` (default 256) for this route; 0 removes the
+	 * route bound. A stream holds its place only while it subscribes.
+	 */
+	perRouteConcurrent?: number;
+}
+
+/**
+ * RPC admission limits for one worker, passed as `realtime({ rpc })` or to
+ * `configureRpc()`. Every limit is a non-negative integer, and 0 disables it.
+ * A wire call (text, batch entry, binary call, fire-and-forget call or stream
+ * subscribe) holds one place in its connection, its route and the worker
+ * until its handler settles. A call that finds a scope full waits in one
+ * shared FIFO queue; a full or disabled queue refuses it at once with
+ * `OVERLOADED`, `reason` `queue_full` or `concurrency_limit` and `scope`
+ * `connection`, `route` or `global`. A refused call never runs and is not
+ * retried. Uploads keep their own limits and are not counted here.
+ */
+export interface RpcAdmissionOptions {
+	/** Calls one connection may run at once, across routes. @default 32 */
+	perConnectionConcurrent?: number;
+	/** Calls of one route that may run at once; a route's own `perRouteConcurrent` replaces it. @default 256 */
+	perRouteConcurrent?: number;
+	/** Calls the worker may run at once. @default 1024 */
+	globalConcurrent?: number;
+	/** Calls that may wait for a place; 0 refuses a call that cannot start at once. @default 256 */
+	maxQueue?: number;
+	/**
+	 * Deadline of a call in milliseconds, counted from its arrival, up to
+	 * 2147483647; a route's own `timeout` replaces it. `ctx.abortSignal` fires
+	 * within 250 ms after it, and a call still queued then is refused. 0 gives
+	 * calls no deadline.
+	 * @default 30000
 	 */
 	timeout?: number;
 }
+
+/**
+ * Configure RPC admission for this worker; the same as `realtime({ rpc })`.
+ * Omitted keys take their defaults and `null` restores every default. A
+ * value that is not a non-negative integer throws.
+ */
+export function configureRpc(options: RpcAdmissionOptions | null): void;
 
 /**
  * Mark a function as RPC-callable over WebSocket.
@@ -1594,7 +1649,7 @@ export const pushHooks: {
 /**
  * Options for `live.upload()`.
  */
-export interface UploadOptions extends LiveOptions {
+export interface UploadOptions extends Omit<LiveOptions, 'perRouteConcurrent'> {
 	/**
 	 * Hard cap on total bytes per upload. Bytes received past this point
 	 * abort the upload with `LiveError('PAYLOAD_TOO_LARGE')`.
@@ -1777,7 +1832,13 @@ export namespace live {
 	 * ```
 	 */
 	function binary<T extends (ctx: LiveContext, buffer: ArrayBuffer, ...args: any[]) => any>(
-		fn: T
+		fn: T,
+		options?: {
+			/** Largest payload in bytes. @default 10485760 */
+			maxSize?: number;
+			/** Calls of this function that may run at once in a worker; see {@link LiveOptions.perRouteConcurrent}. */
+			perRouteConcurrent?: number;
+		}
 	): T;
 
 	/**
@@ -5100,6 +5161,12 @@ export interface RealtimeConfig {
 	authorizeDelivery?: (ctx: LiveContext<any>, delivery: RealtimeDelivery) => boolean | PromiseLike<boolean>;
 	/** Bounds passed to the adapter's delivery policy. Requires `authorizeDelivery`. */
 	deliveryAuthorizationOptions?: RealtimeDeliveryAuthorizationOptions;
+	/**
+	 * RPC admission limits for this worker, validated at startup. Admission is
+	 * on with finite defaults whether or not this is set; see
+	 * {@link RpcAdmissionOptions}.
+	 */
+	rpc?: RpcAdmissionOptions;
 	/**
 	 * Cluster bus. Pass `createPubSubBus(redis)` or any object exposing
 	 * `wrap(platform)` to enable cluster fan-out. Omit (or pass `null`)

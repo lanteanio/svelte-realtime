@@ -116,9 +116,22 @@ export class RpcError extends Error {
 	constructor(code, message, metadata) {
 		super(message || code);
 		this.code = code;
-		if (metadata !== undefined) Object.assign(this, copyErrorMetadata(metadata));
+		if (metadata !== undefined) {
+			Object.assign(this, copyErrorMetadata(metadata));
+			// Which admission limit refused an OVERLOADED call, as the server named it.
+			if (code === 'OVERLOADED' && metadata !== null && typeof metadata === 'object') {
+				const { reason, scope } = /** @type {any} */ (metadata);
+				if (_OVERLOAD_REASONS.has(reason) && _OVERLOAD_SCOPES.has(scope)) {
+					/** @type {any} */ (this).reason = reason;
+					/** @type {any} */ (this).scope = scope;
+				}
+			}
+		}
 	}
 }
+
+const _OVERLOAD_REASONS = new Set(['concurrency_limit', 'queue_full']);
+const _OVERLOAD_SCOPES = new Set(['connection', 'route', 'global']);
 
 /**
  * The errors an RPC from `_sendRpc` is rejected with when its connection
@@ -228,8 +241,50 @@ export function _resetDedupCoalesceWarned() {
 	_devGateCached = null;
 }
 
-/** @type {Map<string, { resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout> | null }>} */
-const pending = new Map();
+/**
+ * Requests awaiting a response, keyed by correlation id. Counts the entries
+ * that are calls (`call: true`), as opposed to stream subscribes, so the
+ * `rpc.maxPending` cap reads one number however an entry leaves: an answer,
+ * a timeout, a disconnect or a send failure.
+ * @extends {Map<string, any>}
+ */
+class PendingRequests extends Map {
+	calls = 0;
+	/** @param {string} id @param {any} entry */
+	set(id, entry) {
+		const previous = super.get(id);
+		if (previous !== undefined && previous.call === true) this.calls--;
+		if (entry.call === true) this.calls++;
+		return super.set(id, entry);
+	}
+	/** @param {string} id */
+	delete(id) {
+		const previous = super.get(id);
+		if (previous !== undefined && previous.call === true) this.calls--;
+		return super.delete(id);
+	}
+	clear() {
+		this.calls = 0;
+		super.clear();
+	}
+}
+
+/** @type {PendingRequests} */
+const pending = new PendingRequests();
+
+/** The default `rpc.maxPending`: calls one connection may have awaiting a response. */
+export const DEFAULT_MAX_PENDING_CALLS = 256;
+
+/**
+ * The error a call gets when `rpc.maxPending` calls already await a
+ * response. It is never sent.
+ */
+export function _clientOverloaded() {
+	const err = new RpcError('OVERLOADED', 'Too many calls awaiting a response');
+	/** @type {any} */ (err).reason = 'concurrency_limit';
+	/** @type {any} */ (err).scope = 'client';
+	return err;
+}
 
 /**
  * In-flight uploads keyed by numeric streamId. Cross-module: upload.js owns it

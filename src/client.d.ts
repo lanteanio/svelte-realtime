@@ -25,6 +25,10 @@ export class RpcError extends Error {
 	readonly details?: ErrorJsonValue;
 	/** Milliseconds the server asked the caller to wait before retrying. */
 	readonly retryAfter?: number;
+	/** For `OVERLOADED` from RPC admission: the limit that refused the call. */
+	readonly reason?: 'concurrency_limit' | 'queue_full';
+	/** For `OVERLOADED` from RPC admission: where the limit sits; `client` is `rpc.maxPending`. */
+	readonly scope?: 'connection' | 'route' | 'global' | 'client';
 	code: string;
 	/** Structured validation issues (present when code === 'VALIDATION'). */
 	issues?: Array<{ path: string[]; message: string }>;
@@ -680,6 +684,17 @@ export function configure(config: {
 	onDisconnect?(): void;
 	/** Default RPC timeout in ms; per-call `.with({ timeout })` overrides. @default 30000 */
 	timeout?: number;
+	rpc?: {
+		/**
+		 * Calls (RPC, binary and batched calls) the connection may have
+		 * awaiting a response. A call past it rejects at once with
+		 * `RpcError('OVERLOADED')`, `reason: 'concurrency_limit'`,
+		 * `scope: 'client'`, and is not sent. Stream subscribes, uploads and
+		 * the offline queue do not count. 0 disables the cap.
+		 * @default 256
+		 */
+		maxPending?: number;
+	};
 	/**
 	 * Stream resume-grace window in ms. When the last subscriber of a stream
 	 * unsubs, the WS subscription is released immediately but the data model

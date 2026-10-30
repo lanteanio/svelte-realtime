@@ -67,9 +67,23 @@ let _replayingScope = null;
  * - return an args array to re-issue once with merged args, anything else to
  * drop. The `'batch'` replay strategy is an alias of `'concurrent'`.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, retentionMs?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
+ * `rpc.maxPending` (default 256) bounds the calls awaiting a response on the
+ * connection. A call past it rejects at once with `RpcError('OVERLOADED')`,
+ * `reason: 'concurrency_limit'`, `scope: 'client'`. Stream subscribes and
+ * the offline queue do not count. Set 0 to disable the cap.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, rpc?: { maxPending?: number }, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, retentionMs?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
  */
 export function configure(config) {
+	if (config.rpc !== undefined) {
+		if (config.rpc === null || typeof config.rpc !== 'object' || Array.isArray(config.rpc)) {
+			throw new Error('[svelte-realtime] configure({ rpc }): must be an object');
+		}
+		const max = config.rpc.maxPending;
+		if (max !== undefined && (!Number.isSafeInteger(max) || max < 0)) {
+			throw new Error('[svelte-realtime] configure({ rpc.maxPending }): must be a non-negative integer (0 disables the cap)');
+		}
+	}
 	const previousScope = _offlineScope();
 	clientState.config = config;
 

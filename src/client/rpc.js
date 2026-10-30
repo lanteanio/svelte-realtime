@@ -3,7 +3,7 @@ import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
 import { _conn, ensureListener, ensureDisconnectListener, _getTimeout, _connectionClosedError } from './connection.js';
-import { clientState, RpcError, _connectionLost, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
+import { clientState, RpcError, _connectionLost, pending, DEFAULT_MAX_PENDING_CALLS, _clientOverloaded, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
 import { _enqueuePersist, _trimQueue, _queueLimit, _settleDropped } from './offline.js';
 
 /**
@@ -501,6 +501,16 @@ function _rejectSend(id, cause) {
 }
 
 /**
+ * Whether `rpc.maxPending` calls already await a response. The cap rejects
+ * at once rather than queueing: a call past it has nowhere to wait that the
+ * offline queue or the server's own admission does not already cover.
+ */
+function _atPendingCap() {
+	const max = clientState.config.rpc?.maxPending ?? DEFAULT_MAX_PENDING_CALLS;
+	return max !== 0 && pending.calls >= max;
+}
+
+/**
  * Internal: send an RPC request over the WebSocket.
  * @param {string} path
  * @param {any[]} args
@@ -549,6 +559,9 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
 		});
 	}
 
+	// A replay from the offline drain is bounded by the offline queue instead.
+	if (!replay && _atPendingCap()) return Promise.reject(_clientOverloaded());
+
 	const id = _nextId();
 
 	// If inside a batch() call, collect instead of sending. The batch-level
@@ -567,7 +580,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
 			pending.set(id, {
 				resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
 				reject(e) { _devtoolsEnd(id, false, e); reject(e); },
-				timer: null
+				timer: null,
+				call: true
 			});
 		});
 	}
@@ -611,7 +625,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay, prepared =
 			resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
 			reject(e) { _devtoolsEnd(id, false, e); reject(e); },
 			timer,
-			replay: replay === true
+			replay: replay === true,
+			call: true
 		});
 		try {
 			if (text !== undefined) {
@@ -644,6 +659,7 @@ export function __binaryRpc(path) {
 		if (clientState.terminated) {
 			return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 		}
+		if (_atPendingCap()) return Promise.reject(_clientOverloaded());
 
 		const id = _nextId();
 
@@ -669,7 +685,8 @@ export function __binaryRpc(path) {
 			pending.set(id, {
 				resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
 				reject(e) { _devtoolsEnd(id, false, e); reject(e); },
-				timer
+				timer,
+				call: true
 			});
 
 			// Wire format: byte[0] = 0x00, byte[1-2] = header length (uint16 BE), then JSON header, then binary payload

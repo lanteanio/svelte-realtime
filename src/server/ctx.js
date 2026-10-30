@@ -7,6 +7,7 @@ import { _maybeReplayPublish } from './replay-routing.js';
 import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor, _resolveCoalesce, UNSEQUENCED } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
 import { _shouldShed } from './admission.js';
+import { NEVER_ABORTED } from './rpc-admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
@@ -616,7 +617,9 @@ function _collectBatch(ctx, fn) {
  * @param {'invalidateOn' | 'staleAfterMs'} kind
  */
 export function _rerunCtx(ctx, kind) {
-	const out = { ...ctx, rerun: kind };
+	// A re-run outlives the call that subscribed, so the call's deadline does
+	// not bound it.
+	const out = { ...ctx, rerun: kind, abortSignal: NEVER_ABORTED };
 	const listBatch = ctx.batch;
 	out.batch = (arg) => (typeof arg === 'function' ? _collectBatch(out, arg) : listBatch(arg));
 	return out;
@@ -713,7 +716,11 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		// Null on a client call. A loader the framework re-runs later on a
 		// subscriber's behalf carries 'invalidateOn', 'staleAfterMs' or 'derived'
 		// here, so middleware can tell it apart from the call it serves.
-		rerun: null
+		rerun: null,
+		// Fires at a wire call's deadline or when its connection closes. Work
+		// outside a wire call gets a signal that never fires; a call swaps the
+		// value in, so every ctx keeps one hidden class.
+		abortSignal: NEVER_ABORTED
 	};
 	// `ctx.batch(fn)` atomic-collector overload beside the list form. Assigned
 	// after the literal so the closure can capture the ctx instance (the
