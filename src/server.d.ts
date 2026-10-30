@@ -4195,9 +4195,13 @@ export interface OutboundWebhookConfig {
 	/**
 	 * Events waiting for a delivery slot. An event past both limits is not
 	 * sent: `onFailure` receives a `LiveError` with code `OVERLOADED` and
-	 * `attempts` 0, and the dead-letter store keeps the event when one is
-	 * configured. Without `onFailure`, the first rejection of an overflow
-	 * episode reaches `onError('webhook', err)`. An integer >= 0, or `Infinity`.
+	 * `attempts` 0, and it counts in
+	 * `svelte_realtime_background_total{kind="webhook",result="rejected"}`. It
+	 * is not written to the dead-letter store, which keeps the events whose
+	 * delivery failed, so an overflow burst cannot evict them; keep rejected
+	 * events from `onFailure` when they must be replayed. Without `onFailure`, the
+	 * first rejection of an overflow episode reaches `onError('webhook', err)`.
+	 * An integer >= 0, or `Infinity`.
 	 * @default 10000
 	 */
 	maxQueued?: number;

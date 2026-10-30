@@ -173,7 +173,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	OVERLOADED: Object.freeze({
 		cause: 'A new subscribe to a stream with `classOfService` is shed under a matching `live.admission()` pressure rule, the pending-upload aggregate byte cap is exceeded while uploads wait for authorization, or a `live.effect` or outbound webhook receives a publish while it is at its `maxConcurrent` and `maxQueued` limits.',
-		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure` and the dead-letter store.',
+		consequence: 'The subscribe gets an error reply and the stream store goes to its error state with an RpcError. A new upload is refused, or a pending one fails, before its handler completes. Existing subscribers are unaffected. An effect skips the call for that publish; a webhook does not send that event and reports it to `onFailure`, without a dead-letter record.',
 		automaticRecovery: 'None for uploads. A shed stream subscribes again only after the next reconnect while it still has subscribers. An effect or webhook takes new publishes again as soon as its queue has room.',
 		nextAction: 'Investigate the pressure source (`platform.pressure.reason`) or upload volume. Let clients retry after a short backoff and check the admission class rules. For an effect or webhook, find why its calls are slow, then raise `maxConcurrent` or `maxQueued` only if the work can keep up.'
 	}),
@@ -471,7 +471,7 @@ export const EVENT_GUIDANCE = Object.freeze({
 	}),
 	'webhook.delivery.overflow': Object.freeze({
 		cause: 'An outbound webhook receives a publish while `maxConcurrent` deliveries are in flight and `maxQueued` more events are waiting. The `webhookId` attribute names the registration.',
-		consequence: 'That event and every event that arrives while the queue is full are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0, and to the dead-letter store when it is enabled. This event comes once per overflow episode.',
+		consequence: 'That event and every event that arrives while the queue is full are not sent. Each one goes to `onFailure` with code `OVERLOADED` and attempts 0 and counts in `svelte_realtime_background_total` with result `rejected`; none is written to the dead-letter store, whose capacity stays with the deliveries that failed. This event comes once per overflow episode.',
 		automaticRecovery: 'The webhook takes new events again as soon as its queue has room. Once the queue is back to half of `maxQueued`, a `webhook.delivery.overflow.ended` info event reports how many the episode rejected, and the next overflow starts a new episode.',
 		nextAction: 'Check the endpoint latency and health. Replay dead-lettered events with `replayDeadLetter()` once it recovers, and raise `maxConcurrent` or `maxQueued` only if the endpoint can take the load.'
 	}),

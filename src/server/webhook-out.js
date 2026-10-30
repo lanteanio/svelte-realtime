@@ -131,7 +131,7 @@ function _webhookLane(entry) {
 		maxConcurrent: config.maxConcurrent ?? WEBHOOK_MAX_CONCURRENT,
 		maxQueued: config.maxQueued ?? WEBHOOK_MAX_QUEUED
 	}, (topic, event, data, platform) => _fireWebhookOut(entry, topic, event, data, platform), {
-		onReject: (l, topic, event, data, platform) => _webhookOverflow(entry, l, topic, event, data, platform),
+		onReject: (l, topic, event, data) => _webhookOverflow(entry, l, topic, event, data),
 		onOverflowEnded: _webhookOverflowEnded
 	});
 	lane.id = entry.id;
@@ -140,8 +140,8 @@ function _webhookLane(entry) {
 
 /**
  * Hand one source event to an outbound webhook. Delivery starts off the publish
- * path; an event past the webhook's limits is not sent and fails like any
- * undelivered event: `onFailure` (attempts 0) and the dead-letter store.
+ * path; an event past the webhook's limits is not sent and goes to `onFailure`
+ * (attempts 0).
  * @param {any} entry
  * @param {string} topic
  * @param {string} event
@@ -153,10 +153,11 @@ export function _submitWebhookOut(entry, topic, event, data, platform) {
 }
 
 /**
- * Fail one rejected event. Runs in the microtask that admits the event, so
- * the trace context read here is that of its publish.
+ * Fail one rejected event. It stays out of the dead-letter store: an overflow
+ * burst rejects events by the thousand, and the store's capacity belongs to
+ * the deliveries that failed, which such a burst would otherwise evict.
  */
-function _webhookOverflow(entry, lane, topic, event, data, platform) {
+function _webhookOverflow(entry, lane, topic, event, data) {
 	const first = lane.rejected === 1;
 	const err = new LiveError('OVERLOADED',
 		"outbound webhook '" + entry.id + "' is at its limit (maxConcurrent " + lane.maxConcurrent + ', maxQueued ' + lane.maxQueued +
@@ -180,10 +181,9 @@ function _webhookOverflow(entry, lane, topic, event, data, platform) {
 			severity: 'warn',
 			dataClass: 'operational',
 			message: 'An outbound webhook is at its concurrency and queue limits; new events are not delivered.',
-			attributes: { webhookId: entry.id, maxConcurrent: lane.maxConcurrent, maxQueued: lane.maxQueued, deadLettered: !!state.webhookDeadLetter }
+			attributes: { webhookId: entry.id, maxConcurrent: lane.maxConcurrent, maxQueued: lane.maxQueued }
 		});
 	}
-	_captureDeadLetter(entry, topic, event, data, 0, err, monotonicNow(), platform?.traceContext ?? null);
 }
 
 /** @param {any} lane @param {number} rejected */

@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { live, onError, configureWebhooks, getDeadLetter, __registerWebhookOut, _prepareHmr, setOperationalEventSink } from '../src/server.js';
+import { live, onError, configureWebhooks, getDeadLetter, createDeadLetterStore, __registerWebhookOut, _prepareHmr, setOperationalEventSink } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
 import { state } from '../src/server/state.js';
 
@@ -479,7 +479,7 @@ describe('live.webhooks.outbound bulkhead', () => {
 		expect(ep.maxOpen).toBe(8);
 	}, 20000);
 
-	it('an overflowed delivery is reported as OVERLOADED and dead-lettered', async () => {
+	it('an overflowed delivery is reported as OVERLOADED and kept out of the dead-letter store', async () => {
 		const ep = await heldEndpoint();
 		const { errors, events } = captureErrors();
 		configureWebhooks({ deadLetter: true });
@@ -494,15 +494,37 @@ describe('live.webhooks.outbound bulkhead', () => {
 		for (let i = 0; i < 6; i++) env.platform.publish('orders', 'created', { i });
 		await flush();
 		expect(failures).toEqual([3, 4, 5].map((i) => ({ code: 'OVERLOADED', data: { i }, attempts: 0 })));
-		const records = getDeadLetter().list({ topic: 'orders' });
-		expect(records.map((r) => r.data.i).sort()).toEqual([3, 4, 5]);
-		expect(records.every((r) => r.webhookId === 'hooks/orders' && r.attempts === 0 && r.error.includes('at its limit'))).toBe(true);
+		expect(getDeadLetter().list({ topic: 'orders' })).toEqual([]);
 		// onFailure is the per-event report, so the global handler stays quiet.
 		expect(errors).toEqual([]);
 		expect(events.filter((e) => e.event === 'webhook.delivery.overflow')).toHaveLength(1);
 		await ep.drain(3);
 		expect(ep.received).toBe(3);
 		expect(ep.maxOpen).toBe(1);
+	}, 20000);
+
+	it('an overflow burst does not evict failed deliveries from the dead-letter store', async () => {
+		const ep = await heldEndpoint();
+		const failing = createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(500); res.end(); }); });
+		await new Promise((r) => failing.listen(0, '127.0.0.1', r));
+		const closeHeld = server.close;
+		server = { close: async () => { failing.closeAllConnections?.(); await new Promise((r) => failing.close(r)); await closeHeld(); } };
+		captureErrors();
+		configureWebhooks({ deadLetter: createDeadLetterStore({ max: 3 }) });
+		env = createTestEnv();
+		env.register('hooks', {});
+		__registerWebhookOut('hooks/billing', live.webhooks.outbound(['billing'], {
+			url: `http://127.0.0.1:${/** @type {any} */ (failing.address()).port}/hook`, urlMode: 'off', retry: { attempts: 1 }, onFailure: () => {}
+		}));
+		__registerWebhookOut('hooks/orders', live.webhooks.outbound(['orders'], {
+			url: ep.url, urlMode: 'off', retry: { attempts: 1 }, maxConcurrent: 1, maxQueued: 0, onFailure: () => {}
+		}));
+		env.platform.publish('billing', 'charged', { id: 'b1' });
+		await ep.wait(() => getDeadLetter().count() === 1);
+		for (let i = 0; i < 20; i++) env.platform.publish('orders', 'created', { i });
+		await flush();
+		expect(getDeadLetter().list().map((r) => r.data)).toEqual([{ id: 'b1' }]);
+		await ep.drain(1);
 	}, 20000);
 
 	it('without onFailure the global handler hears the episode once', async () => {
