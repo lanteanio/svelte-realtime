@@ -48,7 +48,19 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Affects:** Applications that declare uploads with custom buffering or inspect `ctx.platform` properties.
   - **Action:** Declare `maxBufferedChunks` as a positive integer; no other change is needed.
   - **Requires:** Nothing beyond this release.
-  - **Compatibility:** An invalid `maxBufferedChunks` now fails at startup; other behavior is unchanged.
+  - **Compatibility:** An invalid `maxBufferedChunks` now fails at startup; the default upload quotas are covered in their own entry.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Changed: cross-session upload quotas.** `live.upload()` now bounds admitted uploads per signed-in user (16), per tenant (100) and per process (1,000), and unread buffered bytes per tenant and process, so one user or tenant holding stalled uploads across many sessions can no longer occupy the handler slots and memory every other caller needs.
+  - **Affects:** Applications with upload endpoints that run many uploads at once per user, tenant or process.
+  - **Action:** Raise `maxConcurrentPerUser`, `maxConcurrentPerTenant` or `maxConcurrentTotal` (or pass `Infinity`) where legitimate traffic exceeds the defaults, and stop handlers on `ctx.abortSignal` so a cancelled upload frees its slot.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Starts over a limit fail with `TOO_MANY_UPLOADS` or `OVERLOADED`, and an upload counts against its session until its handler returns.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Changed: idempotency capacity per identity.** The in-process `live.idempotent` store divides its 10,000 slots between tenants and identities, so a caller at its own share replaces only its own oldest result, every other limit refuses the new key, and no caller's traffic can make another caller's accepted effect run a second time.
+  - **Affects:** Applications using `live.idempotent` with the default in-process store.
+  - **Action:** Use a durable idempotency store when one identity must retry more than its newest 100 results inside a tenant, or 1,000 without tenants, within the TTL.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** A retry of a key its caller has replaced runs the handler again; a new key at a shared limit fails with `IDEMPOTENCY_CAPACITY` before its handler runs.
   - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: presence and multiplayer consistency.** Sticky presence, multiplayer selections and multiplayer locks now stay consistent between live members, late joiners and replicas, because payloads keep their exact bytes on the Redis roster, refused entries are never broadcast, oversized lock names are rejected, and updates for departed or erased members stop instead of reappearing later.
   - **Affects:** Applications using presence, multiplayer selections or locks, especially across replicas.
