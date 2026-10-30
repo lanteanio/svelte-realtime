@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { live, _resetForget, _resetIdempotencyStore, __register, __directCall, __registerCron, _clearCron, _tickCron, setCronPlatform } from '../src/server.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { memoryAlarmStore } from './helpers/alarm-store.js';
+import { configureAlarm, _resetAlarms } from '../src/server.js';
+import { _pollAlarms } from '../src/server/alarm.js';
+import { _cronIntrospect } from '../src/server/cron-engine.js';
+import { registry } from '../src/server/state.js';
 import { createTestEnv } from '../src/testing.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { state } from '../src/server/state.js';
@@ -30,8 +35,10 @@ async function fill(run, count, base = {}, per = base.tenantId ? 9 : 99) {
 }
 
 describe('idempotency capacity preserves accepted effects', () => {
-	let env, clock, gates;
+	let env, clock, gates, savedErrorHandler, cronErrors;
 	beforeEach(() => {
+		savedErrorHandler = state.serverErrorHandler; cronErrors = [];
+		state.serverErrorHandler = (path, error) => { cronErrors.push(error?.code); };
 		_resetIdempotencyStore(); _resetForget();
 		clock = 1000; gates = [];
 		setRuntimeEnv({ clock: { now: () => clock, monotonic: () => clock, wallEpoch: () => clock } });
@@ -41,7 +48,22 @@ describe('idempotency capacity preserves accepted effects', () => {
 		env?.cleanup(); env = null;
 		state.metricsInstruments = null;
 		_resetIdempotencyStore(); _resetForget(); _resetTenantResolver(); resetRuntimeEnv(); _clearCron();
+		state.serverErrorHandler = savedErrorHandler;
 	});
+
+	// Run every registered cron job once and wait until each has settled.
+	async function tick(settled) {
+		const before = settled();
+		await _tickCron();
+		for (let i = 0; i < 100 && (settled() <= before || _cronIntrospect().running > 0); i++) await nextTurn();
+		expect(settled()).toBeGreaterThan(before);
+		expect(_cronIntrospect().running).toBe(0);
+	}
+
+	function visitorPages(platform) {
+		__register('pages/visit', live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key));
+		return key => __directCall('pages/visit', [key], platform, { user: null });
+	}
 
 	function counted() {
 		const effects = new Map();
@@ -155,15 +177,78 @@ describe('idempotency capacity preserves accepted effects', () => {
 	it('keeps scheduled jobs admitted while visitors fill the server-side bucket', async () => {
 		const platform = mockPlatform();
 		setCronPlatform(platform);
-		__register('pages/visit', live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key));
-		let nightly = 0;
-		__registerCron('jobs/nightly', live.cron('* * * * *', 'nightly', live.idempotent({ keyFrom: () => 'nightly-day1' }, async () => { nightly++; })));
-		for (let i = 0; i < TENANT; i++) await __directCall('pages/visit', ['v' + i], platform, { user: null });
-		await expect(__directCall('pages/visit', ['over'], platform, { user: null })).rejects.toMatchObject(capacityError);
-		await _tickCron();
-		await vi.waitFor(() => expect(nightly).toBe(1));
-		await _tickCron(); await nextTurn();
+		const visit = visitorPages(platform);
+		let invoked = 0, nightly = 0;
+		const job = live.idempotent({ keyFrom: () => 'nightly-day1' }, async () => { nightly++; });
+		// Count every run of the job, so a second run proves the cached answer.
+		__registerCron('jobs/nightly', live.cron('* * * * *', 'nightly', async ctx => { invoked++; await job(ctx); }));
+		for (let i = 0; i < TENANT; i++) await visit('v' + i);
+		await expect(visit('over')).rejects.toMatchObject(capacityError);
+		await tick(() => invoked + cronErrors.length);
+		await tick(() => invoked + cronErrors.length);
+		expect(cronErrors).toEqual([]);
+		expect(invoked).toBe(2);
 		expect(nightly).toBe(1);
+	});
+
+	it('bounds cron jobs by their own pool, not a tenant share', async () => {
+		_setTenantResolver(user => user?.tenant ?? null);
+		setCronPlatform(mockPlatform());
+		let minute = 0, swept = 0;
+		__registerCron('jobs/sweep', live.cron('* * * * *', 'sweep', live.idempotent({ keyFrom: () => 'sweep-' + minute }, async () => { swept++; })));
+		const settled = () => swept + cronErrors.length;
+		for (minute = 0; minute < 1000; minute++) await tick(settled);
+		expect(cronErrors).toEqual([]);
+		expect(swept).toBe(1000);
+		await tick(settled);
+		expect(cronErrors).toEqual(['IDEMPOTENCY_CAPACITY']);
+		// Callers are unaffected by a full cron pool.
+		await expect(enveloped(live.idempotent({}, async () => 'ok'))({ user: { id: 'alice' } }, 'k')).resolves.toBe('ok');
+	});
+
+	it('keeps cron marked through a lock deadline and a spread fan-out', async () => {
+		const platform = mockPlatform();
+		setCronPlatform(platform);
+		const visit = visitorPages(platform);
+		for (let i = 0; i < TENANT; i++) await visit('v' + i);
+		let locked = 0, fanned = 0, settledRuns = 0;
+		__registerCron('jobs/locked', live.cron('* * * * *', 'locked', live.lock({ key: 'locked', maxExecutionMs: 60000 },
+			live.idempotent({ keyFrom: () => 'locked-day1' }, async () => { locked++; settledRuns++; }))));
+		const fanOut = live.idempotent({ keyFrom: ctx => 'fan-' + ctx.tenantId }, async () => { fanned++; });
+		__registerCron('jobs/fan', live.cron('* * * * *', 'fan', async ctx => {
+			for (const tenantId of ['acme', 'beta']) await fanOut({ ...ctx, tenantId });
+			settledRuns++;
+		}));
+		await _tickCron();
+		await vi.waitFor(() => { expect(settledRuns + cronErrors.length).toBe(2); expect(_cronIntrospect().running).toBe(0); });
+		expect(cronErrors).toEqual([]);
+		expect(locked).toBe(1);
+		expect(fanned).toBe(2);
+	});
+
+	it('gives an anonymous connection its own envelope results to replace', async () => {
+		const { effects, run } = counted();
+		const noisy = { user: null, ws: {} }, quiet = { user: null, ws: {} };
+		expect(await run(quiet, 'quiet')).toBe(1);
+		for (let i = 0; i < TENANT; i++) await run(noisy, 'n' + i);
+		expect(await run(noisy, 'n-last')).toBe(1);
+		expect(await run(noisy, 'n0')).toBe(2);
+		expect(await run(quiet, 'quiet')).toBe(1);
+		expect(effects.get('::quiet')).toBe(1);
+	});
+
+	it('names the wait until the oldest result expires when a caller cannot give one up', async () => {
+		let effects = 0;
+		const run = live.idempotent({ ttl: 60, keyFrom: (ctx, key) => ctx.user.id + ':' + key }, async () => ++effects);
+		const alice = { user: { id: 'alice' } };
+		await run(alice, 'first');
+		clock += 5000;
+		for (let i = 1; i < TENANT; i++) await run(alice, 'k' + i);
+		const refusal = await run(alice, 'over').catch(error => error);
+		expect(refusal).toMatchObject({ code: 'IDEMPOTENCY_CAPACITY', retryAfter: 55000 });
+		expect(refusal.message).not.toMatch(/store is full/);
+		clock += 55000;
+		await expect(run(alice, 'over')).resolves.toBe(TENANT + 1);
 	});
 
 	it('never replaces a result held for calls with neither an identity nor a connection', async () => {
@@ -338,5 +423,56 @@ describe('idempotency capacity preserves accepted effects', () => {
 		await expect(run({ user: { id: 'bob' } }, 'hold-over')).rejects.toMatchObject(capacityError);
 		gate.resolve(); await Promise.all(held);
 		expect(events).toEqual([{ outcome: 'replaced' }, { outcome: 'rejected' }]);
+	});
+});
+
+describe('idempotency capacity for alarms', () => {
+	let platform, savedPlatform;
+	beforeEach(() => {
+		vi.useFakeTimers(); vi.setSystemTime(10000);
+		_resetIdempotencyStore();
+		savedPlatform = state.cronPlatform;
+		platform = mockPlatform();
+		state.cronPlatform = platform;
+		_setTenantResolver(user => user?.tenant ?? null);
+	});
+	afterEach(() => {
+		_resetAlarms(); configureAlarm(null); _resetTenantResolver(); _resetIdempotencyStore();
+		state.cronPlatform = savedPlatform;
+		registry.delete('rooms/closing');
+		vi.useRealTimers();
+	});
+
+	function closingRoom(effects) {
+		const onAlarm = live.idempotent({ keyFrom: ctx => 'close-' + ctx.tenantId + '-' + ctx.alarm.at }, async ctx => {
+			effects.set(ctx.tenantId, (effects.get(ctx.tenantId) || 0) + 1);
+		});
+		registry.set('rooms/closing', live.stream('room', () => ({}), { alarm: { onAlarm } }));
+		const store = memoryAlarmStore();
+		configureAlarm({ store });
+		return store;
+	}
+
+	it('charges an alarm to its own bucket, apart from server-side visitor calls', async () => {
+		const effects = new Map();
+		const store = closingRoom(effects);
+		__register('pages/visit', live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key));
+		for (let i = 0; i < TENANT / 10; i++) await __directCall('pages/visit', ['v' + i], platform, { user: null });
+		await expect(__directCall('pages/visit', ['over'], platform, { user: null })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CAPACITY' });
+		store.seed('room', Date.now() - 1, { path: 'rooms/closing', tenantId: null });
+		await _pollAlarms();
+		expect(effects.get(null)).toBe(1);
+	});
+
+	it('charges an alarm to its room\'s tenant', async () => {
+		const effects = new Map();
+		const store = closingRoom(effects);
+		const fill = live.idempotent({ keyFrom: (ctx, key) => key }, async () => null);
+		for (let i = 0; i < TENANT; i++) await fill({ user: { id: 'filler' + Math.floor(i / 9) }, tenantId: 'acme' }, 'f' + i);
+		store.seed('@t/acme/room', Date.now() - 1, { path: 'rooms/closing', tenantId: 'acme' });
+		store.seed('@t/beta/room', Date.now() - 1, { path: 'rooms/closing', tenantId: 'beta' });
+		await _pollAlarms();
+		expect(effects.get('acme')).toBeUndefined();
+		expect(effects.get('beta')).toBe(1);
 	});
 });

@@ -91,3 +91,35 @@ describe('offline replay of retryable idempotency refusals', () => {
 	});
 
 });
+
+describe('offline replay of an idempotency refusal that names a wait', () => {
+	it('waits as long as the refusal asks when that fits the hold', async () => {
+		const observers = configure('server-win');
+		status('disconnected');
+		const call = client.__rpc('work/run')({ value: 1 });
+		await turn(); status('open'); await turn();
+		const first = wire.find(frame => frame.rpc);
+		answer(first, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'share full', retryAfter: 5000 }); await turn();
+		await vi.advanceTimersByTimeAsync(4999); expect(wire.filter(frame => frame.rpc)).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		const second = wire.filter(frame => frame.rpc)[1]; expect(second.idempotencyKey).toBe(first.idempotencyKey);
+		answer(second, { ok: true, data: 'done' }); await turn();
+		expect(await call).toBe('done'); expect(observers.onReplayError).not.toHaveBeenCalled();
+	});
+
+	it('fails a call whose refusal names a longer wait and replays the calls behind it', async () => {
+		const observers = configure('server-win');
+		status('disconnected');
+		const blocked = client.__rpc('work/run')({ value: 1 }); blocked.catch(() => {});
+		const next = client.__rpc('work/run')({ value: 2 });
+		await turn(); status('open'); await turn();
+		const first = wire.find(frame => frame.rpc);
+		answer(first, { ok: false, code: 'IDEMPOTENCY_CAPACITY', error: 'share full', retryAfter: 3600000 }); await turn();
+		await expect(blocked).rejects.toMatchObject({ code: 'IDEMPOTENCY_CAPACITY', retryAfter: 3600000 });
+		expect(observers.onReplayError).toHaveBeenCalledTimes(1);
+		const second = wire.filter(frame => frame.rpc)[1];
+		expect(second.args).toEqual([{ value: 2 }]);
+		answer(second, { ok: true, data: 'second' }); await turn();
+		expect(await next).toBe('second');
+	});
+});

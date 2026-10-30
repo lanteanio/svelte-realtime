@@ -13,6 +13,10 @@ import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOffli
 
 const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
 
+// The longest a replay waits on an idempotency refusal with the rest of the
+// queue behind it. A refusal that names a longer wait fails its call instead.
+const _IDEMPOTENCY_REPLAY_HOLD_MS = 30000;
+
 /** @type {boolean} */
 let _configListenerAttached = false;
 
@@ -175,7 +179,7 @@ async function _drainOfflineQueue() {
 	if (_replayingScope === scope) return;
 	_replayingScope = scope;
 	_startOfflineDrain(scope);
-	let again = false, retryIdempotency = false;
+	let again = false, retryIdempotency = false, retryDelay = 1000;
 	try {
 		await _offlineReady();
 		if (scope !== _offlineScope()) return;
@@ -275,8 +279,16 @@ async function _drainOfflineQueue() {
 						return;
 					}
 					if (err && (err.code === 'IDEMPOTENCY_IN_PROGRESS' || err.code === 'IDEMPOTENCY_CAPACITY')) {
+						// The server's hint says when the call can be admitted. Waiting
+						// longer than the hold would stall every call queued behind it.
+						const wait = typeof err.retryAfter === 'number' ? err.retryAfter : 0;
+						if (wait > _IDEMPOTENCY_REPLAY_HOLD_MS) {
+							settleFail(entry, err);
+							return;
+						}
 						cut = true;
 						retryIdempotency = true;
+						retryDelay = Math.max(1000, wait);
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
@@ -510,7 +522,7 @@ async function _drainOfflineQueue() {
 			_setUploading(false);
 			if (again) setTimer(() => {
 				if (scope === _offlineScope()) void _drainOfflineQueue();
-			}, 1000);
+			}, retryDelay);
 		}
 	}
 }

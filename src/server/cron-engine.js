@@ -4,7 +4,7 @@ import { _IS_DEV } from './env.js';
 import { now as runtimeNow, wallEpoch, effectiveTimeZone, setTimer, clearTimer } from '../shared/runtime.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _cronDateParts, _cronFieldMatch } from './cron.js';
-import { _getCtxHelpers, _buildCtx, _markScheduledCtx } from './ctx.js';
+import { _getCtxHelpers, _buildCtx, _markWorkOrigin } from './ctx.js';
 import { _ensureWrap } from './reactive.js';
 import { _maybeReplayPublish } from './replay-routing.js';
 import { _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './publish-helpers.js';
@@ -477,7 +477,7 @@ export async function _tickCron(_at, epoch) {
 				// bugs by construction.
 				const cronPub = state.cronPlatform;
 				const _h = _getCtxHelpers(cronPub);
-				const ctx = _markScheduledCtx(_buildCtx(null, null, cronPub, _h, null));
+				const ctx = _markWorkOrigin(_buildCtx(null, null, cronPub, _h, null), 'cron');
 				const result = await entry.fn(ctx);
 				if (result !== undefined) {
 					// Uniform piiRedact: when the cron's topic is also a piiRedact
