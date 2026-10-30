@@ -653,6 +653,32 @@ describe('offline backoff around the hold and retention', () => {
 		expect(onReplayError).not.toHaveBeenCalled();
 	});
 
+	it('sets aside a held call no earlier than its hint', async () => {
+		const at = Date.now();
+		const row = (seq, value, expiresAt) => ({ seq, path: 'work/run', args: [{ value }], queuedAt: at, expiresAt, idempotencyKey: 'key-' + value, timeout: 600000 });
+		rows.set('q:default:000000000001', row(1, 'h', at + 600000));
+		rows.set('q:default:000000000002', row(2, 'y', at + 20000));
+		client.configure({ offline: { queue: true, persist: persist(), replay: 'concurrent' } });
+		status('disconnected'); await turn(); status('open'); await turn();
+		// The queue goes again at 25 s, after y expires: y is set aside, and
+		// still waits the 18 s the server asked for.
+		refuse(last('h'), 25000); refuse(last('y'), 18000); await turn();
+		await vi.advanceTimersByTimeAsync(17999); expect(sent('y')).toBe(1);
+		await vi.advanceTimersByTimeAsync(1); expect(sent('y')).toBe(2);
+	});
+
+	it('gives a last try back when the connection drops before it is sent', async () => {
+		const { calls } = await queued(['a', 'b'], { maxAge: 20000, replay: 'concurrent' });
+		let settled = false; calls[0].then(() => { settled = true; }, () => { settled = true; });
+		await vi.advanceTimersByTimeAsync(19500);
+		refuse(last('a')); await turn();
+		status('disconnected'); await turn();
+		status('open'); await turn();
+		expect(sent('a')).toBe(2);
+		refuse(last('a')); await turn();
+		expect(settled).toBe(false);
+	});
+
 	it('does not count a hold that a lost connection cut short', async () => {
 		const { onReplayError } = await queued(['a', 'b'], { replay: 'concurrent' });
 		refuse(last('a'), 20000); await turn();

@@ -274,8 +274,9 @@ async function _drainOfflineQueue() {
 	_startOfflineDrain(scope);
 	let again = false, retryIdempotency = false, reachedQueue = false;
 	// Calls an idempotency refusal holds the queue for: when each was refused,
-	// when its wait ends and the refusal, and when the last of the waits ends.
-	/** @type {Map<OfflineEntry, { refusedAt: number, until: number, err: any }>} */
+	// when its wait ends, the soonest the server allows it again, and the
+	// refusal; and when the last of the waits ends.
+	/** @type {Map<OfflineEntry, { refusedAt: number, until: number, notBefore: number, err: any }>} */
 	const held = new Map();
 	let heldUntil = 0;
 	// Whether the drain ran before the latest backoff ended, and the drain's
@@ -443,7 +444,7 @@ async function _drainOfflineQueue() {
 						}
 						// The queue waits for the last of the waits of the calls it
 						// holds, and for the rest of the drain.
-						held.set(entry, { refusedAt, until: refusedAt + wait, err });
+						held.set(entry, { refusedAt, until: refusedAt + wait, notBefore: hinted ? refusedAt + err.retryAfter : refusedAt, err });
 						heldUntil = Math.max(heldUntil, refusedAt + wait);
 						cut = true;
 						retryIdempotency = true;
@@ -638,8 +639,10 @@ async function _drainOfflineQueue() {
 		// A held call whose retention ends before the queue goes again is set
 		// aside instead, so its own wake still gives it its try; one that has
 		// expired already is dropped. Not when the connection went: the next
-		// open replays the queue as it was.
-		if (held.size && !closed() && !clientState.isOffline) {
+		// open replays the queue as it was, and a last try the loss kept from
+		// going out is not used up.
+		if (closed() || clientState.isOffline) for (const entry of held.keys()) delete entry.idempotencyLastTry;
+		else if (held.size) {
 			const redrainAt = Math.max(now(), heldUntil);
 			heldUntil = 0;
 			for (const [entry, hold] of held) {
@@ -657,7 +660,8 @@ async function _drainOfflineQueue() {
 					continue;
 				}
 				let retryAt = hold.until;
-				const lastTry = _lastTryAt(entry, maxAge, hold.refusedAt);
+				// Never before the server's hint, which fits (it is not late).
+				const lastTry = Math.max(hold.notBefore, _lastTryAt(entry, maxAge, hold.refusedAt));
 				if (retryAt > lastTry) {
 					entry.idempotencyLastTry = true;
 					retryAt = lastTry;
