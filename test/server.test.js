@@ -12381,17 +12381,19 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	});
 
 	it.each([
-		['replays the newest set across a hole', 9, [{ seq: 9, event: 'set', data: 'c' }], true],
-		['answers from the loader when the newest set is behind the current sequence', 10, [{ seq: 9, event: 'set', data: 'c' }], false],
-		['answers from the loader when the sets are out of order', 8, [{ seq: 9, event: 'set', data: 'c' }, { seq: 8, event: 'set', data: 'b' }], false]
-	])('a set stream %s', async (_, current, missed, replayed) => {
+		['set', 'replays the newest set across a hole', 9, [{ seq: 9, event: 'set', data: 'c' }], true],
+		['set', 'answers from the loader when the newest set is behind the current sequence', 10, [{ seq: 9, event: 'set', data: 'c' }], false],
+		['set', 'answers from the loader when the sets are out of order', 8, [{ seq: 9, event: 'set', data: 'c' }, { seq: 8, event: 'set', data: 'b' }], false],
+		['latest', 'answers from the loader for a hole even when its newest event reaches the current sequence', 9, [{ seq: 9, event: 'push', data: 'c' }], false]
+	])('a %s stream %s', async (merge, _, current, missed, replayed) => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 		platform.replay = { seq: async () => current, since: async () => missed };
-		const stream = live.stream('tt/set-resume', async () => 'loader', { merge: 'set', replay: true });
-		__register('tt/set-resume', stream);
+		const path = 'tt/' + merge + '-resume';
+		const stream = live.stream(path, async () => 'loader', { merge, replay: true });
+		__register(path, stream);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'tt/set-resume', id: 't2v', args: [], stream: true, seq: 5 }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: path, id: 't2v', args: [], stream: true, seq: 5 }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		const response = platform.sent[0].data;

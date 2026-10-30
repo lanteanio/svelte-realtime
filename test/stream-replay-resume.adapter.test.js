@@ -6,7 +6,7 @@
 // client, the installed adapter client and the adapter's test server with the
 // adapter's in-memory replay buffer.
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { createTestServer } from 'svelte-adapter-uws/testing';
 import { connect } from 'svelte-adapter-uws/client';
@@ -46,17 +46,23 @@ afterAll(async () => {
  * A crud stream over `rows`, published through a replay buffer of `size`.
  * `write` changes the rows and publishes the change the way the app would.
  * Its `delta.fromSeq` would answer with a row that does not exist; `bridged`
- * counts the calls.
+ * counts the calls. Declaring both warns in dev, once per topic.
  */
 function declare(size) {
 	const topic = 'resume-items-' + ++n;
 	const path = 'resume' + n + '/items';
 	const rows = new Map();
 	const d = { topic, path, rows, bridged: 0, write: null };
-	__register(path, live.public(live.stream(topic, async () => [...rows.values()], {
-		merge: 'crud', key: 'id', replay: true,
-		delta: { fromSeq: async () => { d.bridged++; return [{ seq: 99, event: 'created', data: { id: 99 } }]; } }
-	})));
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		__register(path, live.public(live.stream(topic, async () => [...rows.values()], {
+			merge: 'crud', key: 'id', replay: true,
+			delta: { fromSeq: async () => { d.bridged++; return [{ seq: 99, event: 'created', data: { id: 99 } }]; } }
+		})));
+		expect(warn.mock.calls.filter((c) => String(c[0]).includes('declares both replay and delta.fromSeq'))).toHaveLength(1);
+	} finally {
+		warn.mockRestore();
+	}
 	server.platform.replay = createReplay({ size });
 	d.write = (event, row) => {
 		if (event === 'deleted') rows.delete(row.id);

@@ -3734,7 +3734,9 @@ describe('__stream() reconnect cursor time-check', () => {
 
 	it('applies a replay with an event that carries no sequence between numbered ones', async () => {
 		// A buffer entry with `seq: null` was published without a number; it
-		// is not a hole in the numbered run.
+		// is not a hole in the numbered run. Only an older server sends such a
+		// reply: a current one answers from the loader when an entry has no
+		// number.
 		configure({ resumeMaxCursorAgeMs: 60000 });
 
 		const store = __stream('nullseq/data', { merge: 'crud', key: 'id' });
@@ -3785,6 +3787,35 @@ describe('__stream() reconnect cursor time-check', () => {
 		await flush();
 		expect(sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0].id).toBe(sent2.id);
 		expect(values[values.length - 1]).toBe('d');
+
+		unsub();
+	});
+
+	it('discards a latest replay with a hole even when it reaches the answer sequence', async () => {
+		// Only a set stream skips a hole; a latest stream would lose the
+		// events in it.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('latesthole/feed', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: [{ n: 1 }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 10 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(10);
+
+		simulateRpcResponse(sent2.id, { ok: true, data: [{ seq: 13, event: 'push', data: { n: 4 } }], topic: 'latesthole-topic', merge: 'latest', max: 10, seq: 13, replay: true });
+		await flush();
+		const sent3 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent3.id).not.toBe(sent2.id);
+		expect(sent3.seq).toBeUndefined();
+		expect(values[values.length - 1]).toEqual([{ n: 1 }]);
 
 		unsub();
 	});
