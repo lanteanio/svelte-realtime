@@ -239,7 +239,7 @@ describe('live.effect concurrency and queue limits', () => {
 		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 40, released: 1 }]);
 	});
 
-	it('hung calls no longer block the effect for good', async () => {
+	it('hung calls cannot block the effect for good', async () => {
 		const { errors } = captureErrors();
 		const fx = setupEffect({ maxConcurrent: 2, maxQueued: 2, timeoutMs: 20 });
 		for (let i = 1; i <= 6; i++) fx.publish(i);
