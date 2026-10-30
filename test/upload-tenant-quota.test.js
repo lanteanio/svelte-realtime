@@ -119,6 +119,83 @@ describe('upload quotas spanning sessions', () => {
 		}
 	});
 
+	it('bounds one user opening a stalled upload on each of many sessions', async () => {
+		const { gate, entered } = stalledEndpoint();
+		const platform = mockPlatform();
+		const sockets = [];
+		try {
+			for (let i = 0; i < 300; i++) {
+				const ws = mockWs({ id: 'mallory' });
+				sockets.push(ws);
+				server.handleRpc(ws, chunk(0, 16), platform);
+			}
+			await vi.waitFor(() => expect(entered() + replies(platform, 'TOO_MANY_UPLOADS')).toBe(300));
+			expect(entered()).toBe(16);
+			const other = mockWs({ id: 'alice' });
+			sockets.push(other);
+			server.handleRpc(other, chunk(0, 16), platform);
+			await vi.waitFor(() => expect(entered()).toBe(17));
+		} finally {
+			gate.resolve();
+			for (const ws of sockets) server.close(ws, { platform, subscriptions: [] });
+		}
+	});
+
+	it('keeps counting a cancelled upload against its session until its handler returns', async () => {
+		const { gate, entered } = stalledEndpoint({ maxConcurrentPerSession: 1 });
+		const platform = mockPlatform();
+		const ws = mockWs({ id: 'a' });
+		try {
+			server.handleRpc(ws, chunk(0, 16, false, 1), platform);
+			await vi.waitFor(() => expect(entered()).toBe(1));
+			server.handleRpc(ws, cancel(1), platform);
+			server.handleRpc(ws, chunk(0, 16, false, 2), platform);
+			await vi.waitFor(() => expect(replies(platform, 'TOO_MANY_UPLOADS')).toBe(1));
+			expect(entered()).toBe(1);
+			gate.resolve(); await flush();
+			server.handleRpc(ws, chunk(0, 16, false, 3), platform);
+			await vi.waitFor(() => expect(entered()).toBe(2));
+		} finally {
+			gate.resolve();
+			server.close(ws, { platform, subscriptions: [] });
+		}
+	});
+
+	it('counts the bytes queued before admission against the buffer quotas', async () => {
+		tenant._setTenantResolver(user => user.tenant);
+		const { gate, entered } = stalledEndpoint({ maxBufferedBytesPerTenant: 4096 });
+		const platform = mockPlatform();
+		const a = mockWs({ id: 'a', tenant: 'acme' }), b = mockWs({ id: 'b', tenant: 'acme' }), c = mockWs({ id: 'c', tenant: 'acme' });
+		try {
+			server.handleRpc(a, chunk(0, 8192), platform);
+			await vi.waitFor(() => expect(replies(platform, 'OVERLOADED')).toBe(1));
+			// A start chunk and a follow-on chunk queued while authorization runs.
+			server.handleRpc(b, chunk(0, 2048), platform);
+			server.handleRpc(b, chunk(1, 4096), platform);
+			await vi.waitFor(() => expect(replies(platform, 'OVERLOADED')).toBe(2));
+			expect(entered()).toBe(0);
+			server.handleRpc(c, chunk(0, 4096), platform);
+			await vi.waitFor(() => expect(entered()).toBe(1));
+		} finally {
+			gate.resolve();
+			for (const ws of [a, b, c]) server.close(ws, { platform, subscriptions: [] });
+		}
+	});
+
+	it('counts the bytes queued before admission against the process buffer quota', async () => {
+		const { gate, entered } = stalledEndpoint({ maxBufferedBytesTotal: 4096 });
+		const platform = mockPlatform();
+		const a = mockWs({ id: 'a' });
+		try {
+			server.handleRpc(a, chunk(0, 8192), platform);
+			await vi.waitFor(() => expect(replies(platform, 'OVERLOADED')).toBe(1));
+			expect(entered()).toBe(0);
+		} finally {
+			gate.resolve();
+			server.close(a, { platform, subscriptions: [] });
+		}
+	});
+
 	it('bounds one tenant\'s unread buffered bytes across sessions', async () => {
 		tenant._setTenantResolver(user => user.tenant);
 		const { gate, entered } = stalledEndpoint({ maxBufferedBytesPerTenant: 64 * 1024 });
@@ -187,7 +264,7 @@ describe('upload quotas spanning sessions', () => {
 	});
 
 	it('rejects a quota that is not a positive integer or Infinity', () => {
-		for (const name of ['maxConcurrentPerTenant', 'maxConcurrentTotal', 'maxBufferedBytesPerTenant', 'maxBufferedBytesTotal']) {
+		for (const name of ['maxConcurrentPerUser', 'maxConcurrentPerTenant', 'maxConcurrentTotal', 'maxBufferedBytesPerTenant', 'maxBufferedBytesTotal']) {
 			for (const value of [0, -1, 1.5, NaN, '10']) {
 				expect(() => server.live.upload(async () => null, { [name]: value })).toThrow(name + ' must be a positive integer or Infinity');
 			}

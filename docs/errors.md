@@ -181,7 +181,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 | [`STALE`](#live-error-stale) | <code>Offline mutation dropped by beforeReplay filter</code>; <code>Offline mutation dropped by the replay function</code>; <code>Offline mutation dropped: beforeReplay returned a promise</code>; <code>Offline mutation dropped: beforeReplay threw</code>; <code>Offline mutation dropped: its stored args cannot be sent</code>; <code>Offline mutation dropped: the replay function gave it args that cannot be sent</code>; <code>Offline mutation expired</code> |
 | [`STREAM_ERROR`](#live-error-stream-error) | <code>Stream '&lt;path&gt;' failed to attach</code>; <code>Stream failed</code> |
 | [`TIMEOUT`](#live-error-timeout) | <code>Batch timed out after &lt;value&gt;s</code>; <code>Binary RPC '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>RPC '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>RPC '&lt;rpc&gt;' timed out after &lt;value&gt;s</code>; <code>Stream '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>Upload '&lt;path&gt;' timed out after &lt;value&gt;s</code>; <code>loadMore '&lt;path&gt;' timed out after &lt;value&gt;s</code> |
-| [`TOO_MANY_UPLOADS`](#live-error-too-many-uploads) | <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code> |
+| [`TOO_MANY_UPLOADS`](#live-error-too-many-uploads) | <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads for this user</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code> |
 | [`UNAUTHENTICATED`](#live-error-unauthenticated) | <code>Access denied</code>; <code>Authentication required</code>; <code>document topic subscribe denied: &lt;denial&gt;</code>; <code>reauth failed</code>; <code>smooth topic subscribe denied: &lt;denial&gt;</code> |
 | [`UNAVAILABLE`](#live-error-unavailable) | <code>Server is shutting down</code> |
 | [`UNKNOWN`](#live-error-unknown) | <code>Unknown error</code>; <code>Upload failed</code> |
@@ -562,11 +562,11 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 <a id="live-error-too-many-uploads"></a>
 ### `TOO_MANY_UPLOADS`
 
-- Cause: A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint's `maxConcurrentPerSession`, `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads hold their slot until their handler returns.
+- Cause: A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint's `maxConcurrentPerSession`, `maxConcurrentPerUser` (default 16 per signed-in user across sessions), `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads, cancelled ones included, hold their slot until their handler returns.
 - Consequence: The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.
 - Automatic recovery: None. The refused upload is not queued or retried.
 - Next action: Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.
-- Message patterns: <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code>
+- Message patterns: <code>too many concurrent uploads</code>; <code>too many concurrent uploads for this tenant</code>; <code>too many concurrent uploads for this user</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code>
 - Owning sources: [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-unauthenticated"></a>

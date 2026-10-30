@@ -10,6 +10,7 @@ import { _recordRpcMetrics, _recordRejectedRpc, _registeredPathLabel } from './m
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 import { _isTenancyEnabled } from './tenant.js';
+import { _getAuthenticatedId } from './identity.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 const textDecoder = new TextDecoder();
@@ -124,6 +125,22 @@ let _bufferedUploadBytes = 0;
  */
 const _tenantUploads = new Map();
 
+/**
+ * Admitted uploads per session, held like the process slot: a cancelled
+ * upload leaves the session's registry at once, but its handler may still be
+ * running, so the session keeps counting it until the slot is released.
+ * @type {WeakMap<object, { uploads: number }>}
+ */
+const _sessionSlots = new WeakMap();
+
+/**
+ * Admitted uploads per authenticated user (tenant-scoped id) across sessions,
+ * for `maxConcurrentPerUser`. Anonymous uploads are charged to their session
+ * instead. Entries are dropped at zero.
+ * @type {Map<string, { uploads: number }>}
+ */
+const _userUploads = new Map();
+
 function _recordUploadLimit(limit) {
 	state.metricsInstruments?.uploadLimits?.inc({ limit });
 }
@@ -133,6 +150,13 @@ function _releaseUploadSlot(upload) {
 	upload._slot = false;
 	upload.streamWrap?.release();
 	_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
+	upload._session.uploads--;
+	upload._session = null;
+	const user = upload._user;
+	if (user) {
+		upload._user = null;
+		if (--user.entry.uploads === 0 && _userUploads.get(user.key) === user.entry) _userUploads.delete(user.key);
+	}
 	const bucket = upload._bucket;
 	if (bucket) {
 		upload._bucket = null;
@@ -525,8 +549,11 @@ function _createUploadEntry(ws, perWs, streamId, platform, path) {
 		creditEnd: 1,
 		lastReceived: false,
 		_pendingStart: true,
-		// Admission: a maxConcurrentTotal slot and the tenant's occupancy.
+		// Admission: a maxConcurrentTotal slot, the session's and the user's
+		// counts, and the tenant's occupancy.
 		_slot: false,
+		_session: null,
+		_user: null,
 		_bucket: null,
 		pendingChunks: [],
 		expectedSeq: 0,
@@ -887,17 +914,28 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			// type and configured limits become visible only after access succeeds.
 			if (!/** @type {any} */ (fn).__isUpload) throw new LiveError('INVALID_REQUEST', 'Not an upload endpoint');
 			const uploadOptions = /** @type {any} */ (fn).__uploadOptions;
-			let othersInSession = 0;
-			for (const entry of perWs.values()) if (entry !== upload) othersInSession++;
+			// The session counts its admitted uploads until their slots are
+			// released, plus the starts still awaiting authorization.
+			let session = _sessionSlots.get(ws);
+			if (!session) { session = { uploads: 0 }; _sessionSlots.set(ws, session); }
+			let othersInSession = session.uploads;
+			for (const entry of perWs.values()) if (entry !== upload && !entry._slot) othersInSession++;
 			if (othersInSession >= uploadOptions.maxConcurrentPerSession) { _recordUploadLimit('session'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session'); }
+			// One user across all of their sessions; an anonymous caller is its session.
+			const uid = _getAuthenticatedId(ctx);
+			const userKey = uid === null ? null : (ctx.tenantId ?? '') + '\0' + String(uid);
+			const user = userKey === null ? session : (_userUploads.get(userKey) || { uploads: 0 });
+			if (user.uploads >= uploadOptions.maxConcurrentPerUser) { _recordUploadLimit('user'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads for this user'); }
 			if (_totalActiveUploads >= uploadOptions.maxConcurrentTotal) { _recordUploadLimit('process'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads'); }
 			// Without a tenant resolver there is no tenant to divide uploads by;
 			// with one, uploads it leaves unscoped share one tenant's quota.
 			const tenantKey = ctx.tenantId ?? null;
 			const tenant = tenantKey !== null || _isTenancyEnabled() ? (_tenantUploads.get(tenantKey) || { uploads: 0, bytes: 0 }) : null;
 			if (tenant && tenant.uploads >= uploadOptions.maxConcurrentPerTenant) { _recordUploadLimit('tenant'); throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads for this tenant'); }
-			if (_bufferedUploadBytes >= uploadOptions.maxBufferedBytesTotal) { _recordUploadLimit('process_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
-			if (tenant && tenant.bytes >= uploadOptions.maxBufferedBytesPerTenant) { _recordUploadLimit('tenant_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
+			// The chunks queued while pending enter the stream unread on admission.
+			const queued = upload._pendingAggBytes;
+			if (_bufferedUploadBytes >= uploadOptions.maxBufferedBytesTotal || _bufferedUploadBytes + queued > uploadOptions.maxBufferedBytesTotal) { _recordUploadLimit('process_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
+			if (tenant && (tenant.bytes >= uploadOptions.maxBufferedBytesPerTenant || tenant.bytes + queued > uploadOptions.maxBufferedBytesPerTenant)) { _recordUploadLimit('tenant_bytes'); throw new LiveError('OVERLOADED', 'unread upload bytes exceed the buffer quota; retry shortly'); }
 			if (upload.bytesReceived > uploadOptions.maxSize) throw new LiveError(
 				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
 				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
@@ -905,6 +943,13 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 
 			upload._slot = true;
 			_totalActiveUploads++;
+			session.uploads++;
+			upload._session = session;
+			if (userKey !== null) {
+				user.uploads++;
+				_userUploads.set(userKey, user);
+				upload._user = { key: userKey, entry: user };
+			}
 			if (tenant) {
 				tenant.uploads++;
 				_tenantUploads.set(tenantKey, tenant);

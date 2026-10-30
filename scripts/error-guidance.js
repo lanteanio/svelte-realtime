@@ -232,7 +232,7 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key.'
 	}),
 	TOO_MANY_UPLOADS: Object.freeze({
-		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession`, `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads hold their slot until their handler returns.',
+		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession`, `maxConcurrentPerUser` (default 16 per signed-in user across sessions), `maxConcurrentPerTenant` (default 100 per tenant across sessions) or `maxConcurrentTotal` (default 1,000 per process) limit. Admitted uploads, cancelled ones included, hold their slot until their handler returns.',
 		consequence: 'The upload is refused before its handler runs. The client upload handle rejects with a TOO_MANY_UPLOADS RpcError.',
 		automaticRecovery: 'None. The refused upload is not queued or retried.',
 		nextAction: 'Limit concurrent uploads in the client and wait for active ones to finish. Raise the endpoint concurrency options if the load is legitimate.'

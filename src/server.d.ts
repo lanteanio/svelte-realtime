@@ -1555,10 +1555,23 @@ export interface UploadOptions extends LiveOptions {
 
 	/**
 	 * Maximum concurrent uploads per WebSocket connection. Excess upload
-	 * starts reject with `LiveError('TOO_MANY_UPLOADS')`.
+	 * starts reject with `LiveError('TOO_MANY_UPLOADS')`. A cancelled upload
+	 * keeps counting until its handler has returned.
 	 * @default 4
 	 */
 	maxConcurrentPerSession?: number;
+
+	/**
+	 * Maximum uploads one authenticated user (`ctx.user` id, within its
+	 * tenant) may have admitted at once, across every session and upload
+	 * endpoint in the process. An anonymous upload is charged to its
+	 * connection, the only boundary it carries. Excess starts reject with
+	 * `LiveError('TOO_MANY_UPLOADS')`. An upload occupies its slot until it
+	 * has ended and its handler has returned. A positive integer, or
+	 * `Infinity` to lift the limit.
+	 * @default 16
+	 */
+	maxConcurrentPerUser?: number;
 
 	/**
 	 * Maximum uploads one tenant (`ctx.tenantId`) may have admitted at once,
@@ -1585,8 +1598,8 @@ export interface UploadOptions extends LiveOptions {
 	/**
 	 * Maximum bytes queued in `ctx.stream` and not yet read, summed over one
 	 * tenant's uploads across sessions and endpoints. A chunk that would pass
-	 * it fails its upload with `LiveError('OVERLOADED')`, and new starts for
-	 * the tenant reject with it while the tenant is at the limit. Chunks a
+	 * it fails its upload with `LiveError('OVERLOADED')`, and a start whose
+	 * queued chunks would pass it rejects with it before its handler runs. Chunks a
 	 * handler is already waiting for are never queued. Applies only with a
 	 * tenant resolver. A positive integer, or `Infinity` to lift the limit.
 	 * @default 268435456 (256 MiB)
