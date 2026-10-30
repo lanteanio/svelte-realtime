@@ -2099,10 +2099,14 @@ export namespace live {
 	 * bucket. Inside that share each identity (each connection, for anonymous
 	 * callers) may hold a tenth of it: 100 per identity in a tenant, 1,000 without
 	 * tenants. The last tenth of each level admits only holders below a hundredth
-	 * of it. A caller over any limit replaces its own oldest cached result, so a
-	 * retry of that key runs again; no caller's traffic evicts another caller's
-	 * result. A caller with no cached result to give up (only running keys, or
-	 * none) gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler runs.
+	 * of it. A caller holding its whole identity share replaces its own oldest
+	 * cached result, so a retry of that key runs again. At every other limit (the
+	 * store, the tenant, a reserve), or with only running keys to give up, a new
+	 * key gets `LiveError('IDEMPOTENCY_CAPACITY')` before the handler runs and
+	 * every cached result stays, so no caller's traffic evicts another caller's
+	 * result. Calls with neither an identity nor a connection (cron, alarms,
+	 * server-side loads) share one identity-sized bucket per tenant that is
+	 * refused at its limit instead of replacing results.
 	 * Pending durable slots are polled for up to five seconds, then return
 	 * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
 	 * Waiting never cancels the original owner.

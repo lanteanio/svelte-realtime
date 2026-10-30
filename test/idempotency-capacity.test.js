@@ -91,6 +91,50 @@ describe('idempotency capacity preserves accepted effects', () => {
 		expect(await run(alice, '0')).toBe(2);
 	});
 
+	it.each([true, false])('refuses a new key and keeps a cached result when other callers fill the store (identified: %s)', async identified => {
+		env = createTestEnv();
+		const effects = new Map();
+		env.register('work', { run: live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => {
+			const count = (effects.get(key) || 0) + 1; effects.set(key, count);
+			return count;
+		}) });
+		const bob = env.connect(identified ? { id: 'bob' } : {});
+		expect(await bob.call('work/run', 'paid')).toBe(1);
+		let other;
+		for (let i = 0; i < GLOBAL - 1; i++) {
+			if (i % 99 === 0) other = env.connect(identified ? { id: 'other' + i } : {});
+			await other.call('work/run', 'other' + i);
+		}
+		await expect(bob.call('work/run', 'fresh')).rejects.toMatchObject(capacityError);
+		expect(await bob.call('work/run', 'paid')).toBe(1);
+		expect(effects.get('paid')).toBe(1);
+		expect(effects.has('fresh')).toBe(false);
+	});
+
+	it('refuses a new key and keeps a cached result when the tenant is full', async () => {
+		_setTenantResolver(user => user.tenant);
+		const { effects, run } = counted();
+		const bob = { user: { id: 'bob' }, tenantId: 'acme' };
+		expect(await run(bob, 'paid')).toBe(1);
+		await fill(run, TENANT - 1, { tenantId: 'acme' });
+		await expect(run(bob, 'fresh')).rejects.toMatchObject(capacityError);
+		expect(await run(bob, 'paid')).toBe(1);
+		expect(effects.get('acme:bob:paid')).toBe(1);
+		await expect(run({ user: { id: 'bob' }, tenantId: 'other' }, 'fresh')).resolves.toBe(1);
+	});
+
+	it('never replaces a result held for calls with neither an identity nor a connection', async () => {
+		const { effects, run } = counted();
+		const scheduled = { user: null };
+		expect(await run(scheduled, 'nightly')).toBe(1);
+		for (let i = 1; i < TENANT; i++) await run({ user: null }, 'job' + i);
+		await expect(run({ user: null }, 'overflow')).rejects.toMatchObject(capacityError);
+		expect(await run(scheduled, 'nightly')).toBe(1);
+		expect(effects.get('::nightly')).toBe(1);
+		await expect(run({ user: null, ws: {} }, 'anonymous')).resolves.toBe(1);
+		await expect(run({ user: { id: 'alice' } }, 'signed-in')).resolves.toBe(1);
+	});
+
 	it('charges anonymous callers per connection', async () => {
 		env = createTestEnv();
 		const effects = new Map();
@@ -135,10 +179,11 @@ describe('idempotency capacity preserves accepted effects', () => {
 		await expect(run(fresh, '99')).resolves.toBe(1);
 		await expect(run({ user: { id: 'member' }, tenantId: 'other' }, 'new')).resolves.toBe(1);
 		await expect(run({ user: { id: 'member' }, tenantId: 'big0' }, 'new')).rejects.toMatchObject(capacityError);
-		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'new')).resolves.toBe(1);
+		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'new')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'f0')).resolves.toBe(1);
 	});
 
-	it('refuses a newcomer only when every slot is held by other callers', async () => {
+	it('refuses new keys and keeps every cached result when every slot is held', async () => {
 		_setTenantResolver(user => user.tenant);
 		const { effects, run } = counted();
 		for (let tenant = 0; tenant < 9; tenant++) await fill(run, TENANT, { tenantId: 'big' + tenant });
@@ -147,7 +192,8 @@ describe('idempotency capacity preserves accepted effects', () => {
 		}
 		await expect(run({ user: { id: 'late' }, tenantId: 'late' }, 'first')).rejects.toMatchObject(capacityError);
 		expect(effects.has('late:late:first')).toBe(false);
-		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'new')).resolves.toBe(1);
+		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'new')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'filler0' }, tenantId: 'big0' }, 'f0')).resolves.toBe(1);
 		await expect(run({ user: { id: 'small' }, tenantId: 'small9' }, '99')).resolves.toBe(1);
 	});
 
@@ -155,7 +201,8 @@ describe('idempotency capacity preserves accepted effects', () => {
 		const { run } = counted();
 		await fill(run, GLOBAL);
 		await expect(run({ user: { id: 'newcomer' } }, 'first')).rejects.toMatchObject(capacityError);
-		await expect(run({ user: { id: 'filler0' } }, 'next')).resolves.toBe(1);
+		await expect(run({ user: { id: 'filler0' } }, 'next')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'filler0' } }, 'f0')).resolves.toBe(1);
 	});
 
 	it('caps calls a tenant resolver leaves unscoped as one tenant-sized bucket', async () => {
@@ -198,7 +245,8 @@ describe('idempotency capacity preserves accepted effects', () => {
 			if (ttl === 0) await expect(run({ user: { id: 'newcomer' } }, 'fresh')).resolves.toBe(GLOBAL + 1);
 			else {
 				await expect(run({ user: { id: 'newcomer' } }, 'fresh')).rejects.toMatchObject(capacityError);
-				await expect(run(caller(0), 'fresh')).resolves.toBe(GLOBAL + 1);
+				await expect(run(caller(0), 'fresh')).rejects.toMatchObject(capacityError);
+				await expect(run(caller(0), '0')).resolves.toBe(GLOBAL);
 			}
 		});
 	}

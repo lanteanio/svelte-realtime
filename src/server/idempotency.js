@@ -23,6 +23,9 @@ const _VAL = '__srk_idem_v';
 // duplicate re-acquiring within the same wall tick as the purge was dropped).
 const _IDEMPOTENCY_FORGET_GRACE_MS = 1000;
 
+const _OWN_SHARE = 1;
+const _SHARED_LIMIT = 2;
+
 /**
  * Deterministic stable serialization: object keys sorted recursively so two
  * payloads differing only in key order fingerprint identically. Wire args are
@@ -93,12 +96,14 @@ let _defaultIdempotencyStore = null;
  * records every 30s or when needed for admission.
  *
  * Capacity is charged to the caller that created a slot: its tenant, and within
- * the tenant its principal (the authenticated identity, or the connection for an
- * anonymous caller). A tenant may hold a tenth of the store and a principal a
- * tenth of its tenant's share, and the last tenth of each level is kept for
- * holders below a hundredth of it. A caller over any of these limits replaces its
- * own oldest cached result, so its traffic can never evict another caller's
- * result; with nothing of its own to give up it is refused before the handler.
+ * the tenant its principal (the authenticated identity, the connection for an
+ * anonymous caller, or one shared bucket for calls with neither). A tenant may
+ * hold a tenth of the store and a principal a tenth of its tenant's share, and
+ * the last tenth of each level is kept for holders below a hundredth of it.
+ * Only a principal at its own share replaces its own oldest cached result; every
+ * other limit refuses the new key, so no caller's traffic can evict a result
+ * another caller may retry. The shared bucket never replaces: its callers cannot
+ * be told apart, so one of them giving up a result could re-run another's effect.
  */
 function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const tenantLimit = Math.min(1000, maxEntries);
@@ -158,22 +163,25 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		else tenantCounts.set(owner.tenant, count);
 	}
 
-	function _atCapacity(tenant, pkey) {
-		const used = results.size + inflight.size;
-		if (used >= maxEntries) return true;
-		const count = tenantCounts.get(tenant) || 0;
-		const inReserve = used >= maxEntries - reserve && count >= reserveLimit;
+	// Admission pressure: 0 admits, _OWN_SHARE means the principal holds its whole
+	// share, _SHARED_LIMIT means a store, tenant or reserve limit applies.
+	function _pressure(tenant, pkey) {
 		// Without a tenant resolver there is no tenant boundary to divide the
 		// store by, so an app that never configures one keeps all of it. With a
 		// resolver, callers it leaves unscoped stay one capped bucket so they
 		// cannot crowd out resolved tenants.
 		const whole = tenant === null && !_isTenancyEnabled();
-		if (whole ? inReserve && tenantCounts.size > (count > 0 ? 1 : 0) : count >= tenantLimit || inReserve) return true;
-		// The same division one level down: principals inside the tenant's share.
 		const share = whole ? maxEntries : tenantLimit;
 		const held = principals.get(pkey)?.count || 0;
-		return held >= Math.max(1, Math.floor(share / 10))
-			|| (count >= share - Math.floor(share / 10) && held >= Math.max(1, Math.floor(share / 100)));
+		if (held >= Math.max(1, Math.floor(share / 10))) return _OWN_SHARE;
+		const used = results.size + inflight.size;
+		if (used >= maxEntries) return _SHARED_LIMIT;
+		const count = tenantCounts.get(tenant) || 0;
+		const inReserve = used >= maxEntries - reserve && count >= reserveLimit;
+		if (whole ? inReserve && tenantCounts.size > (count > 0 ? 1 : 0) : count >= tenantLimit || inReserve) return _SHARED_LIMIT;
+		// The same reserve one level down: principals inside the tenant's share.
+		if (count >= share - Math.floor(share / 10) && held >= Math.max(1, Math.floor(share / 100))) return _SHARED_LIMIT;
+		return 0;
 	}
 
 	function _recordCapacity(outcome) {
@@ -218,21 +226,24 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		}
 	}
 
-	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, tenant, principal) {
+	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, tenant, principal, replaceable) {
 		// A result that expired while this caller waited on its running sibling
 		// still holds its slot; drop it so the key is not charged twice.
 		if (results.has(key)) { results.delete(key); _indexDrop(key); _releaseCapacity(key); }
 		// A validated tenant id has no NUL, so the first NUL ends it.
 		const pkey = (tenant ?? '') + '\0' + principal;
-		if (_atCapacity(tenant, pkey)) {
+		if (_pressure(tenant, pkey)) {
 			const now = runtimeNow();
 			// Reclaim expired results on pressure, even before the periodic sweep.
 			// A full cache of live results rejects in constant time between expiries.
 			if (now >= nextExpiry) _sweepResults(now);
-			if (_atCapacity(tenant, pkey)) {
-				// Swapping the caller's own oldest result for the new key leaves every
-				// level exactly as full as before, so no other caller loses anything.
-				const own = principals.get(pkey);
+			const pressure = _pressure(tenant, pkey);
+			if (pressure) {
+				// A caller at its own share swaps its own oldest result for the new
+				// key, which leaves every level exactly as full as before. Any other
+				// limit is pressure from other callers, and giving up a result there
+				// would let their traffic re-run this caller's effect on retry.
+				const own = pressure === _OWN_SHARE && replaceable ? principals.get(pkey) : undefined;
 				const oldest = own && own.results.size > 0 ? own.results.values().next().value : undefined;
 				if (oldest === undefined) {
 					_releaseUser(idemUser, activeUser);
@@ -349,9 +360,11 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				}
 			}
 			// The principal capacity is charged to: the authenticated identity, else
-			// the anonymous caller's connection.
-			const principal = meta?.user != null ? 'u:' + String(meta.user) : 'c:' + (meta?.connection ?? 0);
-			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, meta?.tenant ?? null, principal);
+			// the anonymous caller's connection, else the shared bucket for calls
+			// with neither (scheduled and server-side work).
+			const connection = meta?.connection;
+			const principal = meta?.user != null ? 'u:' + String(meta.user) : connection != null ? 'c:' + connection : 's';
+			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, meta?.tenant ?? null, principal, principal !== 's');
 		},
 		/**
 		 * Right-to-erasure: drop every cached + in-flight entry recorded under a
@@ -424,7 +437,7 @@ function _waitPendingIdempotency(store, key, ttlSec, meta) {
 const _connectionIds = new WeakMap();
 let _nextConnectionId = 0;
 function _connectionId(ws) {
-	if (ws === null || typeof ws !== 'object') return 0;
+	if (ws === null || typeof ws !== 'object') return null;
 	let id = _connectionIds.get(ws);
 	if (id === undefined) { id = ++_nextConnectionId; _connectionIds.set(ws, id); }
 	return id;
@@ -663,10 +676,10 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  *
  * The default in-process store holds up to 10,000 running keys and cached
  * results, divided between tenants and, inside a tenant, between identities
- * (anonymous callers per connection). A caller over its share replaces its own
- * oldest cached result; one with nothing of its own to replace gets
- * `LiveError('IDEMPOTENCY_CAPACITY')` before the handler runs. Another caller's
- * traffic never evicts a cached result.
+ * (anonymous callers per connection). A caller holding its whole identity share
+ * replaces its own oldest cached result; at any other limit, or with only
+ * running keys to give up, a new key gets `LiveError('IDEMPOTENCY_CAPACITY')`
+ * before the handler runs. Another caller's traffic never evicts a cached result.
  * Pending durable slots are polled for up to five seconds, then return
  * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
  * Waiting never cancels the original owner.
@@ -745,7 +758,8 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// user for live.forget right-to-erasure - the in-memory store folds them
 		// into a key matching `_tenantKey(tenantId, userId)`, a durable backend
 		// denormalizes them into columns. The default store also needs anonymous tenant scope for admission.
-		// It also needs the anonymous caller's connection to charge capacity to.
+		// It also needs the anonymous caller's connection to charge capacity to;
+		// calls without one (cron, alarms, server-side loads) share a bucket.
 		const acquireMeta = uid !== null ? { user: uid, tenant: ctx.tenantId }
 			: store === _defaultIdempotencyStore ? { tenant: ctx.tenantId ?? null, connection: _connectionId(ctx.ws) } : undefined;
 		let slot = await store.acquire(key, ttlSec, acquireMeta);
