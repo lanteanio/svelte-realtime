@@ -105,6 +105,21 @@ function _processId() {
 const _running = new Set();
 
 /**
+ * Jobs whose `begin` timed out, so their caller was told nothing was erased,
+ * and whose record may still land. Each is abandoned when its record lands,
+ * or the next time this process meets it, so it never runs later.
+ * @type {Map<string, string>} job id -> run id
+ */
+const _refused = new Map();
+
+/** @param {any} jobs @param {string} id @param {string} runId */
+async function _abandonRefused(jobs, id, runId) {
+	try {
+		if ((await _bounded(jobs.abandon({ id, at: wallEpoch(), runId }))) === true) _refused.delete(id);
+	} catch { /* Kept in `_refused`: the next resume in this process tries again. */ }
+}
+
+/**
  * In-memory steps this process finished for jobs it owns whose outcome the
  * store has not recorded yet, so a later run of the same job does not repeat
  * them (a document dropped then may hold new edits by now).
@@ -544,7 +559,11 @@ async function _runErasure(jobs, job, run, onForget) {
 				await _bounded(jobs.begin({
 					id: job.id, runId: job.runId, processId: _processId(), aliveUntil: at + _PROCESS_TTL_MS,
 					userIdHash, tenantId, userId, cascade, shared: job.shared, local: job.local, at
-				}));
+				}), {
+					// The caller has been told nothing was erased; a record that
+					// lands after that is abandoned, not run later.
+					resolved: () => { _refused.set(job.id, job.runId); void _abandonRefused(jobs, job.id, job.runId); }
+				});
 			} catch {
 				throw _withJob(new LiveError('FORGET_JOB_FAILED', 'live.forget: the erasure job could not be recorded; nothing was erased'), jobId);
 			}
@@ -826,6 +845,7 @@ export function _resetForget() {
 	// of earlier runs.
 	_processIdValue = null;
 	_localDone.clear();
+	_refused.clear();
 }
 
 /** Clear every forget setting and stop beating. */
@@ -938,8 +958,15 @@ export async function resumeForgetJobs(opts = {}) {
 	}
 	for (const jobId of ids) {
 		out.total++;
-		// A job a run of this process is still working on is not started twice.
+		// A job a run of this process is still working on is not started twice,
+		// and a job whose caller was refused is abandoned, never run.
 		if (_running.has(jobId)) {
+			out.results.push({ id: jobId, status: 'skipped' });
+			continue;
+		}
+		const refusedRun = _refused.get(jobId);
+		if (refusedRun !== undefined) {
+			await _abandonRefused(jobs, jobId, refusedRun);
 			out.results.push({ id: jobId, status: 'skipped' });
 			continue;
 		}

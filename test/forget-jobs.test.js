@@ -665,3 +665,19 @@ describe('erasure job retention', () => {
 		expect(byId[err.job]).toMatchObject({ status: 'abandoned', userIdHash: null });
 	});
 });
+
+describe('a refused erasure', () => {
+	it('never runs later when its job record lands after the call timed out', async () => {
+		const jobs = createForgetJobStore();
+		const purgeUser = vi.fn(async () => 1);
+		const slowBegin = (intent) => new Promise((r) => setTimeout(() => r(jobs.begin(intent)), 60));
+		configureForget({ store: { purgeUser }, jobs: { ...jobs, begin: slowBegin }, timeoutMs: 20 });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		expect(err.code).toBe('FORGET_JOB_FAILED');
+		await vi.waitFor(async () => expect((await listForgetJobs())[0]).toMatchObject({ id: err.job, status: 'abandoned', userIdHash: null }));
+		later();
+		expect(await resumeForgetJobs()).toMatchObject({ total: 0 });
+		expect(await resumeForgetJobs({ id: err.job })).toMatchObject({ results: [{ status: 'skipped' }] });
+		expect(purgeUser).not.toHaveBeenCalled();
+	});
+});

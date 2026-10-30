@@ -36,7 +36,7 @@ A job that fails on 24 runs stops running by itself: it becomes `exhausted`, sta
 
 ## Time bounds
 
-Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - can be bounded with `configureForget({ timeoutMs })`, with or without a job store; without it (the default) an erasure waits as long as the store takes. A call that does not answer in time fails its surface, so a hung store cannot hold `live.forget` forever and does not keep the other surfaces from running. A durable purge that commits after its timeout still announces the owner changes it reports. The call itself keeps running in the store, so every surface must tolerate a late finish.
+Every store call a run waits on - `begin` or `claim`, each in-memory surface, the durable store and the outcome write - can be bounded with `configureForget({ timeoutMs })`, with or without a job store; without it (the default) an erasure waits as long as the store takes. A call that does not answer in time fails its surface, so a hung store cannot hold `live.forget` forever and does not keep the other surfaces from running. When `begin` times out the call rejects with `FORGET_JOB_FAILED` and erases nothing; if the job record lands later, the process abandons it at once (or at its next resume, should that write fail), so a refused erasure never runs afterwards. Only if the process exits in between does the recorded job run later like any other, completing the erasure that was asked for. A durable purge that commits after its timeout still announces the owner changes it reports. The call itself keeps running in the store, so every surface must tolerate a late finish.
 
 ## In-memory store
 
