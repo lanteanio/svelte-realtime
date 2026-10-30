@@ -231,6 +231,42 @@ describe('live.effect concurrency and queue limits', () => {
 		expect(events.filter((e) => e.event === 'reactive.effect.failed')).toHaveLength(5);
 	});
 
+	it('a thenable whose then throws or calls back twice fails or settles once', async () => {
+		const { errors } = captureErrors();
+		const registry = fakeRegistry();
+		live.metrics(registry);
+		const count = (result) => registry.counters.get('svelte_realtime_background_total{"kind":"effect","result":"' + result + '"}');
+		const seen = [];
+		const held = [];
+		const effect = live.effect(['orders'], (event, data) => {
+			seen.push(data.i);
+			if (data.i === 0) return { then() { throw new Error('bad then'); } };
+			if (data.i === 1) return { get then() { throw new Error('bad getter'); } };
+			if (data.i === 2) return { then(ok, fail) { ok(); ok(); fail(new Error('late')); } };
+			if (data.i >= 5) return new Promise((resolve) => held.push(resolve));
+			return Promise.resolve();
+		}, { maxConcurrent: 1 });
+		env = createTestEnv();
+		env.register('jobs', { notify: effect });
+		for (let i = 0; i < 5; i++) env.platform.publish('orders', 'created', { i });
+		await flush(40);
+		expect(seen).toEqual([0, 1, 2, 3, 4]);
+		expect(errors.map((e) => e.err.message)).toEqual(['bad then', 'bad getter']);
+		expect([count('ok'), count('error')]).toEqual([3, 2]);
+		expect(registry.gauges.get('svelte_realtime_background_inflight{"kind":"effect"}')).toBe(0);
+		// The lane is intact: two more calls still run one at a time.
+		env.platform.publish('orders', 'created', { i: 5 });
+		env.platform.publish('orders', 'created', { i: 6 });
+		await flush();
+		expect(seen.slice(5)).toEqual([5]);
+		held.shift()();
+		await flush();
+		expect(seen.slice(5)).toEqual([5, 6]);
+		held.shift()();
+		await flush();
+		expect(registry.gauges.get('svelte_realtime_background_inflight{"kind":"effect"}')).toBe(0);
+	});
+
 	it('a call that never settles gives its slot back at its deadline, once', async () => {
 		vi.useFakeTimers();
 		try {
@@ -290,8 +326,8 @@ describe('live.effect concurrency and queue limits', () => {
 			await vi.advanceTimersByTimeAsync(500);
 			expect(fx.started).toEqual([1, 2, 3, 4]);
 			expect(inflight()).toBe(4);
-			// Calls 3 and 4 hang too. Two abandoned calls is the cap for
-			// maxConcurrent 2, so 5 and 6 wait instead of piling up more.
+			// Calls 3 and 4 hang too. Four calls alive is twice maxConcurrent,
+			// so 5 and 6 wait instead of piling up more.
 			await vi.advanceTimersByTimeAsync(500);
 			expect(fx.started).toEqual([1, 2, 3, 4]);
 			expect(inflight()).toBe(4);

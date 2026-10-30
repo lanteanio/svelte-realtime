@@ -21,7 +21,7 @@ The gauges are written with `set`, so the registry's gauge needs a `set(labels, 
 
 ## Across processes
 
-Every gauge describes the process that writes it. Add `inflight` and `queued` across processes (`sum by (kind)`) and take the largest `oldest_age_seconds` (`max by (kind)`). A queue held in shared storage, such as a durable job or task table or a durable dead-letter store, has one depth for the whole cluster, so only one process (the leader) writes its `queued` and `oldest_age_seconds`, and the same sum and maximum stay correct.
+Every gauge describes the process that writes it. Add `inflight` and `queued` across processes (`sum by (kind)`) and take the largest `oldest_age_seconds` (`max by (kind)`). A queue held in shared storage, such as a durable job or task table or a durable dead-letter store, has one depth for the whole cluster, so only one process (the leader) writes its `queued` and `oldest_age_seconds`, and the same sum and maximum stay correct. A process that loses leadership sets both to 0 once, at the handover, so the old leader's last values never add to the new leader's. svelte-realtime reports no such series: every depth and age it writes is of a queue in its own process memory.
 
 ## `kind`
 

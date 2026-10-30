@@ -227,7 +227,7 @@ export const CODE_GUIDANCE = Object.freeze({
 	}),
 	TIMEOUT: Object.freeze({
 		cause: 'No reply arrives within the timeout for an RPC, batch, binary RPC, stream subscribe, `loadMore` or upload (default 30s via `configure({ timeout })`). On the server, a `live.push` recipient does not answer within `timeoutMs`, or `live.effect` calls stay pending past the `timeoutMs` of the effect (default 30000).',
-		consequence: 'The call rejects with an RpcError, or a LiveError for `live.push`. A timed-out upload sends a cancel frame. The server may still have run the request. A timed-out effect call gives its slot back and its late result is ignored; the handler itself keeps running.',
+		consequence: 'The call rejects with an RpcError, or a LiveError for `live.push`. A timed-out upload sends a cancel frame. The server may still have run the request. A timed-out effect call gives its slot back and its late result is ignored, though a late rejection is still reported; the handler itself keeps running.',
 		automaticRecovery: 'None for RPCs, uploads or pushes. A timed-out stream subscribes again after the next reconnect. An offline replay that times out is dropped and reported. An effect starts its next waiting call in the released slot.',
 		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key. For an effect, find the call that never settles (an awaited promise without a timeout of its own) or raise `timeoutMs` for work that is legitimately slow.'
 	}),
@@ -375,8 +375,8 @@ export const EVENT_GUIDANCE = Object.freeze({
 	}),
 	'reactive.effect.timeout': Object.freeze({
 		cause: 'Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration, `released` counts the calls and `abandoned` counts every released call still running.',
-		consequence: 'Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped, its late result is ignored, and the next call runs alongside it, so `maxConcurrent: 1` no longer serializes those calls. While `maxConcurrent` released calls are still running, the effect starts no new call and its queue fills. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.',
-		automaticRecovery: 'The released slots run the next waiting calls at once, up to the cap; each released call that finally settles lets another waiting call start.',
+		consequence: 'Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped, its late result is ignored (a late rejection is still reported), and the next call runs alongside it, so `maxConcurrent: 1` no longer serializes those calls. Released calls count against a total of twice `maxConcurrent` calls alive, so an effect whose calls never settle stops starting calls until one settles: its queued and oldest-age gauges rise and, once `maxQueued` calls wait, new publishes are rejected with `OVERLOADED`. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.',
+		automaticRecovery: 'The released slots run the next waiting calls at once while fewer than twice `maxConcurrent` calls are alive; each released call that finally settles lets another waiting call start.',
 		nextAction: 'Find the awaited work in the handler that never settles (a remote call or query without a timeout of its own) and give it a deadline. Raise `timeoutMs` only for work that is legitimately slower.'
 	}),
 	'reactive.effect.failed': Object.freeze({

@@ -23,11 +23,11 @@ import { _bgDone, _bgCount, _bgTotals, _bgChanged, _bgQueuedAt, _bgQueueWaiting,
 // released between `timeoutMs` and 1.25 x `timeoutMs` after it started, and
 // starting one costs a counter, not a timer.
 //
-// A released job keeps running: nothing can stop a handler. Such abandoned
-// jobs are capped at `maxConcurrent`; while that many are still running, the
-// lane starts nothing new, so a lane never has more than twice
-// `maxConcurrent` handler calls alive. An abandoned job that settles frees its
-// place in the cap and changes nothing else.
+// A released job keeps running: nothing can stop a handler. Released jobs
+// count against a total of twice `maxConcurrent` jobs alive, so a lane whose
+// jobs never settle stops starting jobs until one settles; its queue and then
+// its overflow report that. An abandoned job that settles frees its place and
+// changes nothing else.
 
 /** Default limits for `live.effect`: high enough that a small app never meets them. */
 export const EFFECT_MAX_CONCURRENT = 32;
@@ -79,7 +79,7 @@ const _MIN_TIMEOUT_MS = 100;
  * @property {number} timeoutMs - how long a pending job may hold its slot; Infinity for no limit
  * @property {number} active - jobs holding a slot
  * @property {number} abandoned - jobs released at their deadline that are still running
- * @property {number} limit - how many slots may be held now: maxConcurrent, less any abandoned jobs past the cap
+ * @property {number} limit - how many slots may be held now: maxConcurrent, or fewer while abandoned jobs fill the 2 x maxConcurrent alive total
  * @property {Array<(go: boolean) => void>} queue - waiting jobs, as the resolvers of their waits
  * @property {number[]} since - when each waiting job was queued (monotonic ms, 0 while metrics are off), aligned with `queue`
  * @property {number} head
@@ -257,19 +257,25 @@ function _wait(lane, a, b, c, d) {
 function _start(lane, a, b, c, d) {
 	const startedAt = lane.metered && state.metricsInstruments ? monotonicNow() : 0;
 	let result;
+	/** @type {Promise<unknown> | null} */
+	let promise = null;
 	try {
 		result = lane.run(a, b, c, d);
+		// Promise.resolve returns a native promise as it is and turns any other
+		// thenable into one, so a `then` that throws becomes a rejection and one
+		// that calls back twice settles the job once.
+		if (result && typeof result.then === 'function') promise = Promise.resolve(result);
 	} catch (err) {
 		_reportRejection(lane, err);
 		result = LANE_FAILED;
 	}
-	if (result && typeof result.then === 'function') {
+	if (promise) {
 		const tick = lane.timeoutMs === Infinity ? -1 : _holdPending(lane);
 		// An untimed job needs nothing of its own to settle, so jobs that start
 		// in the same deadline tick share one pair of handlers and a pending job
 		// allocates no closures.
 		const h = startedAt ? _handlers(lane, tick, startedAt) : lane.shared && lane.shared.tick === tick ? lane.shared : (lane.shared = _handlers(lane, tick, 0));
-		result.then(h.ok, h.err);
+		promise.then(h.ok, h.err);
 	} else {
 		_settle(lane, startedAt, result === LANE_FAILED ? 'error' : 'ok');
 	}
