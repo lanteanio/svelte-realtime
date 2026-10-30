@@ -1,6 +1,6 @@
 # Erasure jobs
 
-A failed or interrupted erasure must not be forgotten, so `configureForget({ jobs: true })` (in-memory) or `configureForget({ jobs: store })` (a `ForgetJobStore` that survives restarts) records every `live.forget` as a job. The intent is recorded before any surface is touched - if that write fails the call rejects with `FORGET_JOB_FAILED` and erases nothing - and the outcome afterwards. With a job store configured, `tenantId` is required.
+A failed or interrupted erasure must not be forgotten, so `configureForget({ jobs: true })` (in-memory; passing it again keeps the configured store) or `configureForget({ jobs: store })` (a `ForgetJobStore` that survives restarts) records every `live.forget` as a job. The intent is recorded before any surface is touched - if that write fails the call rejects with `FORGET_JOB_FAILED` and erases nothing - and the outcome afterwards. With a job store configured, `tenantId` is required.
 
 Every call is its own job under a random UUID, so the reference reveals nothing about the user. The reference is `res.job` on success, the non-enumerable `job` property of a rejection (never part of `details`, so an error rethrown to a client does not carry it), and the `job` attribute of `forget.incomplete`.
 

@@ -4884,8 +4884,8 @@ export interface ForgetStore {
  * logs; rotation changes future identifiers, so record your key version separately.
  * Keys are copied at configuration; active erasures retain their starting key.
  * `jobs` records every erasure as a resumable job: `true` for the in-memory
- * store, a `ForgetJobStore` that survives restarts, or `null`/`false` for none
- * (the default). With a job store, `live.forget` requires `tenantId`, and a
+ * store (or to keep the store already configured), a `ForgetJobStore` that
+ * survives restarts, or `null`/`false` for none (the default). With a job store, `live.forget` requires `tenantId`, and a
  * `hashKey` is strongly recommended: an open job stores the audit hash, which
  * without a key is an unkeyed SHA-256 that anyone can match against
  * candidate user ids.

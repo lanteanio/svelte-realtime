@@ -681,3 +681,12 @@ describe('a refused erasure', () => {
 		expect(purgeUser).not.toHaveBeenCalled();
 	});
 });
+
+describe('reconfiguring jobs', () => {
+	it('keeps the configured store when jobs: true is passed again', async () => {
+		configureForget({ store: partial(), jobs: true });
+		const err = await live.forget('alice', { tenantId: null }).catch((e) => e);
+		configureForget({ jobs: true });
+		expect((await listForgetJobs()).map((j) => j.id)).toEqual([err.job]);
+	});
+});

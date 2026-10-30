@@ -271,7 +271,9 @@ export function configureForget(config) {
 	if (platform !== undefined) _forgetPlatform = platform;
 	_forgetHashKey = nextHashKey;
 	if (jobs !== undefined) {
-		_forgetJobs = jobs === true ? createForgetJobStore() : (jobs || null);
+		// `true` keeps a configured store, so a repeated call never discards
+		// the open jobs it holds.
+		_forgetJobs = jobs === true ? (_forgetJobs ?? createForgetJobStore()) : (jobs || null);
 		if (_forgetJobs === null) _stopBeat();
 		else _startBeat();
 	}
