@@ -34,7 +34,7 @@ export const BACKGROUND_METRICS: {
 	readonly results: readonly ['ok', 'error', 'timeout', 'skipped', 'rejected', 'coalesced'];
 	/** Items by how they ended. */
 	readonly total: BackgroundMetricDescriptor<'counter', readonly ['kind', 'result']>;
-	/** Run time in seconds of items that ran (`ok`, `error`, `timeout`). */
+	/** Run time in seconds of items that finished (`ok`, `error`). */
 	readonly duration: BackgroundMetricDescriptor<'histogram', readonly ['kind', 'result']> & { readonly buckets: readonly number[] };
 	/** Items running in this process. */
 	readonly inflight: BackgroundMetricDescriptor<'gauge', readonly ['kind']>;
@@ -4059,6 +4059,19 @@ export interface EffectOptions {
 	 * @default 'reject'
 	 */
 	overflow?: 'reject' | 'coalesce';
+	/**
+	 * Milliseconds a call may stay pending before its slot is given back, so a
+	 * handler that never settles cannot hold the effect's slots for good. The
+	 * slot is released between `timeoutMs` and 1.25 x `timeoutMs` after the
+	 * call started; the handler is not stopped and its late result is ignored.
+	 * Released calls count in
+	 * `svelte_realtime_background_total{kind="effect",result="timeout"}`, and
+	 * every deadline check that releases calls reaches `onError('effect', err)`
+	 * as a `LiveError` with code `TIMEOUT` and emits `reactive.effect.timeout`
+	 * with their count. An integer from 1 to 2147483647, or `Infinity`.
+	 * @default 30000
+	 */
+	timeoutMs?: number;
 }
 
 /**

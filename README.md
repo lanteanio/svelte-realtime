@@ -3248,7 +3248,9 @@ Each effect runs at most `maxConcurrent` calls at once (default 32) and queues a
 - `'reject'` (default): that call is skipped. The first skip of an overflow episode reaches `onError('effect', err)` as a `LiveError` with code `OVERLOADED` and emits a `reactive.effect.overflow` event; every skip counts in `svelte_realtime_background_total{kind="effect",result="rejected"}`.
 - `'coalesce'`: the new call replaces the newest waiting one, for effects where only the latest event matters (a cache refresh, a recount).
 
-Pass `Infinity` to lift a limit, for example `live.effect(['orders'], sendReceipt, { maxConcurrent: 4, maxQueued: 500 })`.
+A call still pending `timeoutMs` after it started (default 30000) gives its slot back, so a handler that never settles cannot stall the effect for good; the handler keeps running, its late result is ignored, and the release reaches `onError('effect', err)` with code `TIMEOUT`.
+
+Pass `Infinity` to lift a limit or the deadline, for example `live.effect(['orders'], sendReceipt, { maxConcurrent: 4, maxQueued: 500 })`.
 
 ---
 

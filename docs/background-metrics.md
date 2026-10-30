@@ -15,7 +15,7 @@ The schema is exported as `BACKGROUND_METRICS` from `svelte-realtime/server`, an
 | `svelte_realtime_background_oldest_age_seconds` | gauge | `kind` | Age in seconds of the oldest waiting background work item |
 | `svelte_realtime_background_retries_exhausted_total` | counter | `kind` | Background work items that failed on the last attempt their retry policy allows |
 
-The duration histogram uses the bucket bounds 0.001, 0.005, 0.025, 0.1, 0.25, 1, 2.5, 10, 30, 60, 300, 900, 3600 seconds, so a millisecond effect and an hour-long job land in the same series. It observes only items that ran (`ok`, `error`, `timeout`); an item that never started is counted, not timed.
+The duration histogram uses the bucket bounds 0.001, 0.005, 0.025, 0.1, 0.25, 1, 2.5, 10, 30, 60, 300, 900, 3600 seconds, so a millisecond effect and an hour-long job land in the same series. It observes only items that finished (`ok`, `error`). An item that never started, or that was released at its deadline while still running (`timeout`), is counted, not timed.
 
 The gauges are written with `set`, so the registry's gauge needs a `set(labels, value)` method (the extensions `createMetrics()` gauge has one). `inflight` and `queued` are written once per microtask in which they change. `oldest_age_seconds` is refreshed every second while anything waits and reads 0 when nothing does.
 

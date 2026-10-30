@@ -7,7 +7,7 @@ import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { UNSEQUENCED } from './publish-helpers.js';
-import { _validateLaneLimit, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED } from './work-lane.js';
+import { _validateLaneLimit, _validateLaneTimeout, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
 
 // Seam: the flag cell/watcher and the window-spec validator stay in server.js
 // (shared with the staying __register* shims); the reactive families reach them
@@ -239,17 +239,20 @@ export function _configureDynamicDerived(fn, baseTopic) {
  * publish past both limits is the effect's overflow: `'reject'` (default)
  * skips that call, reports an `OVERLOADED` LiveError to `onError` once per
  * overflow episode and counts it; `'coalesce'` replaces the newest waiting
- * call with the new one, so the effect still sees the latest event.
+ * call with the new one, so the effect still sees the latest event. A call
+ * still pending `timeoutMs` after it started (default 30000) gives its slot
+ * back and is reported as `TIMEOUT`; the handler itself is not stopped.
  *
  * @param {string[]} sources - Topic names to watch
  * @param {Function} fn - Async function (event, data, platform) called on each matching publish
- * @param {{ debounce?: number, maxConcurrent?: number, maxQueued?: number, overflow?: 'reject' | 'coalesce' }} [options]
+ * @param {{ debounce?: number, maxConcurrent?: number, maxQueued?: number, overflow?: 'reject' | 'coalesce', timeoutMs?: number }} [options]
  * @returns {Function}
  */
 export const _effectRegister = function effect(sources, fn, options) {
 	const debounce = options?.debounce || 0;
 	_validateLaneLimit('live.effect()', 'maxConcurrent', options?.maxConcurrent, 1);
 	_validateLaneLimit('live.effect()', 'maxQueued', options?.maxQueued, 0);
+	_validateLaneTimeout('live.effect()', options?.timeoutMs);
 	const overflow = options?.overflow ?? 'reject';
 	if (overflow !== 'reject' && overflow !== 'coalesce') {
 		throw new Error("[svelte-realtime] live.effect(): overflow must be 'reject' or 'coalesce'");
@@ -263,7 +266,8 @@ export const _effectRegister = function effect(sources, fn, options) {
 	/** @type {any} */ (fn).__effectLimits = {
 		maxConcurrent: options?.maxConcurrent ?? EFFECT_MAX_CONCURRENT,
 		maxQueued: options?.maxQueued ?? EFFECT_MAX_QUEUED,
-		overflow
+		overflow,
+		timeoutMs: options?.timeoutMs ?? EFFECT_TIMEOUT_MS
 	};
 	return fn;
 };

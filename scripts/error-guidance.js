@@ -226,10 +226,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Inspect the error message and server logs for the subscribe. Fix the cause, then `detach()` and `attach()` or resubscribe.'
 	}),
 	TIMEOUT: Object.freeze({
-		cause: 'No reply arrives within the timeout for an RPC, batch, binary RPC, stream subscribe, `loadMore` or upload (default 30s via `configure({ timeout })`). On the server, a `live.push` recipient does not answer within `timeoutMs`.',
-		consequence: 'The call rejects with an RpcError, or a LiveError for `live.push`. A timed-out upload sends a cancel frame. The server may still have run the request.',
-		automaticRecovery: 'None for RPCs, uploads or pushes. A timed-out stream subscribes again after the next reconnect. An offline replay that times out is dropped and reported.',
-		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key.'
+		cause: 'No reply arrives within the timeout for an RPC, batch, binary RPC, stream subscribe, `loadMore` or upload (default 30s via `configure({ timeout })`). On the server, a `live.push` recipient does not answer within `timeoutMs`, or `live.effect` calls stay pending past the `timeoutMs` of the effect (default 30000).',
+		consequence: 'The call rejects with an RpcError, or a LiveError for `live.push`. A timed-out upload sends a cancel frame. The server may still have run the request. A timed-out effect call gives its slot back and its late result is ignored; the handler itself keeps running.',
+		automaticRecovery: 'None for RPCs, uploads or pushes. A timed-out stream subscribes again after the next reconnect. An offline replay that times out is dropped and reported. An effect starts its next waiting call in the released slot.',
+		nextAction: 'Check server handler latency and connection health, and raise the timeout if the work is legitimately slow. Make non-idempotent calls safe to retry with an idempotency key. For an effect, find the call that never settles (an awaited promise without a timeout of its own) or raise `timeoutMs` for work that is legitimately slow.'
 	}),
 	TOO_MANY_UPLOADS: Object.freeze({
 		cause: 'A new upload exceeds the per-session limit of uploads awaiting authorization, or the endpoint\'s `maxConcurrentPerSession` or `maxConcurrentTotal` limit.',
@@ -372,6 +372,12 @@ export const EVENT_GUIDANCE = Object.freeze({
 		consequence: 'The call for that publish is skipped, and so is every call for a publish that arrives before the queue has room again. This event and the `onError` report (path `effect`, code `OVERLOADED`) come once per overflow episode; each skip counts in `svelte_realtime_background_total` with result `rejected`.',
 		automaticRecovery: 'The effect takes new publishes again as soon as its queue has room. A `reactive.effect.overflow.ended` info event then reports how many calls were skipped.',
 		nextAction: 'Find why the effect handler is slow or stalled (a hung query or remote call). Raise `maxConcurrent` or `maxQueued` only if the work can keep up, or use the `coalesce` overflow when only the latest event matters.'
+	}),
+	'reactive.effect.timeout': Object.freeze({
+		cause: 'Calls of a `live.effect` stay pending for its `timeoutMs` (default 30000) after they started. The `effect` attribute names the registration and `released` counts the calls.',
+		consequence: 'Each such call gives its slot back, so the effect keeps taking new publishes; its handler is not stopped and its late result is ignored. The `onError` handler hears path `effect` with code `TIMEOUT`, once per deadline check that released calls, and each released call counts in `svelte_realtime_background_total` with result `timeout`.',
+		automaticRecovery: 'The released slots run the next waiting calls at once.',
+		nextAction: 'Find the awaited work in the handler that never settles (a remote call or query without a timeout of its own) and give it a deadline. Raise `timeoutMs` only for work that is legitimately slower.'
 	}),
 	'reactive.effect.failed': Object.freeze({
 		cause: 'A `live.effect` handler throws or rejects while running for a publish on one of its watched source topics.',

@@ -4,7 +4,7 @@
 // once and settles on the latest source state. Everything is driven through
 // the real publish path of a test environment.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { live, onError, configureWebhooks, getDeadLetter, __registerWebhookOut, _prepareHmr, setOperationalEventSink } from '../src/server.js';
@@ -178,8 +178,99 @@ describe('live.effect concurrency and queue limits', () => {
 		expect(seen).toEqual([0, 1, 2, 3, 4]);
 	});
 
+	it('a call that never settles gives its slot back at its deadline, once', async () => {
+		const { errors, events } = captureErrors();
+		const registry = { counter: () => ({ inc(l) { if (l.kind === 'effect') counts[l.result] = (counts[l.result] || 0) + 1; } }), histogram: () => ({ observe() {} }), gauge: () => ({ set() {} }) };
+		const counts = {};
+		live.metrics(registry);
+		const fx = setupEffect({ maxConcurrent: 1, timeoutMs: 40 });
+		for (let i = 1; i <= 3; i++) fx.publish(i);
+		await flush();
+		expect(fx.started).toEqual([1]);
+		await new Promise((r) => setTimeout(r, 120));
+		// Call 1 hung past its deadline: call 2 has its slot, call 3 waits.
+		expect(fx.started).toEqual([1, 2]);
+		expect(counts.timeout).toBe(1);
+		const late = fx.waiting.shift();
+		late();
+		await flush();
+		// The late settlement of call 1 frees nothing: call 3 still waits for call 2.
+		expect(fx.started).toEqual([1, 2]);
+		expect(counts.ok).toBeUndefined();
+		fx.waiting.shift()();
+		await flush();
+		expect(fx.started).toEqual([1, 2, 3]);
+		fx.waiting.shift()();
+		await flush();
+		expect(counts.ok).toBe(2);
+		const timeouts = errors.filter((e) => e.err?.code === 'TIMEOUT');
+		expect(timeouts).toHaveLength(1);
+		expect(timeouts[0]).toMatchObject({ path: 'effect' });
+		expect(events.filter((e) => e.event === 'reactive.effect.timeout').map((e) => e.attributes)).toEqual([{ effect: 'jobs/notify', timeoutMs: 40, released: 1 }]);
+	});
+
+	it('hung calls no longer block the effect for good', async () => {
+		const { errors } = captureErrors();
+		const fx = setupEffect({ maxConcurrent: 2, maxQueued: 2, timeoutMs: 20 });
+		for (let i = 1; i <= 6; i++) fx.publish(i);
+		await flush();
+		expect(fx.started).toEqual([1, 2]);
+		// Every call hangs; deadlines keep the effect moving through its queue.
+		await new Promise((r) => setTimeout(r, 150));
+		expect(fx.started).toEqual([1, 2, 3, 4]);
+		for (let i = 7; i <= 8; i++) fx.publish(i);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(fx.started).toEqual([1, 2, 3, 4, 7, 8]);
+		expect(errors.filter((e) => e.err?.code === 'OVERLOADED')).toHaveLength(1);
+		expect(errors.filter((e) => e.err?.code === 'TIMEOUT').length).toBeGreaterThanOrEqual(2);
+		await fx.drain();
+	});
+
+	it('releases a hung call between timeoutMs and 1.25 x timeoutMs, 30000 by default', async () => {
+		vi.useFakeTimers();
+		try {
+			captureErrors();
+			const fx = setupEffect({ maxConcurrent: 2 });
+			fx.publish(1);
+			await flush();
+			// Call 2 starts late in the deadline period call 1 started in.
+			await vi.advanceTimersByTimeAsync(7000);
+			fx.publish(2);
+			fx.publish(3);
+			await flush();
+			expect(fx.started).toEqual([1, 2]);
+			// Call 2 keeps its slot for its full 30000 ms.
+			await vi.advanceTimersByTimeAsync(29999);
+			expect(fx.started).toEqual([1, 2]);
+			// Call 1 is released by 37500 ms, 1.25 x timeoutMs after it started.
+			await vi.advanceTimersByTimeAsync(501);
+			expect(fx.started).toEqual([1, 2, 3]);
+			await fx.drain();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('timeoutMs: Infinity keeps a pending call in its slot', async () => {
+		vi.useFakeTimers();
+		try {
+			const fx = setupEffect({ maxConcurrent: 1, timeoutMs: Infinity });
+			fx.publish(1);
+			fx.publish(2);
+			await flush();
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			expect(fx.started).toEqual([1]);
+			await fx.drain();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('validates the limit options at declaration', () => {
 		const fn = () => {};
+		for (const timeoutMs of [0, 1.5, '1000', 2147483648, -1]) {
+			expect(() => live.effect(['a'], fn, { timeoutMs })).toThrow(/timeoutMs must be an integer from 1 to 2147483647/);
+		}
 		expect(() => live.effect(['a'], fn, { maxConcurrent: 0 })).toThrow(/maxConcurrent must be an integer >= 1/);
 		expect(() => live.effect(['a'], fn, { maxConcurrent: 1.5 })).toThrow(/maxConcurrent/);
 		expect(() => live.effect(['a'], fn, { maxQueued: -1 })).toThrow(/maxQueued must be an integer >= 0/);

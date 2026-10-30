@@ -6,7 +6,7 @@ import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggrega
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _submitWebhookOut } from './webhook-out.js';
-import { _createLane, _laneSubmit, LANE_FAILED, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED } from './work-lane.js';
+import { _createLane, _laneSubmit, LANE_FAILED, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
 import { _bgClock, _bgDone, _bgInflight } from './background-metrics.js';
 import { LiveError } from './live-error.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
@@ -1048,10 +1048,11 @@ export function _deactivateDynamicDerived(fn, resolvedTopic, ctx) {
  * @param {any} entry
  */
 function _effectLane(entry) {
-	const limits = entry.limits || { maxConcurrent: EFFECT_MAX_CONCURRENT, maxQueued: EFFECT_MAX_QUEUED };
+	const limits = entry.limits || { maxConcurrent: EFFECT_MAX_CONCURRENT, maxQueued: EFFECT_MAX_QUEUED, timeoutMs: EFFECT_TIMEOUT_MS };
 	const lane = _createLane('effect', limits, (event, data, platform) => _fireEffect(entry, event, data, platform), {
 		onReject: _effectRejected,
-		onDrained: _effectOverflowEnded
+		onDrained: _effectOverflowEnded,
+		onTimeout: _effectTimedOut
 	});
 	lane.id = entry.id || 'unknown';
 	return entry.lane = lane;
@@ -1090,6 +1091,29 @@ function _effectRejected(lane) {
 		dataClass: 'operational',
 		message: 'A reactive effect is at its concurrency and queue limits; calls for new publishes are skipped.',
 		attributes: { effect: lane.id, maxConcurrent: lane.maxConcurrent, maxQueued: lane.maxQueued }
+	});
+}
+
+/**
+ * Report effect calls whose slots were released at their deadline. The
+ * handlers keep running; only the slots are given back.
+ * @param {any} lane
+ * @param {number} released
+ */
+function _effectTimedOut(lane, released) {
+	const err = new LiveError('TIMEOUT',
+		"live.effect '" + lane.id + "' calls did not settle within timeoutMs " + lane.timeoutMs + '; their slots were released.');
+	if (state.serverErrorHandler) {
+		try { state.serverErrorHandler('effect', err); } catch {}
+	}
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.reactive',
+		event: 'reactive.effect.timeout',
+		severity: 'warn',
+		dataClass: 'operational',
+		message: 'Reactive effect calls did not settle within their deadline; their slots were released.',
+		attributes: { effect: lane.id, timeoutMs: lane.timeoutMs, released }
 	});
 }
 
