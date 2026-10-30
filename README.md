@@ -253,7 +253,7 @@ The `ctx` object passed to every server function contains:
 | `ctx.cursor` | Cursor from a `loadMore()` call, or `null` |
 | `ctx.connectionId` | Stable WebSocket connection id (`undefined` for direct HTTP/SSR work) |
 | `ctx.requestId` | Per-operation correlation id; a bounded RPC envelope id on WebSocket or the per-request adapter id for HTTP/SSR |
-| `ctx.abortSignal` | `AbortSignal` that fires at the call's deadline (the function's `timeout`, else 30 s) or when its connection closes; pass it to `fetch` or a database driver. See [RPC admission](docs/rpc-admission.md) |
+| `ctx.abortSignal` | This call's `AbortSignal`: fires within 250 ms after its budget (the function's `timeout`, else 30 s, on both ends) or when its connection closes, never after the call settled; pass it to `fetch` or a database driver. See [RPC admission](docs/rpc-admission.md) |
 | `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
 | `ctx.signal` | `(userId, event, data)` - point-to-point message (upload handlers use `ctx.abortSignal` for cancellation; their legacy `ctx.signal` is a deprecated cancellation alias - see [Streaming uploads](#streaming-uploads)) |
@@ -4922,7 +4922,7 @@ Each WebSocket connection has a send buffer limit (default 1MB, configurable via
 
 ### Batch and queue limits
 
-A single `batch()` call is capped at 50 RPC calls - the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods. Each worker runs at most 32 calls per connection, 256 per function and 1024 in total, queues 256 more, and refuses the rest at once with `OVERLOADED`; tune it with `realtime({ rpc })`, and read [RPC admission](docs/rpc-admission.md) for the queue, deadlines and `ctx.abortSignal`.
+A single `batch()` call is capped at 50 RPC calls - the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods. Each worker runs at most 32 calls per connection, 256 per function and 1024 in total, queues 32 per connection and 256 in all, and refuses the rest at once with `OVERLOADED`; tune it with `realtime({ rpc })`, and read [RPC admission](docs/rpc-admission.md) for the queue, deadlines and `ctx.abortSignal`.
 
 ---
 
