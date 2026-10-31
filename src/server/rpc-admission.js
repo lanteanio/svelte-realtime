@@ -272,14 +272,17 @@ function _newConn() {
  * this, so a call reads its connection's record with one property load; a
  * connection opened without the hook gets its slot on its first call. The
  * slot is not enumerable, so a copy of the user data does not carry it.
+ * `fresh` replaces a record a previous socket left on the same object, for a
+ * test harness that hands one user object to a new connection.
  * @param {any} user - the socket's user data
  * @param {object} [ws]
+ * @param {boolean} [fresh]
  * @returns {RpcConn}
  */
-export function _openRpcConnection(user, ws) {
+export function _openRpcConnection(user, ws, fresh = false) {
 	if (user !== null && typeof user === 'object') {
 		const own = Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION) ? user[RPC_CONNECTION] : undefined;
-		if (own !== undefined) return own;
+		if (own !== undefined && !fresh) return own;
 		const conn = _newConn();
 		if (Object.isExtensible(user)) {
 			Object.defineProperty(user, RPC_CONNECTION, { value: conn, writable: true, enumerable: false, configurable: true });
@@ -288,8 +291,9 @@ export function _openRpcConnection(user, ws) {
 		if (ws) _unslotted.set(ws, conn);
 		return conn;
 	}
+	if (fresh && ws) _unslotted.delete(ws);
 	if (!ws) return _newConn();
-	let conn = _unslotted.get(ws);
+	let conn = fresh ? undefined : _unslotted.get(ws);
 	if (conn === undefined) {
 		conn = _newConn();
 		_unslotted.set(ws, conn);

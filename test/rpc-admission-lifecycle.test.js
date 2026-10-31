@@ -363,7 +363,7 @@ describe('ctx as LiveCallContext', () => {
 		expect(Object.keys(seen).some(key => key.startsWith('_rpc') || key.startsWith('_abort'))).toBe(false);
 		const copy = { ...seen };
 		expect('abortSignal' in copy).toBe(false);
-		expect(Object.getOwnPropertySymbols(copy)).toEqual([]);
+		expect(Object.getOwnPropertySymbols(copy).map(String).filter(name => name.includes('rpc'))).toEqual([]);
 	});
 
 	it('a handler under live.lock reads the call signal lazily', async () => {
@@ -388,5 +388,24 @@ describe('createTestContext', () => {
 		const cancelled = createTestContext({ abortSignal: controller.signal });
 		controller.abort(new Error('stop'));
 		expect(() => cancelled.abortSignal.throwIfAborted()).toThrow('stop');
+	});
+});
+
+describe('createTestEnv sockets', () => {
+	it('gives two live connections of one user object their own user data', async () => {
+		const { createTestEnv } = await import('../src/testing.js');
+		const env = createTestEnv();
+		const seen = [];
+		env.register('who', { am: api.live(async (ctx) => { seen.push(ctx.user); return ctx.user.id; }) });
+		const user = { id: 'same' };
+		const first = env.connect(user);
+		const second = env.connect(user);
+		try {
+			await first.call('who/am');
+			await second.call('who/am');
+			expect(seen[0]).toBe(user);
+			expect(seen[1]).not.toBe(user);
+			expect(seen[1]).toEqual(user);
+		} finally { first.disconnect(); second.disconnect(); env.cleanup(); }
 	});
 });

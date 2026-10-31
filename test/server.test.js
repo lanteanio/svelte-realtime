@@ -12092,7 +12092,8 @@ describe('live.stream({ coalesceBy })', () => {
 		close(ws2, { platform });
 		platform.reset();
 
-		handleRpc(ws1, toArrayBuffer({ rpc: 'coal/close-pub', id: 'p2', args: [] }), platform);
+		// A closed socket sends nothing more; publish from a third one.
+		handleRpc(mockWs({ id: 'u3' }), toArrayBuffer({ rpc: 'coal/close-pub', id: 'p2', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
 		expect(platform.coalesced).toHaveLength(0);
@@ -13958,7 +13959,8 @@ describe('live.stream({ transform })', () => {
 
 		// Drop ws2; no subscribers left -> registry evicted, raw data flows
 		close(ws2, { platform });
-		handleRpc(ws1, toArrayBuffer({ rpc: 'tr/life-pub', id: 'p3', args: [] }), platform);
+		// A closed socket sends nothing more; publish from a third one.
+		handleRpc(mockWs({ id: 'u3' }), toArrayBuffer({ rpc: 'tr/life-pub', id: 'p3', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.published[0].data).toEqual({ id: 1, big: 'no' });
 	});

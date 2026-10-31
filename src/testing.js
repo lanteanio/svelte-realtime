@@ -330,6 +330,8 @@ function _seedRng(seed) {
  * @returns {TestEnv}
  */
 export function createTestEnv(options) {
+	/** User data objects a connected test socket holds. @type {Set<object>} */
+	const liveUserData = new Set();
 	const isDev = options?.dev ?? false;
 
 	/** @type {Map<string, Set<any>>} Subscribed sockets, independent of local stream listeners. */
@@ -501,10 +503,13 @@ export function createTestEnv(options) {
 	 * @returns {TestClient}
 	 */
 	function connect(upgradeData) {
-		// Every socket gets its own user data, copied from what upgrade
-		// returned, as the adapter does: two connections never share
-		// per-connection state.
-		const userData = _copyUpgradeData(upgradeData);
+		// Every live socket owns its user data, as with the adapter: an object
+		// another live connection holds is copied, so two connections never
+		// share per-connection state. A test keeps the object it passed when no
+		// other connection holds it, so it can change the identity in place.
+		const shared = upgradeData !== null && typeof upgradeData === 'object' && liveUserData.has(upgradeData);
+		const userData = shared ? _copyUpgradeData(upgradeData) : upgradeData;
+		if (userData !== null && typeof userData === 'object') liveUserData.add(userData);
 		const subscribedTopics = new Set();
 		/** @type {Map<string, { resolve: Function, reject: Function }>} */
 		const pendingCalls = new Map();
@@ -560,7 +565,9 @@ export function createTestEnv(options) {
 			_onSend: null,
 			_sendHandlers
 		};
-		_openRpcConnection(userData, ws);
+		// A new socket starts with its own admission state, also when the test
+		// hands it an object an earlier, closed connection used.
+		_openRpcConnection(userData, ws, true);
 
 		platform.connections++;
 		allConnections.push(ws);
@@ -798,6 +805,7 @@ export function createTestEnv(options) {
 
 		function disconnect() {
 			connected = false;
+			liveUserData.delete(userData);
 			platform.connections--;
 			for (const [id, entry] of pendingCalls) {
 				entry.reject(new LiveError('DISCONNECTED', 'WebSocket connection lost'));
@@ -824,6 +832,9 @@ export function createTestEnv(options) {
 		function reconnect() {
 			connected = true;
 			platform.connections++;
+			if (userData !== null && typeof userData === 'object') liveUserData.add(userData);
+			// A reconnect is a new socket: fresh admission state.
+			_openRpcConnection(userData, ws, true);
 		}
 
 		/**
