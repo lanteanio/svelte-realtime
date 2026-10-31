@@ -339,6 +339,66 @@ describe('a closed connection', () => {
 		await settle();
 	});
 
+	it('refuses a late call of a closed connection when the connection limit is disabled', async () => {
+		api.configureRpc({ perConnectionConcurrent: 0 });
+		let ran = 0;
+		api.__register('closed/unbounded', api.live(async () => { ran++; return 'ran'; }));
+		const platform = mockPlatform();
+		const ws = mockWs({ id: 'gone' });
+		api.handleRpc(ws, text('closed/unbounded', 'first'), platform);
+		await settle();
+		api.close(ws, { platform });
+		api.handleRpc(ws, text('closed/unbounded', 'late'), platform);
+		await settle();
+		expect(replies(platform).get('late')).toMatchObject({ ok: false, code: 'CONNECTION_CLOSED' });
+		expect(ran).toBe(1);
+	});
+
+	it('a new socket opened with user data a closed socket used starts fresh', async () => {
+		api.__register('closed/reused', api.live(async () => 'ran'));
+		const platform = mockPlatform();
+		const user = { id: 'same' };
+		const old = { ...mockWs({}), getUserData: () => user };
+		api.pushHooks.open(old, { platform });
+		api.handleRpc(old, text('closed/reused', 'a'), platform);
+		await settle();
+		api.close(old, { platform });
+		// A socket that got the same object, through the open hook...
+		const reopened = { ...mockWs({}), getUserData: () => user };
+		api.pushHooks.open(reopened, { platform });
+		api.handleRpc(reopened, text('closed/reused', 'b'), platform);
+		await settle();
+		expect(replies(platform).get('b')).toMatchObject({ ok: true, data: 'ran' });
+		// ...and one that skipped it.
+		api.close(reopened, { platform });
+		const lazy = { ...mockWs({}), getUserData: () => user };
+		api.handleRpc(lazy, text('closed/reused', 'c'), platform);
+		await settle();
+		expect(replies(platform).get('c')).toMatchObject({ ok: true, data: 'ran' });
+	});
+
+	it('never uses a slot inherited through the prototype', async () => {
+		api.configureRpc({ perConnectionConcurrent: 1, maxQueue: 0 });
+		const { handler, open } = gated();
+		api.__register('closed/proto', handler);
+		const platform = mockPlatform();
+		const parent = { id: 'p' };
+		const first = { ...mockWs({}), getUserData: () => parent };
+		api.pushHooks.open(first, { platform });
+		api.handleRpc(first, text('closed/proto', 'a'), platform);
+		await settle();
+		const child = Object.create(parent);
+		const second = { ...mockWs({}), getUserData: () => child };
+		api.pushHooks.open(second, { platform });
+		api.handleRpc(second, text('closed/proto', 'b'), platform);
+		await settle();
+		// Its own record, so the first socket's full connection does not bind it.
+		expect(replies(platform).get('b')).toBeUndefined();
+		expect(admission._rpcAdmissionSnapshot().active).toBe(2);
+		open();
+		await settle();
+	});
+
 	it('refuses a late call of a closed connection on an idle worker too', async () => {
 		api.__register('closed/idle', api.live(async () => 'ran'));
 		const platform = mockPlatform();
@@ -364,6 +424,20 @@ describe('ctx as LiveCallContext', () => {
 		const copy = { ...seen };
 		expect('abortSignal' in copy).toBe(false);
 		expect(Object.getOwnPropertySymbols(copy).map(String).filter(name => name.includes('rpc'))).toEqual([]);
+	});
+
+	it('a handler under live.lock that never reads the signal allocates none', async () => {
+		let release;
+		const gate = new Promise(resolve => { release = resolve; });
+		api.__register('shape/lockedquiet', api.live.lock({ key: () => 'quiet', maxExecutionMs: 1000 }, async () => { await gate; return 1; }));
+		const platform = mockPlatform();
+		api.handleRpc(mockWs({ id: 'u' }), text('shape/lockedquiet', 'q'), platform);
+		await settle();
+		expect(admission._rpcAdmissionSnapshot()).toMatchObject({ active: 1, openSignals: 0 });
+		release();
+		await settle();
+		await settle();
+		expect(replies(platform).get('q')).toMatchObject({ ok: true });
 	});
 
 	it('a handler under live.lock reads the call signal lazily', async () => {
@@ -403,8 +477,11 @@ describe('createTestEnv sockets', () => {
 		try {
 			await first.call('who/am');
 			await second.call('who/am');
-			expect(seen[0]).toBe(user);
-			expect(seen[1]).not.toBe(user);
+			// Each socket has its own copy, as uWS gives every socket its own.
+			expect(seen[0]).toBe(first.userData);
+			expect(seen[1]).toBe(second.userData);
+			expect(seen[0]).not.toBe(seen[1]);
+			expect(seen[0]).not.toBe(user);
 			expect(seen[1]).toEqual(user);
 		} finally { first.disconnect(); second.disconnect(); env.cleanup(); }
 	});

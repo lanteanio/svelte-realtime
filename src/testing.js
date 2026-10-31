@@ -330,8 +330,6 @@ function _seedRng(seed) {
  * @returns {TestEnv}
  */
 export function createTestEnv(options) {
-	/** User data objects a connected test socket holds. @type {Set<object>} */
-	const liveUserData = new Set();
 	const isDev = options?.dev ?? false;
 
 	/** @type {Map<string, Set<any>>} Subscribed sockets, independent of local stream listeners. */
@@ -503,13 +501,10 @@ export function createTestEnv(options) {
 	 * @returns {TestClient}
 	 */
 	function connect(upgradeData) {
-		// Every live socket owns its user data, as with the adapter: an object
-		// another live connection holds is copied, so two connections never
-		// share per-connection state. A test keeps the object it passed when no
-		// other connection holds it, so it can change the identity in place.
-		const shared = upgradeData !== null && typeof upgradeData === 'object' && liveUserData.has(upgradeData);
-		const userData = shared ? _copyUpgradeData(upgradeData) : upgradeData;
-		if (userData !== null && typeof userData === 'object') liveUserData.add(userData);
+		// Every socket gets its own user data, copied from what upgrade
+		// returned, as uWS and the adapter do. A test changes the connection's
+		// identity in place through `client.userData`.
+		const userData = _copyUpgradeData(upgradeData);
 		const subscribedTopics = new Set();
 		/** @type {Map<string, { resolve: Function, reject: Function }>} */
 		const pendingCalls = new Map();
@@ -805,7 +800,6 @@ export function createTestEnv(options) {
 
 		function disconnect() {
 			connected = false;
-			liveUserData.delete(userData);
 			platform.connections--;
 			for (const [id, entry] of pendingCalls) {
 				entry.reject(new LiveError('DISCONNECTED', 'WebSocket connection lost'));
@@ -832,7 +826,6 @@ export function createTestEnv(options) {
 		function reconnect() {
 			connected = true;
 			platform.connections++;
-			if (userData !== null && typeof userData === 'object') liveUserData.add(userData);
 			// A reconnect is a new socket: fresh admission state.
 			_openRpcConnection(userData, ws, true);
 		}
@@ -857,7 +850,7 @@ export function createTestEnv(options) {
 			return () => { ws._rawListeners.delete(listener); };
 		}
 
-		return { call, subscribe, binary, sendRaw, onMessage, disconnect, reconnect };
+		return { call, subscribe, binary, sendRaw, onMessage, disconnect, reconnect, userData };
 	}
 
 	/**
@@ -914,6 +907,7 @@ export function createTestEnv(options) {
  * @property {(data: ArrayBuffer) => void} sendRaw
  * @property {(listener: (message: { topic: string, event: string, data: any }) => void) => () => void} onMessage
  * @property {() => void} disconnect
+ * @property {any} userData - this socket's own user data; change it to change the connection's identity
  * @property {() => void} reconnect
  */
 

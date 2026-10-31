@@ -200,6 +200,12 @@ export interface TestChaos {
  */
 export interface TestClient {
 	/**
+	 * This socket's own user data, copied from what was passed to
+	 * `connect()` as the adapter copies upgrade data per socket. Change it to
+	 * change the connection's identity in place.
+	 */
+	userData: any;
+	/**
 	 * Call a live() function.
 	 * @param path - RPC path (e.g. 'chat/sendMessage')
 	 * @param args - Arguments to pass

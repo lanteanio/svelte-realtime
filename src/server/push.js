@@ -233,7 +233,8 @@ export const pushHooks = {
 			throw new Error('[svelte-realtime] pushHooks.open: missing platform on hook context');
 		}
 		// Declare the connection's RPC admission slot before any call reads it.
-		_openRpcConnection(typeof ws.getUserData === 'function' ? ws.getUserData() : undefined, ws);
+		// A socket at open is new, so it never inherits a record.
+		_openRpcConnection(typeof ws.getUserData === 'function' ? ws.getUserData() : undefined, ws, true);
 		const platform = ctx.platform;
 
 		// Resolve and validate every identity before changing either registry. A

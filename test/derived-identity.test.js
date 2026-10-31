@@ -188,8 +188,8 @@ describe('dynamic derived identity', () => {
 	});
 	it('revokes a connection that changes identity before another session publishes', async () => {
 		const { publish } = setup((ctx) => ctx.user.role);
-		const user = { id: 'same', role: 'ADMIN_ONLY' };
-		const revoked = await join(user);
+		const revoked = await join({ id: 'same', role: 'ADMIN_ONLY' });
+		const user = revoked.client.userData;
 		const notices = [];
 		const send = env.platform.send;
 		env.platform.send = (ws, topic, event, data) => { if (event === '__topic_error') notices.push(data); return send(ws, topic, event, data); };
@@ -206,8 +206,8 @@ describe('dynamic derived identity', () => {
 		let delayed = false;
 		const { publish } = setup((ctx) => delayed ? new Promise(r => { resolve = r; }) : ctx.user.role,
 			{ scopeKey: (ctx) => ctx.user.role });
-		const user = { id: 'same', role: 'ADMIN_ONLY' };
-		const revoked = await join(user);
+		const revoked = await join({ id: 'same', role: 'ADMIN_ONLY' });
+		const user = revoked.client.userData;
 		delayed = true; publish();
 		user.role = 'MEMBER';
 		resolve('ADMIN_ONLY'); await flush();
@@ -225,7 +225,7 @@ describe('dynamic derived identity', () => {
 
 	it('allows a revoked connection to resubscribe under its current scope', async () => {
 		const { publish } = setup((ctx) => ctx.user.id);
-		const user = { id: 'one' };
+		let user = { id: 'one' };
 		// The adapter's programmatic revoke fires the public lifecycle hook too.
 		env.platform.unsubscribe = (ws, topic) => {
 			ws.unsubscribe(topic);
@@ -233,6 +233,7 @@ describe('dynamic derived identity', () => {
 			return true;
 		};
 		const { client, stream } = await join(user);
+		user = client.userData;
 		user.id = 'two'; publish(); await flush();
 		const current = client.subscribe('stats/derived');
 		await current.waitFor(() => true);
@@ -252,9 +253,10 @@ describe('dynamic derived identity', () => {
 
 	it('rejects a scope change while the initial snapshot is loading', async () => {
 		let finish;
-		const user = { id: 'admin' };
 		setup(() => new Promise(resolve => { finish = resolve; }));
-		const stream = env.connect(user).subscribe('stats/derived');
+		const admin = env.connect({ id: 'admin' });
+		const user = admin.userData;
+		const stream = admin.subscribe('stats/derived');
 		await flush();
 		user.id = 'member'; finish('ADMIN_ONLY'); await flush();
 		expect(stream.value).toBeUndefined();
@@ -266,8 +268,9 @@ describe('dynamic derived identity', () => {
 		let computed = false;
 		setup(() => { computed = true; return 'ADMIN_ONLY'; });
 		env.platform.subscribe = (ws, topic) => new Promise(resolve => { admit = () => { ws.subscribe(topic); resolve(null); }; });
-		const user = { id: 'admin' };
-		const stream = env.connect(user).subscribe('stats/derived');
+		const admin = env.connect({ id: 'admin' });
+		const user = admin.userData;
+		const stream = admin.subscribe('stats/derived');
 		await flush();
 		user.id = 'member'; admit(); await flush();
 		expect(computed).toBe(false);
@@ -313,8 +316,9 @@ describe('dynamic derived identity', () => {
 			rpcCount: { inc() {} }, rpcDelivery: { inc() {} }, rpcErrors: { inc() {} }, rpcDuration: { observe() {} }
 		};
 		try {
-			const user = { id: 'admin' };
-			const stream = env.connect(user).subscribe('stats/derived');
+			const admin = env.connect({ id: 'admin' });
+			const user = admin.userData;
+			const stream = admin.subscribe('stats/derived');
 			await flush(); expect(subscriptions).toBe(1);
 			user.id = 'member'; publish(); await flush();
 			expect(subscriptions).toBe(0);
@@ -331,8 +335,8 @@ describe('dynamic derived identity', () => {
 			if (first) { first = false; return new Promise((resolve, reject) => { settle = outcome === 'resolve' ? () => resolve('OLD') : () => reject(new Error('Old loader failed')); }); }
 			return ctx.user.id;
 		});
-		const user = { id: 'one' };
-		const client = env.connect(user);
+		const client = env.connect({ id: 'one' });
+		const user = client.userData;
 		const old = client.subscribe('stats/derived'); await flush();
 		user.id = 'two'; publish(); await flush();
 		user.id = 'one';

@@ -137,7 +137,8 @@ export function _validateRouteConcurrent(value, where) {
 
 /**
  * @typedef {object} RpcConn
- * @property {number} active - calls running, plus _CLOSED_OFFSET once closed
+ * @property {number} active - calls running; Infinity once closed
+ * @property {object | undefined} ws - the socket the record belongs to
  * @property {number} queued - calls waiting in the queue
  * @property {boolean} closed
  * @property {Map<any, RpcCallSignal> | null} calls - running calls whose handler read its signal, by ctx
@@ -177,8 +178,11 @@ const _routes = new Map();
  * this module agree on it.
  */
 export const RPC_CONNECTION = Symbol.for('svelte-realtime.rpc.connection');
-/** Added to a closed connection's running count, so no call of it fits any cap. */
-const _CLOSED_OFFSET = 2 ** 40;
+/**
+ * A closed connection's running count. Every cap, an unbounded one included,
+ * is a finite integer, so no call of it fits; decrements leave it unchanged.
+ */
+const _CLOSED_COUNT = Infinity;
 /** Records of sockets whose user data cannot carry the slot (not an extensible object). @type {WeakMap<object, RpcConn>} */
 const _unslotted = new WeakMap();
 let _active = 0;
@@ -263,8 +267,9 @@ export function _rpcRoute(path, fn) {
 }
 
 /** @returns {RpcConn} */
-function _newConn() {
-	return { active: 0, queued: 0, closed: false, calls: null };
+/** @param {object} [ws] @returns {RpcConn} */
+function _newConn(ws) {
+	return { active: 0, queued: 0, closed: false, calls: null, ws };
 }
 
 /**
@@ -272,8 +277,9 @@ function _newConn() {
  * this, so a call reads its connection's record with one property load; a
  * connection opened without the hook gets its slot on its first call. The
  * slot is not enumerable, so a copy of the user data does not carry it.
- * `fresh` replaces a record a previous socket left on the same object, for a
- * test harness that hands one user object to a new connection.
+ * A record a closed socket left on the same object is replaced, and `fresh`
+ * replaces any record: the open hook passes it, since a socket at open is new.
+ * Only an own slot counts; one inherited through the prototype is never used.
  * @param {any} user - the socket's user data
  * @param {object} [ws]
  * @param {boolean} [fresh]
@@ -282,8 +288,8 @@ function _newConn() {
 export function _openRpcConnection(user, ws, fresh = false) {
 	if (user !== null && typeof user === 'object') {
 		const own = Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION) ? user[RPC_CONNECTION] : undefined;
-		if (own !== undefined && !fresh) return own;
-		const conn = _newConn();
+		if (own !== undefined && !fresh && !own.closed) return own;
+		const conn = _newConn(ws);
 		if (Object.isExtensible(user)) {
 			Object.defineProperty(user, RPC_CONNECTION, { value: conn, writable: true, enumerable: false, configurable: true });
 			return conn;
@@ -295,7 +301,7 @@ export function _openRpcConnection(user, ws, fresh = false) {
 	if (!ws) return _newConn();
 	let conn = fresh ? undefined : _unslotted.get(ws);
 	if (conn === undefined) {
-		conn = _newConn();
+		conn = _newConn(ws);
 		_unslotted.set(ws, conn);
 	}
 	return conn;
@@ -308,8 +314,7 @@ export function _openRpcConnection(user, ws, fresh = false) {
  * @returns {RpcConn}
  */
 function _connOf(user, ws) {
-	const slotted = user?.[RPC_CONNECTION];
-	if (slotted !== undefined) return slotted;
+	if (user !== null && typeof user === 'object' && Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION)) return user[RPC_CONNECTION];
 	return _unslotted.get(ws) || _openRpcConnection(user, ws);
 }
 
@@ -337,10 +342,11 @@ function _blocked(conn, route) {
  * @param {object} ws
  * @param {RpcRoute} route
  * @param {number} arrived - `rpcTick` when the call arrived
+ * @param {RpcConn} [opened] - a record just opened for this socket
  * @returns {RpcConn | RpcRejection | Promise<RpcConn | RpcRejection>}
  */
-export function _admitRpc(user, ws, route, arrived) {
-	let conn = user?.[RPC_CONNECTION];
+export function _admitRpc(user, ws, route, arrived, opened) {
+	let conn = opened || user?.[RPC_CONNECTION];
 	if (conn === undefined) conn = _connOf(user, ws);
 	if (conn.active < _connCap && route.active < route.cap && _active < _globalCap) {
 		conn.active++;
@@ -349,7 +355,12 @@ export function _admitRpc(user, ws, route, arrived) {
 		if (_ticker === null) _startTicker();
 		return conn;
 	}
-	if (conn.closed) return _CLOSED_WAITING;
+	if (conn.closed) {
+		// A late call of the socket that closed is refused. A record a closed
+		// socket left on user data now held by another socket is replaced.
+		if (conn.ws === ws) return _CLOSED_WAITING;
+		return _admitRpc(user, ws, route, arrived, _openRpcConnection(user, ws, true));
+	}
 	const scope = /** @type {'connection' | 'route' | 'global'} */ (_blocked(conn, route));
 	if (_config.maxQueue === 0) return _LIMITED[scope];
 	if (conn.queued >= _connQueueCap) return _CONNECTION_QUEUE_FULL;
@@ -459,7 +470,7 @@ export function _closeRpcConnection(user, ws) {
 	const conn = _connOf(user, ws);
 	if (conn.closed) return;
 	conn.closed = true;
-	conn.active += _CLOSED_OFFSET;
+	conn.active = _CLOSED_COUNT;
 	for (let i = _queue.length - 1; i >= 0; i--) {
 		if (_queue[i].conn === conn) _dropQueued(i, _CLOSED_WAITING);
 	}
