@@ -279,7 +279,10 @@ function _newConn(ws) {
  * slot is not enumerable, so a copy of the user data does not carry it.
  * A record a closed socket left on the same object is replaced, and `fresh`
  * replaces any record: the open hook passes it, since a socket at open is new.
- * Only an own slot counts; one inherited through the prototype is never used.
+ * Only an own slot counts here. The fast path reads the slot without that
+ * check, so user data built on another live socket's user data (through its
+ * prototype) is not supported for a socket that skips the open hook: uWS and
+ * the adapter give every socket its own copy.
  * @param {any} user - the socket's user data
  * @param {object} [ws]
  * @param {boolean} [fresh]
@@ -468,7 +471,8 @@ function _dropQueued(index, rejection) {
  */
 export function _closeRpcConnection(user, ws) {
 	const conn = _connOf(user, ws);
-	if (conn.closed) return;
+	// A record another socket opened on the same user data is not this one's.
+	if (conn.closed || (conn.ws !== undefined && conn.ws !== ws)) return;
 	conn.closed = true;
 	conn.active = _CLOSED_COUNT;
 	for (let i = _queue.length - 1; i >= 0; i--) {

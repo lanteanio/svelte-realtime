@@ -97,6 +97,8 @@ Work that is not a wire call gets a `ctx.abortSignal` that never fires, so code 
 
 `ctx` is an instance of the internal `LiveCallContext` class, not a plain object, and `abortSignal` is an accessor on it. Pass `ctx` itself to helpers. Spreading it (`{ ...ctx }`) copies only its own data fields, not `abortSignal` or any accessor added later; a copy that needs the signal sets it explicitly. `live.lock` hands its handler such a copy with the signal carried over.
 
+Admission keeps each connection's record on its socket's user data, which uWS and the adapter give every socket as its own copy. A user data object built on another live socket's user data (through its prototype, with `Object.create`) is not supported: a socket that skips the open hook would share that socket's record.
+
 When a connection closes, its queued calls are dropped (they end as `CONNECTION_CLOSED`, which nobody receives) and its running calls see their signal fire. Running calls keep their places until their handlers settle.
 
 ## Client cap

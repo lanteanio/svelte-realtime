@@ -377,10 +377,29 @@ describe('a closed connection', () => {
 		expect(replies(platform).get('c')).toMatchObject({ ok: true, data: 'ran' });
 	});
 
-	it('never uses a slot inherited through the prototype', async () => {
+	it('closing one of two live sockets that share user data leaves the other admitted', async () => {
+		api.__register('closed/shared', api.live(async () => 'ran'));
+		const platform = mockPlatform();
+		const user = { id: 'same' };
+		const a = { ...mockWs({}), getUserData: () => user };
+		const b = { ...mockWs({}), getUserData: () => user };
+		api.pushHooks.open(a, { platform });
+		api.pushHooks.open(b, { platform });
+		api.close(a, { platform });
+		api.handleRpc(b, text('closed/shared', 'b'), platform);
+		await settle();
+		expect(replies(platform).get('b')).toMatchObject({ ok: true, data: 'ran' });
+	});
+
+	it('shares a record through the prototype when a socket skips the open hook (unsupported)', async () => {
+		// uWS and the adapter give every socket its own user data; one built on
+		// another live socket's user data with Object.create is not supported.
+		// Through the open hook it gets its own slot; without it, the fast path
+		// reads the inherited one, which this test pins.
 		api.configureRpc({ perConnectionConcurrent: 1, maxQueue: 0 });
-		const { handler, open } = gated();
-		api.__register('closed/proto', handler);
+		let release;
+		const gate = new Promise(resolve => { release = resolve; });
+		api.__register('closed/proto', api.live(async () => { await gate; return 1; }));
 		const platform = mockPlatform();
 		const parent = { id: 'p' };
 		const first = { ...mockWs({}), getUserData: () => parent };
@@ -389,13 +408,10 @@ describe('a closed connection', () => {
 		await settle();
 		const child = Object.create(parent);
 		const second = { ...mockWs({}), getUserData: () => child };
-		api.pushHooks.open(second, { platform });
 		api.handleRpc(second, text('closed/proto', 'b'), platform);
 		await settle();
-		// Its own record, so the first socket's full connection does not bind it.
-		expect(replies(platform).get('b')).toBeUndefined();
-		expect(admission._rpcAdmissionSnapshot().active).toBe(2);
-		open();
+		expect(replies(platform).get('b')).toMatchObject({ ok: false, code: 'OVERLOADED', scope: 'connection' });
+		release();
 		await settle();
 	});
 
