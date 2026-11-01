@@ -28,10 +28,10 @@ export function _serverEnvironment(server) {
  */
 export function _loadServerModule(server, id) {
 	const environment = _serverEnvironment(server);
-	if (!environment) return server.ssrLoadModule(id);
-	// Runner entry points are internalized. Import the runtime as a dependency
-	// so HMR clears the same instance that the live registry and hooks use.
-	return environment.runner.import(id === 'svelte-realtime/server' ? SERVER_PUBLIC_ID : id);
+	// Both Vite loaders internalize entry points. Import the runtime as a
+	// dependency so HMR clears the same instance the registry and hooks use.
+	const entry = id === 'svelte-realtime/server' ? SERVER_PUBLIC_ID : id;
+	return environment ? environment.runner.import(entry) : server.ssrLoadModule(entry);
 }
 
 /**

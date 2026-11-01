@@ -44,9 +44,11 @@ whose installed copy differs from the checkout. All fixtures use
 svelte-adapter-uws 0.6.0-next.96 from the registry.
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
-Readiness requires the fixture's `/readiness` route to return the spawned
+Readiness requires the fixture's `/readiness.json` route to return the spawned
 process ID and a fresh per-run fixture token; an unrelated listener cannot
-satisfy startup. The route loads no live module and no page.
+satisfy startup. The route loads no live module and no page; its JSON suffix
+keeps Vite from treating the preflight as a client module and ending its
+dependency crawl before the first navigation.
 Production runs remove old build output and rebuild before starting the generated server.
 Development runs force dependency optimization, then
 open a WebSocket and execute the first RPC before any page loads. The browser

@@ -2781,8 +2781,8 @@ describe('handleHotUpdate (server-side HMR)', () => {
 		const modulesById = new Map();
 		const modulesByFile = new Map();
 		const ssrModules = new Map();
-		// Default: svelte-realtime/server returns HMR stubs
-		ssrModules.set('svelte-realtime/server', {
+		// The server re-export entry returns HMR stubs
+		ssrModules.set('/@svelte-realtime-server', {
 			_prepareHmr: () => ({}),
 			_restoreHmr: () => {},
 		});
@@ -2863,7 +2863,7 @@ export const send = live(async (ctx, text) => {});
 
 		let prepared = false;
 		let restored = false;
-		server.ssrModules.set('svelte-realtime/server', {
+		server.ssrModules.set('/@svelte-realtime-server', {
 			_prepareHmr: () => { prepared = true; return {}; },
 			_restoreHmr: () => { restored = true; },
 		});
@@ -2897,7 +2897,7 @@ export const send = live(async (ctx, text) => {});
 			},
 			async ssrLoadModule(id) {
 				loadCount++;
-				// First call: svelte-realtime/server (succeeds)
+				// First call: the server re-export entry (succeeds)
 				if (loadCount === 1) {
 					return {
 						_prepareHmr: () => snap,

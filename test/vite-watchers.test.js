@@ -30,12 +30,19 @@ function fixture(options = {}) {
 			getModulesByFile: vi.fn(() => new Set()),
 			invalidateModule: vi.fn()
 		},
-		ssrLoadModule: vi.fn(async id => id === 'svelte-realtime/server' ? runtime : {}),
+		ssrLoadModule: vi.fn(async id => id === '/@svelte-realtime-server' ? runtime : {}),
 		warmupRequest: vi.fn(async () => {})
 	};
 	plugin.configureServer(server);
 	return { plugin, server, runtime, start: () => server.httpServer.listeners('listening')[0]() };
 }
+
+it('loads the server registry without starting a client dependency crawl before navigation', async () => {
+	const { server, start } = fixture();
+	await start();
+	expect(server.ssrLoadModule).toHaveBeenCalledWith('/@svelte-realtime-registry');
+	expect(server.warmupRequest).not.toHaveBeenCalled();
+});
 
 it.each(['add', 'unlink'])('ignores foreign and adjacent live directories on %s', async event => {
 	const { server, start } = fixture();
@@ -73,7 +80,7 @@ it('serializes add, unlink and ordinary edits through the same registry queue', 
 	const held = new Promise(resolve => { release = resolve; });
 	let imports = 0;
 	server.ssrLoadModule.mockImplementation(async id => {
-		if (id === 'svelte-realtime/server') return runtime;
+		if (id === '/@svelte-realtime-server') return runtime;
 		// Count registry imports; the edited chat.js also loads after its registry.
 		if (id !== '/@svelte-realtime-registry') return {};
 		if (++imports === 1) await held;
@@ -97,7 +104,7 @@ it('waits for cold registry initialization before handling file additions', asyn
 	const held = new Promise(resolve => { release = resolve; });
 	let imports = 0;
 	server.ssrLoadModule.mockImplementation(async id => {
-		if (id === 'svelte-realtime/server') return runtime;
+		if (id === '/@svelte-realtime-server') return runtime;
 		if (++imports === 1) await held;
 		return {};
 	});
@@ -136,7 +143,7 @@ it('awaits fallback registration before a queued reload can clear it', async () 
 	const register = vi.fn();
 	runtime.__register = register;
 	server.ssrLoadModule.mockImplementation(async id => {
-		if (id === 'svelte-realtime/server') return runtime;
+		if (id === '/@svelte-realtime-server') return runtime;
 		if (id === '/@svelte-realtime-registry' && ++registries === 1) throw new Error('Cold registry load failed');
 		if (id === join(liveDir, 'chat.js')) { await held; return { send: { __isLive: true } }; }
 		return {};

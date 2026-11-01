@@ -4,7 +4,7 @@ import { resolve, relative, sep } from 'path';
 import { VIRTUAL_PREFIX, REGISTRY_ID, REGISTRY_PUBLIC_ID, DEVTOOLS_ID, DEVTOOLS_PUBLIC_ID, SERVER_ID, SERVER_PUBLIC_ID } from './constants.js';
 import { _fileCache, _codeCache, _warnedExports, _readCached } from './source-cache.js';
 import { _writeTypeDeclarations } from './codegen-types.js';
-import { _checkHooksFile, _buildTopicsRegistry, _generateRegistry, _resolveFile, _findLiveFiles } from './codegen-registry.js';
+import { _checkHooksFile, _buildTopicsRegistry, _generateRegistry, _resolveFile } from './codegen-registry.js';
 import { _generateSsrStubs } from './codegen-ssr.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _loadRegistryDirect, _hmrReloadRegistry, _loadServerModule, _serverModuleGraph } from './hmr.js';
@@ -299,6 +299,24 @@ export default function svelteRealtime(options) {
 			// The root SvelteKit and svelte-adapter-uws use: the configured one
 			// or the working directory, as the user spelled it.
 			configRoot = config.root ? resolve(config.root) : process.cwd();
+			if (command === 'serve') {
+				// Keep the server's mutable registry on one Node instance. SSR
+				// optimization can change the version query of unbundled package
+				// files, leaving old hooks attached to a different runtime.
+				config.ssr ??= {};
+				if (config.ssr.external !== true) {
+					config.ssr.external = [...new Set([...(config.ssr.external ?? []), 'svelte-realtime/server'])];
+				}
+				// The bare package exports the same server entry. Route it through
+				// its re-export module without externalizing client rune subpaths.
+				// User aliases retain priority, including custom server replacements.
+				config.resolve ??= {};
+				const aliases = config.resolve.alias ?? [];
+				config.resolve.alias = [
+					...(Array.isArray(aliases) ? aliases : Object.entries(aliases).map(([find, replacement]) => ({ find, replacement }))),
+					{ find: /^svelte-realtime$/, replacement: SERVER_PUBLIC_ID }
+				];
+			}
 			// During SSR build, inject the registry as an additional input
 			if (command === 'build' && config.build?.ssr) {
 				config.build.rollupOptions ??= {};
@@ -364,11 +382,9 @@ export default function svelteRealtime(options) {
 						await _loadRegistryDirect(server, liveDir, dir);
 					}
 
-					// Pre-warm virtual modules to eliminate cold-start waterfall.
-					for (const file of _findLiveFiles(liveDir)) {
-						const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-						server.warmupRequest(VIRTUAL_PREFIX + rel).catch(() => {});
-					}
+					// Client warmup here ends Vite's initial dependency crawl before
+					// the first page contributes its imports. Let that page start the
+					// crawl; configResolved already includes generated client deps.
 				}).catch(reportRegistryFailure);
 				// A live module whose top level never settles would hold every
 				// request forever, so the hold ends after a bound with one warning.

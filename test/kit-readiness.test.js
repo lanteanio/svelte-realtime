@@ -53,13 +53,13 @@ describe('Kit fixture readiness ownership', () => {
 			} finally { await server.close(); }
 		});
 	});
-	it('accepts the matching child and per-run fixture identity over HTTP', async () => {
+	it('accepts the matching child through a JSON endpoint outside the client module crawl', async () => {
 		await pendingChild(async child => {
 			const token = randomUUID();
-			const server = await identityServer(req => req.url === '/readiness' ? { pid: child.pid, token } : null);
+			const server = await identityServer(req => req.url === '/readiness.json' ? { pid: child.pid, token } : null);
 			try {
 				await waitForFixture({ child, origin: server.origin, token, timeoutMs: 1000 });
-				expect(server.requests).toEqual(['/readiness']);
+				expect(server.requests).toEqual(['/readiness.json']);
 			} finally { await server.close(); }
 		});
 	});
@@ -80,10 +80,10 @@ describe('Kit fixture readiness ownership', () => {
 			await once(check, 'listening');
 			await new Promise(resolve => setTimeout(resolve, 200));
 			await new Promise(resolve => check.close(resolve));
-			const server = await identityServer(req => req.url === '/readiness' ? { pid: child.pid, token } : null, port);
+			const server = await identityServer(req => req.url === '/readiness.json' ? { pid: child.pid, token } : null, port);
 			try {
 				await waiting;
-				expect(server.requests.at(-1)).toBe('/readiness');
+				expect(server.requests.at(-1)).toBe('/readiness.json');
 			} finally { await server.close(); }
 		});
 	});

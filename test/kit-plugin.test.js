@@ -97,6 +97,33 @@ describe('SvelteKit build environments', () => {
 	});
 });
 
+describe('development server runtime configuration', () => {
+	it.each([
+		{ 'svelte-realtime': '/custom-server.js' },
+		[{ find: /^svelte-realtime$/, replacement: '/custom-server.js' }]
+	])('preserves user aliases and external entries while isolating only the server entry', alias => {
+		const p = plugin();
+		const config = { resolve: { alias }, ssr: { external: ['custom', 'svelte-realtime/server'], noExternal: ['svelte-realtime'] } };
+		p.config(config, { command: 'serve' });
+		expect(config.ssr.external).toEqual(['custom', 'svelte-realtime/server']);
+		expect(config.ssr.noExternal).toEqual(['svelte-realtime']);
+		expect(config.resolve.alias[0].replacement).toBe('/custom-server.js');
+		const fallback = config.resolve.alias.at(-1);
+		expect(fallback.find.test('svelte-realtime')).toBe(true);
+		expect(fallback.find.test('svelte-realtime/multiplayer')).toBe(false);
+		expect(fallback.replacement).toBe('/@svelte-realtime-server');
+	});
+	it('retains an all-external SSR configuration and leaves builds unchanged', () => {
+		const p = plugin();
+		const dev = { ssr: { external: true } };
+		p.config(dev, { command: 'serve' });
+		expect(dev.ssr.external).toBe(true);
+		const build = {};
+		p.config(build, { command: 'build' });
+		expect(build).toEqual({});
+	});
+});
+
 describe('SvelteKit development module loading', () => {
 	it.each(['wrapped', 'none'])('uses the Kit 3 graph with a %s adapter configuration', async adapterMode => {
 		const p = plugin();
@@ -125,7 +152,7 @@ describe('SvelteKit development module loading', () => {
 		p.configureServer(s);
 		await s.listeners.listening();
 		await p.handleHotUpdate({ file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s });
-		expect(s.ssrLoadModule).toHaveBeenCalledWith('svelte-realtime/server');
+		expect(s.ssrLoadModule).toHaveBeenCalledWith('/@svelte-realtime-server');
 		expect(s.environments.ssr.runner.import).not.toHaveBeenCalled();
 	});
 	for (const modern of [false, true]) {
@@ -223,7 +250,7 @@ describe('SvelteKit development module loading', () => {
 			expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.registry);
 			expect(s.runtime._prepareHmr).toHaveBeenCalledExactlyOnceWith();
 			// The changed module loads after the registry, so a broken save fails the reload.
-			expect(s.load.mock.calls.map(call => call[0])).toEqual([modern ? '/@svelte-realtime-server' : 'svelte-realtime/server', '/@svelte-realtime-registry', join(root, 'src/live/count.js').replaceAll('\\', '/')]);
+			expect(s.load.mock.calls.map(call => call[0])).toEqual(['/@svelte-realtime-server', '/@svelte-realtime-registry', join(root, 'src/live/count.js').replaceAll('\\', '/')]);
 			if (modern) expect(s.ssrLoadModule).not.toHaveBeenCalled();
 		});
 	}
@@ -491,7 +518,7 @@ describe('repeated live module updates', () => {
 		let release;
 		const gate = new Promise(resolve => { release = resolve; });
 		s.load.mockImplementation(async id => {
-			if (id === 'svelte-realtime/server') return s.runtime;
+			if (id === '/@svelte-realtime-server') return s.runtime;
 			await gate;
 			return {};
 		});
@@ -534,7 +561,7 @@ describe('repeated live module updates', () => {
 		let release;
 		const gate = new Promise(resolve => { release = resolve; });
 		s.load.mockImplementation(async id => {
-			if (id === 'svelte-realtime/server') return s.runtime;
+			if (id === '/@svelte-realtime-server') return s.runtime;
 			await gate;
 			return {};
 		});
@@ -557,7 +584,7 @@ describe('repeated live module updates', () => {
 		const s = server(false);
 		const gates = [];
 		s.load.mockImplementation(async id => {
-			if (id === 'svelte-realtime/server') return s.runtime;
+			if (id === '/@svelte-realtime-server') return s.runtime;
 			// Only the registry import is held; the changed module loads at once.
 			if (id !== '/@svelte-realtime-registry') return {};
 			await new Promise(resolve => gates.push(resolve));
