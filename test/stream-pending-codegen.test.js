@@ -49,7 +49,7 @@ export const room = live.stream((ctx, id) => 'room:' + id, async () => []);
 		const code = _generateSsrStubs(fixture, 'pending');
 		const executable = code.split('\n').filter(line => !/^(import |export )/.test(line)).join('\n');
 		const timer = vi.spyOn(globalThis, 'setTimeout');
-		const [items, room, named] = new Function('readable', executable + '\nreturn [_items, _room, __pending];')(readable);
+		const [items, room, named] = new Function('svelteReadable', executable + '\nreturn [_items, _room, __pending];')(readable);
 		for (const store of [items, named, room('a'), items.hydrate([]), room('a').hydrate([])]) {
 			expect(get(store.pending)).toBe(false);
 		}

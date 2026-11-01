@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildManifest, classifyBlock, inventoryMarkdown, packageImportProblems, memberSurfaceProblems, syntaxProblem, validateManifest } from '../scripts/check-doc-code.js';
+import { buildManifest, classifyBlock, inventoryMarkdown, packageImportProblems, memberSurfaceProblems, syntaxProblem, typeCheckProblem, validateManifest } from '../scripts/check-doc-code.js';
 const block = (language, content) => inventoryMarkdown('```' + language + '\n' + content + '\n```')[0];
 
 describe('README example verification', () => {
@@ -17,6 +17,10 @@ describe('README example verification', () => {
 	it('compiles Svelte components without claiming they run in Node', () => {
 		expect(classifyBlock(block('svelte', '<script>let count = 0;</script><button onclick={() => count++}>{count}</button>')).record).toMatchObject({ classification: 'syntax', reason: 'not runnable: browser-component' });
 		expect(syntaxProblem(block('svelte', '{#if true}<p>broken'))).not.toBeNull();
+	});
+	it('checks state-class examples with the installed Svelte rune declarations', () => {
+		expect(typeCheckProblem(block('ts', 'export class State { count = $derived(1); }'))).toBeNull();
+		expect(typeCheckProblem(block('ts', 'export class State { count: string = $derived(1); }'))).toContain('not assignable');
 	});
 	it('detects nonexistent package exports and helpers in tutorial context', () => {
 		const example = block('js', "import { live, missingHelper } from 'svelte-realtime/server'; import { db } from '$lib/server/db'; live.nonexistentHelper(db);");

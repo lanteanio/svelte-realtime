@@ -3,6 +3,11 @@ export type { ErrorMetadata, ErrorJsonValue } from './shared/error-metadata.js';
 import type { Readable } from 'svelte/store';
 import type { WSEvent } from 'svelte-adapter-uws/client';
 
+/** A store with a cached value, reactive when read in a Svelte 5 reaction. */
+export interface CurrentReadable<T> extends Readable<T> {
+	readonly current: T;
+}
+
 /**
  * A store that always holds `undefined`. Use as a fallback for conditional
  * streams so you don't need to import `readable` from `svelte/store`:
@@ -12,7 +17,7 @@ import type { WSEvent } from 'svelte-adapter-uws/client';
  * const items = $derived(user ? todos(orgId) : empty);
  * ```
  */
-export const empty: Readable<undefined>;
+export const empty: CurrentReadable<undefined>;
 
 /**
  * Typed error for RPC failures.
@@ -186,7 +191,7 @@ export function __rpc(path: string, defaults?: { timeout?: number }): ((...args:
  * A reactive stream store with live update merging, optimistic updates,
  * SSR hydration, and cursor-based pagination.
  */
-export interface StreamStore<T = any> extends Readable<T> {
+export interface StreamStore<T = any> extends CurrentReadable<T> {
 	/**
 	 * Reactive store holding the current error, or null when healthy.
 	 * Errors never replace the data store value.
@@ -207,22 +212,22 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 *   const err = auditFeed.error;
 	 * </script>
 	 *
-	 * {#if $err?.code === 'UNAUTHENTICATED'}
+	 * {#if err.current?.code === 'UNAUTHENTICATED'}
 	 *   <p>Please sign in to view audit history.</p>
-	 * {:else if $err?.code === 'FORBIDDEN'}
+	 * {:else if err.current?.code === 'FORBIDDEN'}
 	 *   <p>You don't have access to this organization's audit log.</p>
-	 * {:else if $err?.code === 'RATE_LIMITED'}
+	 * {:else if err.current?.code === 'RATE_LIMITED'}
 	 *   <p>Too many requests. Please wait a moment.</p>
-	 * {:else if $err}
-	 *   <p>Audit feed unavailable: {errorText($err)}</p>
+	 * {:else if err.current}
+	 *   <p>Audit feed unavailable: {errorText(err.current)}</p>
 	 * {/if}
 	 * ```
 	 */
-	readonly error: Readable<RpcError | null>;
+	readonly error: CurrentReadable<RpcError | null>;
 	/** Reactive store holding the connection status: 'loading', 'connected', 'reconnecting', or 'error'. */
-	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;
+	readonly status: CurrentReadable<'loading' | 'connected' | 'reconnecting' | 'error'>;
 	/** Delayed attach indicator. False during SSR; observing it does not attach the stream. */
-	readonly pending: Readable<boolean>;
+	readonly pending: CurrentReadable<boolean>;
 	/**
 	 * The per-subscription attach lifecycle, distinct from `status` (a health
 	 * projection): `initialized -> attaching -> attached -> detached | failed`.
@@ -232,7 +237,7 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 * resume-grace release); `failed` holds until a retry re-enters
 	 * `attaching`.
 	 */
-	readonly phase: Readable<'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'>;
+	readonly phase: CurrentReadable<'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'>;
 	/**
 	 * Explicitly attach the subscription; resolves once the server confirmed
 	 * it (`attached`), rejects when the attach fails. Holds an internal retain
@@ -365,39 +370,16 @@ export interface StreamStore<T = any> extends Readable<T> {
 	/** Resume history recording. Records current state as a snapshot. */
 	resumeHistory(): void;
 	/** Return a wrapper store that only activates when `condition` is truthy. Accepts a boolean, a Svelte store, or a getter function. Getter functions are evaluated once at subscribe time; for reactivity, pass a store. */
-	when(condition: boolean | Readable<any> | (() => any)): Readable<T | undefined>;
-	/**
-	 * Svelte 5: return a reactive object backed by this store's value.
-	 *
-	 * Internally calls `fromStore` from `svelte/store`: the returned object
-	 * exposes a single `current` getter; reading `current` inside an effect
-	 * or component subscribes via Svelte's `createSubscriber` for
-	 * fine-grained reactivity, and reading it outside an effect
-	 * synchronously returns the latest value.
-	 *
-	 * Throws under Svelte 4 (where `fromStore` is not exported). Apps still
-	 * on Svelte 4 should use the existing `Readable<T>` interface via the
-	 * `$store` auto-subscribe syntax.
-	 *
-	 * @example
-	 * ```svelte
-	 * <script>
-	 *   import { todos } from '$live/todos';
-	 *   const items = todos.rune();
-	 * </script>
-	 *
-	 * <p>{items.current?.length ?? 0} items</p>
-	 * {#each items.current ?? [] as todo}<li>{todo.title}</li>{/each}
-	 * ```
-	 */
-	rune(): { readonly current: T };
+	when(condition: boolean | Readable<any> | (() => any)): CurrentReadable<T | undefined>;
+	/** Compatible alias of this store; prefer reading `.current` directly. */
+	rune(): this;
 	/**
 	 * Project each item of the stream's array through `fn`. Returns a mapped
 	 * store with the same `{ subscribe, rune, map }` shape as the source,
-	 * so it composes with `$`-prefix auto-subscription, with `.rune()`
+	 * so it composes with `$`-prefix auto-subscription, with `.current`
 	 * for Svelte 5 fine-grained reactivity, and chains via further `.map()`.
 	 *
-	 * Semantics match the documented `($stream ?? []).map(fn)` pattern:
+	 * Semantics match the documented `(stream.current ?? []).map(fn)` pattern:
 	 * a null or undefined source emits `[]`; an array source emits
 	 * `source.map(fn)`; a non-array source emits `[]` after a dev-mode
 	 * console.warn (set-merge streams and paginated wrappers are not
@@ -414,7 +396,7 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 *   const titles = todos.map(t => t.title);
 	 * </script>
 	 *
-	 * {#each $titles as title}<li>{title}</li>{/each}
+	 * {#each titles.current as title}<li>{title}</li>{/each}
 	 * ```
 	 */
 	map<U>(fn: (item: T extends (infer Item)[] ? Item : any) => U): MappedStore<U>;
@@ -423,11 +405,11 @@ export interface StreamStore<T = any> extends Readable<T> {
 /**
  * The return value of `StreamStore.map(fn)`. Composes the same way as the
  * source: subscribe via `$` auto-subscription, project further via `.map`,
- * or read reactively in Svelte 5 via `.rune()`.
+ * or read reactively in Svelte 5 via `.current`.
  */
-export interface MappedStore<U> extends Readable<U[]> {
-	/** Svelte 5: return a reactive object backed by the mapped value. See `StreamStore.rune`. */
-	rune(): { readonly current: U[] };
+export interface MappedStore<U> extends CurrentReadable<U[]> {
+	/** Compatible alias of this store. */
+	rune(): this;
 	/** Chain another projection. Same composability as `StreamStore.map`. */
 	map<V>(fn: (item: U) => V): MappedStore<V>;
 }
@@ -509,18 +491,19 @@ export function batch<T extends Promise<any>[]>(
  * `createSubscriber` protocol - only the `$derived` / template expressions
  * that actually READ `.current` re-evaluate when the source updates, and the
  * upstream subscription starts on first read and stops when the last
- * reader's effect tears down. `.rune()` on every stream store delegates
- * here. Throws under Svelte 4 (the `{ subscribe }` store contract is the
- * version-portable baseline).
+ * reader's effect tears down. A realtime store is returned unchanged.
+ * Foreign sources require Svelte 5 and use fromStore semantics, including a
+ * temporary subscription for reads outside a reaction.
  *
  * @example
  * ```svelte
  * <script>
  *   import { createReactiveStream } from 'svelte-realtime/client';
- *   import { todos } from '$live/todos';
- *   const items = createReactiveStream(todos); // same handle .rune() returns
+ *   import { writable } from 'svelte/store';
+ *   const count = writable(0);
+ *   const value = createReactiveStream(count);
  * </script>
- * <p>{items.current?.length ?? 0} items</p>
+ * <p>{value.current}</p>
  * ```
  */
 export function createReactiveStream<T = any>(
@@ -870,13 +853,13 @@ export function createMemoryStore(): OfflineStore;
  * (`uploading` is true meanwhile), and puts back the ones a lost connection
  * stopped it from settling.
  */
-export const pendingMutations: Readable<number>;
+export const pendingMutations: CurrentReadable<number>;
 
 /**
  * True while a reconnect drain is replaying the offline queue - the UI
  * backpressure signal ("pause local writes while the upload pipe is busy").
  */
-export const uploading: Readable<boolean>;
+export const uploading: CurrentReadable<boolean>;
 
 /**
  * The current upload checkpoint for the configured queue: `lastUploadedSeq`
@@ -984,12 +967,12 @@ export function onPush<TData = any, TReply = any>(
  * }));
  * ```
  */
-export function combine<A, B, R>(a: Readable<A>, b: Readable<B>, fn: (a: A, b: B) => R): Readable<R>;
-export function combine<A, B, C, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, fn: (a: A, b: B, c: C) => R): Readable<R>;
-export function combine<A, B, C, D, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, fn: (a: A, b: B, c: C, d: D) => R): Readable<R>;
-export function combine<A, B, C, D, E, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, e: Readable<E>, fn: (a: A, b: B, c: C, d: D, e: E) => R): Readable<R>;
-export function combine<A, B, C, D, E, F, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, e: Readable<E>, f: Readable<F>, fn: (a: A, b: B, c: C, d: D, e: E, f: F) => R): Readable<R>;
-export function combine(...args: [...Readable<any>[], (...values: any[]) => any]): Readable<any>;
+export function combine<A, B, R>(a: Readable<A>, b: Readable<B>, fn: (a: A, b: B) => R): CurrentReadable<R>;
+export function combine<A, B, C, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, fn: (a: A, b: B, c: C) => R): CurrentReadable<R>;
+export function combine<A, B, C, D, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, fn: (a: A, b: B, c: C, d: D) => R): CurrentReadable<R>;
+export function combine<A, B, C, D, E, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, e: Readable<E>, fn: (a: A, b: B, c: C, d: D, e: E) => R): CurrentReadable<R>;
+export function combine<A, B, C, D, E, F, R>(a: Readable<A>, b: Readable<B>, c: Readable<C>, d: Readable<D>, e: Readable<E>, f: Readable<F>, fn: (a: A, b: B, c: C, d: D, e: E, f: F) => R): CurrentReadable<R>;
+export function combine(...args: [...Readable<any>[], (...values: any[]) => any]): CurrentReadable<any>;
 
 /**
  * Dev-mode instrumentation data.
@@ -1091,7 +1074,7 @@ export const __devtools: {
 export function onDerived<T = unknown>(
 	topicFn: (value: T) => string,
 	store: Readable<T>
-): Readable<WSEvent | null>;
+): CurrentReadable<WSEvent | null>;
 
 /**
  * Discriminated union describing the cause of the most recent non-open
@@ -1144,20 +1127,20 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  *   import { failure, status } from 'svelte-realtime/client';
  * </script>
  *
- * {#if $failure?.class === 'TERMINAL'}
+ * {#if failure.current?.class === 'TERMINAL'}
  *   <p class="error">Session expired. <a href="/login">Sign in again</a></p>
- * {:else if $failure?.class === 'EXHAUSTED'}
+ * {:else if failure.current?.class === 'EXHAUSTED'}
  *   <button onclick={() => location.reload()}>Reconnect</button>
- * {:else if $failure?.class === 'THROTTLE'}
+ * {:else if failure.current?.class === 'THROTTLE'}
  *   <p class="warn">Server is busy, retrying shortly...</p>
- * {:else if $failure?.class === 'AUTH'}
- *   <p class="error">Could not authenticate (HTTP {$failure.status})</p>
- * {:else if $status === 'disconnected' || $status === 'connecting'}
+ * {:else if failure.current?.class === 'AUTH'}
+ *   <p class="error">Could not authenticate (HTTP {failure.current.status})</p>
+ * {:else if status.current === 'disconnected' || status.current === 'connecting'}
  *   <span>Connecting...</span>
  * {/if}
  * ```
  */
-export const failure: Readable<Failure | null>;
+export const failure: CurrentReadable<Failure | null>;
 
 /**
  * Reactive store holding the connection status: the adapter's status store,
@@ -1167,7 +1150,7 @@ export const failure: Readable<Failure | null>;
  * subscribers run. The
  * generated `live.multiplayer()` namespace exposes this as its `status` view.
  */
-export const status: Readable<string>;
+export const status: CurrentReadable<string>;
 
 /**
  * Take the connection offline as a dropped network would, until
@@ -1237,7 +1220,7 @@ export function hueForKey(key: string): number;
  *   const a = auditFeed.subscribe(/ * ... * /);
  * </script>
  *
- * {#if !$quiescent}
+ * {#if !quiescent.current}
  *   <Spinner />
  * {/if}
  * <Dashboard />
@@ -1260,7 +1243,7 @@ export function hueForKey(key: string): number;
  * });
  * ```
  */
-export const quiescent: Readable<boolean>;
+export const quiescent: CurrentReadable<boolean>;
 
 /**
  * Reactive store reflecting the realtime system's health, sourced from
@@ -1289,12 +1272,12 @@ export const quiescent: Readable<boolean>;
  *   import { health } from 'svelte-realtime/client';
  * </script>
  *
- * {#if $health === 'degraded'}
+ * {#if health.current === 'degraded'}
  *   <Banner severity="warn">Real-time updates paused, reconnecting...</Banner>
  * {/if}
  * ```
  */
-export const health: Readable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>;
+export const health: CurrentReadable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>;
 
 /** Localizable notice metadata. Application catalogs own the translated text. */
 export interface DegradationNotice {
@@ -1336,9 +1319,9 @@ export interface DegradationRecovery extends DegradationNotice {
  *   import { degradation } from 'svelte-realtime/client';
  * </script>
  *
- * {#if $degradation.active && $degradation.mitigation}
- *   <Banner severity="warn">{$degradation.mitigation.bannerCopy}</Banner>
+ * {#if degradation.current.active && degradation.current.mitigation}
+ *   <Banner severity="warn">{degradation.current.mitigation.bannerCopy}</Banner>
  * {/if}
  * ```
  */
-export const degradation: Readable<{ active: boolean; mitigation: DegradationMitigation | null; recovery: DegradationRecovery | null }>;
+export const degradation: CurrentReadable<{ active: boolean; mitigation: DegradationMitigation | null; recovery: DegradationRecovery | null }>;

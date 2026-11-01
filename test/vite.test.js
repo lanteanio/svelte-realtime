@@ -1515,7 +1515,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(content).toContain('(...args: any[]) => Promise<any>');
 		expect(content).toContain('messages');
 		expect(content).toContain('StreamStore<any>');
-		expect(content).toContain('export const empty: Readable<undefined>');
+		expect(content).toContain('export const empty: CurrentReadable<undefined>');
 	});
 
 	it('does not rewrite $types.d.ts when the content is unchanged', () => {
@@ -1819,8 +1819,8 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain("StreamStore");
 		expect(content).toContain("from 'svelte-realtime/client'");
-		expect(content).toContain("import type { Readable } from 'svelte/store'");
-		expect(content).toContain("export const empty: Readable<undefined>");
+		expect(content).toContain("import type { CurrentReadable } from 'svelte-realtime/client'");
+		expect(content).toContain("export const empty: CurrentReadable<undefined>");
 	});
 
 	it('generates .load() type on static stream declarations', () => {
@@ -2022,7 +2022,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:chat', { ssr: true });
 
-		expect(code).toContain("import { readable } from 'svelte/store'");
+		expect(code).toContain("import { readable as svelteReadable } from 'svelte/store'");
 		expect(code).toContain("import { __directCall } from 'svelte-realtime/server'");
 		expect(code).toContain("const _messages = Object.assign(readable(undefined), { pending: readable(false) })");
 		expect(code).toContain("_messages.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) })");
@@ -2041,7 +2041,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:board', { ssr: true });
 
-		expect(code).toContain("import { readable } from 'svelte/store'");
+		expect(code).toContain("import { readable as svelteReadable } from 'svelte/store'");
 		expect(code).toContain("const _notes = (...args) => { const s = Object.assign(readable(undefined), { pending: readable(false) }); s.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) }); return s; }");
 		expect(code).toContain('_notes.load = (platform, options) => __directCall("board/notes"');
 		expect(code).toContain("export { _notes as notes }");

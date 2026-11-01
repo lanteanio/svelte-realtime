@@ -1,5 +1,6 @@
 // @ts-check
 import { writable } from 'svelte/store';
+import { _withCurrent, _localValue } from './current.js';
 import { _conn } from './connection.js';
 import { createJitterDispatch } from './jitter-dispatch.js';
 import { _IS_DEV } from './internal-state.js';
@@ -39,7 +40,7 @@ export function _removeInFlight() {
  *
  * @type {import('svelte/store').Readable<boolean>}
  */
-export const quiescent = { subscribe: _quiescentStore.subscribe };
+export const quiescent = _withCurrent({ subscribe: _quiescentStore.subscribe }, () => _inFlightCount === 0);
 
 /**
  * Reset quiescence tracking. Tests only.
@@ -293,12 +294,12 @@ export function _ensureHealthSubscription() {
  *
  * @type {import('svelte/store').Readable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>}
  */
-export const health = {
+export const health = _withCurrent({
 	subscribe(fn) {
 		_ensureHealthSubscription();
 		return _healthStore.subscribe(fn);
 	}
-};
+}, () => _localValue(_healthStore));
 
 /**
  * Richer companion to `health`: the server-pushed degradation detail, from the same
@@ -312,12 +313,12 @@ export const health = {
  *
  * @type {import('svelte/store').Readable<{ active: boolean, mitigation: any, recovery: any }>}
  */
-export const degradation = {
+export const degradation = _withCurrent({
 	subscribe(fn) {
 		_ensureHealthSubscription();
 		return _degradationStore.subscribe(fn);
 	}
-};
+}, () => _localValue(_degradationStore));
 
 /**
  * Reset the health store and detach the system-topic subscription.

@@ -323,7 +323,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				exports.push(`  export const ${name}: { status: import('svelte/store').Readable<string>, smooth: (...args: any[]) => import('svelte-realtime/smooth').SmoothEntity, [member: string]: any };`);
+				exports.push(`  export const ${name}: { status: import('svelte-realtime/client').CurrentReadable<string>, smooth: (...args: any[]) => import('svelte-realtime/smooth').SmoothEntity, [member: string]: any };`);
 			}
 		}
 
@@ -336,7 +336,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				const viewType = kind === 'doc' ? 'DocHandle' : kind === 'map' ? 'DocMap' : 'DocList';
-				exports.push(`  export const ${name}: { status: import('svelte/store').Readable<string>, ${kind}: (...args: any[]) => import('svelte-realtime/doc').${viewType}, [member: string]: any };`);
+				exports.push(`  export const ${name}: { status: import('svelte-realtime/client').CurrentReadable<string>, ${kind}: (...args: any[]) => import('svelte-realtime/doc').${viewType}, [member: string]: any };`);
 			}
 		}
 
@@ -357,7 +357,7 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 				const rosterMembers = (mpInfo.hasPresence || mpInfo.hasCursors || mpHasField || mpInfo.hasOwner)
 					? `, identify: (key: import('svelte-realtime/multiplayer').LocalKey) => void, room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom, watch: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerView`
 					: '';
-				exports.push(`  export const ${name}: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>, status: import('svelte/store').Readable<string>, move: (...args: any[]) => void, reportViewport: (...args: any[]) => void${rosterMembers}, [action: string]: any };`);
+				exports.push(`  export const ${name}: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>${mpInfo.reactions ? ', reactions: (...args: any[]) => StreamStore<any>' : ''}, status: import('svelte-realtime/client').CurrentReadable<string>, move: (...args: any[]) => void, reportViewport: (...args: any[]) => void${rosterMembers}, [action: string]: any };`);
 			}
 		}
 
@@ -387,12 +387,12 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 				if (needsUploadHandle) clientImports.push('UploadHandle');
 				declarations.push(`  import type { ${clientImports.join(', ')} } from 'svelte-realtime/client';`);
 			}
-			declarations.push(`  import type { Readable } from 'svelte/store';`);
+			declarations.push(`  import type { CurrentReadable } from 'svelte-realtime/client';`);
 			if (needsStreamStore || needsRpcError || needsUploadHandle) {
 				declarations.push('');
 			}
 			declarations.push(...exports);
-			declarations.push(`  export const empty: Readable<undefined>;`);
+			declarations.push(`  export const empty: CurrentReadable<undefined>;`);
 			declarations.push('}');
 			declarations.push('');
 		}

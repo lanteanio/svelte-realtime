@@ -1,6 +1,7 @@
 // @ts-check
 import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { readable } from 'svelte/store';
+import { _withCurrent } from './current.js';
 import { randomFloat } from '../client-runtime.js';
 
 /**
@@ -42,7 +43,7 @@ export const clientState = {
 };
 
 /** @type {import('svelte/store').Readable<undefined>} */
-export const empty = readable(undefined);
+export const empty = _withCurrent(readable(undefined), () => undefined);
 
 const _textEncoder = new TextEncoder();
 

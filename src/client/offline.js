@@ -9,6 +9,7 @@
 // and queue writes degrade to in-memory behavior when storage fails.
 // Explicit erasure is awaited and rejects when deletion cannot be verified.
 
+import { _withCurrent, _localValue } from './current.js';
 import { randomUuid, now } from '../client-runtime.js';
 import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore, _offlineStoreHealth, _markOfflineRowsErased, _offlineExpiry, DEFAULT_RETENTION_MS } from './offline-store.js';
@@ -135,14 +136,14 @@ const _uploadingStore = _consumerStore(false);
  * consumer surface for "N pending edits" indicators.
  * @type {{ subscribe: (run: (n: number) => void, invalidate?: () => void) => () => void }}
  */
-export const pendingMutations = { subscribe: _pendingStore.subscribe };
+export const pendingMutations = _withCurrent({ subscribe: _pendingStore.subscribe }, () => _localValue(_pendingStore));
 
 /**
  * True while a reconnect drain is replaying the queue - the UI backpressure
  * signal ("pause local writes while the upload pipe is busy").
  * @type {{ subscribe: (run: (v: boolean) => void, invalidate?: () => void) => () => void }}
  */
-export const uploading = { subscribe: _uploadingStore.subscribe };
+export const uploading = _withCurrent({ subscribe: _uploadingStore.subscribe }, () => _localValue(_uploadingStore));
 
 /** @internal Recompute the pending count from the live queue. */
 export function _bumpPending() {

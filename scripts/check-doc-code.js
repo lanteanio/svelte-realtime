@@ -578,7 +578,10 @@ export function typeCheckProblem(block, { ambientNames = [], tutorial = false } 
 		module: ts.ModuleKind.ESNext,
 		moduleResolution: ts.ModuleResolutionKind.Bundler,
 		esModuleInterop: true,
-		types: existsSync(join(rootDirectory, 'node_modules', '@types', 'node')) ? ['node'] : [],
+		types: [
+			...(existsSync(join(rootDirectory, 'node_modules', '@types', 'node')) ? ['node'] : []),
+			...(existsSync(join(rootDirectory, 'node_modules', 'svelte', 'package.json')) ? ['svelte'] : [])
+		],
 		lib: ['lib.es2023.d.ts', 'lib.dom.d.ts']
 	};
 	const host = ts.createCompilerHost(options, true);

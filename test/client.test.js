@@ -9165,7 +9165,7 @@ describe('__stream() rune()', () => {
 		unsub();
 	});
 
-	it('throws under Svelte 4 (svelte/store missing fromStore)', async () => {
+	it('keeps cached current and the rune alias under Svelte 4', async () => {
 		// Re-mock svelte/store WITHOUT fromStore to simulate Svelte 4.
 		vi.resetModules();
 		vi.doMock('svelte-adapter-uws/client', () => ({
@@ -9207,7 +9207,9 @@ describe('__stream() rune()', () => {
 		const mod = await import('../src/client.js');
 		const s = mod.__stream('rune-v4/items', { merge: 'crud', key: 'id' });
 		const u = s.subscribe(() => {});
-		expect(() => s.rune()).toThrow(/requires Svelte 5/);
+		expect(s.rune()).toBe(s);
+		s.hydrate([{ id: 1 }]);
+		expect(s.current).toEqual([{ id: 1 }]);
 		u();
 	});
 });

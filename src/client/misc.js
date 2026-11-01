@@ -1,4 +1,5 @@
 // @ts-check
+import { _withCurrent, _peekCurrent, _canPeek, _currentVersion } from './current.js';
 import { connect as _connect } from 'svelte-adapter-uws/client';
 import { now, setTimer, clearTimer } from '../client-runtime.js';
 import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from './internal-state.js';
@@ -907,11 +908,30 @@ export function combine(...args) {
 	/** @type {Array<() => void>} */
 	let sourceUnsubs = [];
 	let currentValue;
+	let lastEmitted;
+	let sourceVersions;
+	let currentVersion = 0;
+	const cacheable = sources.every(_canPeek);
+
+	function compute(nextValues) {
+		const versions = cacheable ? sources.map(_currentVersion) : null;
+		if (versions && sourceVersions && versions.every((version, i) => version === sourceVersions[i])) return currentValue;
+		const next = fn(...(cacheable ? sources.map(_peekCurrent) : nextValues));
+		sourceVersions = versions;
+		currentVersion++;
+		return next;
+	}
+
+	function snapshot() {
+		if (cacheable) currentValue = compute(sources.map(_peekCurrent));
+		return currentValue;
+	}
 
 	function notify() {
-		const next = fn(...values);
-		if (next === currentValue) return;
+		const next = compute(values);
+		if (next === lastEmitted) return;
 		currentValue = next;
+		lastEmitted = next;
 		for (const sub of subscribers) sub(currentValue);
 	}
 
@@ -927,7 +947,8 @@ export function combine(...args) {
 		});
 		initializing = false;
 		// Compute once after all sources have emitted their initial values
-		currentValue = fn(...values);
+		currentValue = compute(values);
+		lastEmitted = currentValue;
 	}
 
 	function stopSources() {
@@ -935,7 +956,7 @@ export function combine(...args) {
 		sourceUnsubs = [];
 	}
 
-	return {
+	return _withCurrent({
 		subscribe(sub) {
 			if (subCount++ === 0) {
 				startSources();
@@ -950,7 +971,7 @@ export function combine(...args) {
 				}
 			};
 		}
-	};
+	}, snapshot, () => { snapshot(); return currentVersion; });
 }
 
 /**

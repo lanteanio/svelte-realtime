@@ -1,5 +1,6 @@
 // @ts-check
 import { derived, readable } from 'svelte/store';
+import { _withCurrent, _localValue } from './current.js';
 import { __devtools, _devtoolsConnectionStatus, _devtoolsConnectionFailure } from './devtools-instrument.js';
 import { connect as _connect, status as _adapterStatus } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
@@ -494,11 +495,11 @@ function _drainPendingUploadsOnDisconnect() {
  * reports 'failed' instead of building a new connection.
  * @type {import('svelte/store').Readable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>}
  */
-export const status = {
+export const status = _withCurrent({
 	subscribe(fn) {
 		return _conn().status.subscribe(fn);
 	}
-};
+}, () => _bound === null ? 'disconnected' : _localValue(_bound.status));
 
 /**
  * Take the bound connection offline as a dropped network would: the socket
@@ -546,11 +547,11 @@ export function resumeOnline() {
  * The failure store of the bound connection (see `status`).
  * @type {import('svelte/store').Readable<any>}
  */
-export const failure = {
+export const failure = _withCurrent({
 	subscribe(fn) {
 		return _conn().failure.subscribe(fn);
 	}
-};
+}, () => _bound?.failure ? _localValue(_bound.failure) : null);
 
 /**
  * The adapter's `onDerived`, with its topic stores on the bound connection
@@ -561,11 +562,14 @@ export const failure = {
  * @returns {import('svelte/store').Readable<any>}
  */
 export function onDerived(topicFn, store) {
-	return derived(store, ($value, set) => {
+	let current = null;
+	const out = derived(store, ($value, set) => {
+		const publish = value => { current = value; set(value); };
 		if ($value == null) {
-			set(null);
+			publish(null);
 			return;
 		}
-		return _conn().on(topicFn($value)).subscribe(set);
+		return _conn().on(topicFn($value)).subscribe(publish);
 	}, null);
+	return _withCurrent(out, () => current);
 }

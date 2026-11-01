@@ -20,7 +20,7 @@ npm run stores
 npm run smoke
 ~~~
 
-Build precedes type checking because the realtime Vite plugin generates the $live declarations. The store check verifies subscribe/hydrate/map plus the explicit Svelte 5-only rune boundary. The browser check starts the production build on a free loopback port, checks two tabs and reload, then stops the server. Its demo identity accepts local test clients; it is not deployment authentication.
+Build precedes type checking because the realtime Vite plugin generates the $live declarations. The store check verifies subscribe/hydrate/map plus cached current reads and the rune alias. The browser check starts the production build on a free loopback port, checks two tabs and reload, then stops the server. Its demo identity accepts local test clients; it is not deployment authentication.
 
 The dedicated Svelte 4 CI job runs beside the existing Svelte 5 verification and browser fixtures. npm ci --install-links installs the locked dependencies and packages this checkout, rather than resolving a published realtime version. This is a framework compatibility check, not a claim that a new coordinated release tuple has been published.
 

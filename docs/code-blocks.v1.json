@@ -6,10 +6,10 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 245,
+		"total": 244,
 		"classifications": {
 			"command": 4,
-			"tutorial": 75,
+			"tutorial": 74,
 			"executed": 33,
 			"output": 5,
 			"syntax": 126,
@@ -18,7 +18,7 @@
 		},
 		"channels": {
 			"manual-command": 4,
-			"app-context": 75,
+			"app-context": 74,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
 			"acorn": 119,
@@ -28,7 +28,7 @@
 			"json": 1
 		},
 		"notRunnable": {
-			"app-context": 75,
+			"app-context": 74,
 			"ambient-identifiers": 117,
 			"browser-component": 6,
 			"type-declarations-only": 1,
@@ -106,7 +106,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "c273715fa00113dcf6be7df349ed3e26be7e51c797db858d94c9aa9204b831a5",
+			"fingerprint": "43324031a8f8fed1a5989fffff2aa59c011badb8415f164a9e84094432123973",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Manual setup > Step 5: Replace the home page",
@@ -135,7 +135,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "8b3e38ce85e6fb7d6ad1c084195a83099faa128fdbb7508604f538031b81acba",
+			"fingerprint": "cf25248ef472113452017a1e6a9e22b7c6481088fc68f396d61c16a12f221eff",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Merge strategies > crud (default)",
@@ -175,7 +175,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "d5ee821e772e5cf169e84f0fa8bbc8613fc2823e7134c55c237a742a52c7a9af",
+			"fingerprint": "70cf3b07f2beae041298e3581fb6fef3ad54179490e154d1532a88f7104fdffd",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Merge strategies > presence",
@@ -235,7 +235,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "3cdffc49112c1f01611743ff34843f66c7b92f89ba1d521aef2408c94f6015fe",
+			"fingerprint": "5309932bfc7599b37dd58885427e099bc047c8795714ef6f956fe50756f81555",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Connection state stores",
@@ -245,7 +245,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "ce016ed835d57edfc369d121eca18de2b1205e079fbc56cc37c36bea61904264",
+			"fingerprint": "49ef5351548788afbf38649f6b35217aa7414d4cc1716280a89ee538584ed043",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Connection state stores",
@@ -265,37 +265,27 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "bb56abd9ee1dbc171e0ac4f7b67d517ffac852a9dd1511890f481b113181f9ae",
+			"fingerprint": "cf86343c6094d0c80fef8b62c61ec9cf1c1825614b4be6c5c004ced2e61384d2",
 			"occurrence": 1,
 			"language": "svelte",
-			"section": "Svelte 5 store helpers > `store.rune()` - Svelte 5 reactive object",
+			"section": "Svelte 5 store helpers > `store.current` - reactive cached value",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "051f4d38ca4e8950b17ec60495161ee6c400e4c9bd510d867ce879a61cbacbc1",
+			"occurrence": 1,
+			"language": "ts",
+			"section": "Svelte 5 store helpers > `store.current` - reactive cached value",
 			"classification": "tutorial",
 			"channel": "app-context",
 			"reason": "app-context imports: $live/todos, $live/todos"
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "552b3ab9ff9c7973bd0c2c81f557356dbb01e19950ecdf2dde8a088ff7fa0218",
-			"occurrence": 1,
-			"language": "svelte",
-			"section": "Svelte 5 store helpers > `createReactiveStream(source)` - the first-class primitive",
-			"classification": "tutorial",
-			"channel": "app-context",
-			"reason": "app-context imports: $live/todos, $live/todos"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "aae8ed5bef78adb10022a458e0a07a94d84ef6d4744ae3304ddd662021345174",
-			"occurrence": 1,
-			"language": "svelte",
-			"section": "Svelte 5 store helpers > `store.map(fn)` - per-item projection",
-			"classification": "tutorial",
-			"channel": "app-context",
-			"reason": "app-context imports: $live/todos, $live/todos"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "eecef4e00dcc38d7909fb164ad2b8c80e48c66b8db8d77d60b8312141dcc691d",
+			"fingerprint": "0a8ac4f7fb1409d48ea6cac8d32047d20694c242ba658be3f6ac7f1d520a4699",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Svelte 5 store helpers > `empty` - bundled placeholder store",
@@ -305,7 +295,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "15413b0032e8431793d5597e63402a06b73bc47290a7945b9f168f3a16612822",
+			"fingerprint": "c5c86650881c43f8be84592a1fd40bbe1ecb1f322a70b8382b0e8515e5854d31",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling",
@@ -335,7 +325,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "04f3c236467608fd5633379b96a99a46137c77a09617ae05f45a0ffaf1890e56",
+			"fingerprint": "124b20c3e46f06b3e1e18656d1c5967624917229ca9f39e1dfa4975b4c473087",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling > Reusable error boundary component",
@@ -345,7 +335,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "b28a0f42bd93c20e7a2392ec3bb89a4b7e4c63b3aad6a03ceac31b5664a59e9a",
+			"fingerprint": "43032d929b8e4f21970f6e6936cab73a5fb7450314568057e1572b9266e81520",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling > Reusable error boundary component",
@@ -355,7 +345,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "b020feaec32bcd6da809874ed9a6998f0d76dfb31f38821405d660856e4e4f26",
+			"fingerprint": "f988e05708f49750d42165ea2d3a9f5055c62b1cf2ef5e24eed1488113a3211c",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling > Reusable error boundary component",
@@ -395,7 +385,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "65d4b8ccab9b9c43d720346f3e02a85ba989edd5e86ea86e4ad7ebc1ae1ecfa5",
+			"fingerprint": "227d896d838b3add9c1d218721bd06f0865885aa0bc13468096153724641f484",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Dynamic topics",
@@ -464,7 +454,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "0551edc3e3b6bc801c34f24fccefe15fe4c9b7ca90758729207eb8bdf61b24ab",
+			"fingerprint": "675c62d681413d9b307e1dd754726569ce4f7e83a9afa36e3e3aade657c2bea3",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Channels",
@@ -504,7 +494,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "90682f74ffcc2493275b4480998d0861270c9da1758bf80972d982fa1e57c8f8",
+			"fingerprint": "add883f894443eb1e5fef7b9935ceb10f85b6878a355a4118db549c3d0ee03e1",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "SSR hydration",
@@ -524,7 +514,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "7bc9ef083f763b8dc466c3cac15d05ed43a7f9a302827554b682bfc30b32f68e",
+			"fingerprint": "209c93c52023c05076a921ab4c8ce391a396d7686555cef568fdeb297d5c90f0",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "SSR hydration",
@@ -674,7 +664,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "568f5f7444176e3cf8e80300e0d89d6094dd4b92bb4a4487aab2268ee7b9760f",
+			"fingerprint": "7a0f463fdb5763cb3ed54882623fdf22ce8c07a62bec7f1e22b9a3f4f2bae008",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Stream pagination",
@@ -922,7 +912,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "c0624b7dda3f03adcaaba6e205fb0bf69975bf52cad6307ab99011a2b048d428",
+			"fingerprint": "437b05884be88609821fb7e5bbc3c5208c7786d4a2a929dfb6a11dc422fe6e1b",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Combine stores",
@@ -1112,7 +1102,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "ee95c5537af7d99d090d94f1bcfca0fc4b5c6fa8ac2378ca9a9f831b2c79940a",
+			"fingerprint": "1bfb074b769964a8c50e67197f2a9cb9b0c8425047ef6cbe5fb797d0efb5197e",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Access control > Subscribe-denial codes on stream stores",
@@ -1511,7 +1501,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "aacb8e5e6ff298a2f615dbb0870c584e5b16e7e7f2d455983fccc3483fd56ccf",
+			"fingerprint": "721c1e8b01bfd48370ca4c244e09009a93da7dbdbeed656a274c9c2de499bd63",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Feature flags",
@@ -1541,7 +1531,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "d67c90024e574430c4c6fa6f89fa37458c589ec65db92317f969ebc68d8b3d3f",
+			"fingerprint": "b59fa0d5909d8df604a351219eff76a666892f2f76a83053f08988cda3a78199",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Derived streams",
@@ -1561,7 +1551,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "f4cb30aff2da0a984ebc04e9bc93a4c7823def609aa4663f847130261de206ea",
+			"fingerprint": "bf6e7a9cd5db6c2c40c4fddccac89bbd4a1ece5cf74138781fb1ea801b535463",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Derived streams > Dynamic derived streams",
@@ -1611,7 +1601,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "a5148703efa7d73798def06ba2348a367ed6e7ec3ea8a2310ab5f0503d26a297",
+			"fingerprint": "d31951ca4116ba48def673f0be08e5572d21a2a9396b4bfb80e9f3460c3ba8c9",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Aggregates > Time windows",
@@ -1651,7 +1641,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "213b2ac7496dce4c82ce1303a8de65ea71be7e025eddc3270a3e0d7b6547c766",
+			"fingerprint": "38a19f2725a127334d13d32f38b801f1713bccbeb0d0dcfd4044a99bdb20a52b",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Gates",
@@ -1731,7 +1721,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "285a4346f3832e6ead37ea965f621fdc96630bed76c997d97b55fdcdf454f79a",
+			"fingerprint": "356362b0eb2c652db600eebd643420af347692ff28c0082e9179a05f827ca383",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Rooms",
@@ -1821,7 +1811,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "8e58bcc09678dbc08af09fd704d8f1454193a72e1e95c2bef04327b1d1b308e8",
+			"fingerprint": "4a2acbd033e5118b0f21b2062610fb440ae4990175abfc613ceb6dfff9206c25",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Rooms > Room ownership (`owner: true`)",
@@ -1861,7 +1851,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "fbd024d32921f7c41f1988f64e1bd92aaf65d554ca7c386b5f07bc2dcd7ede87",
+			"fingerprint": "f04c5958fbdd1b6dbc5504c3ab453104ffafa0435964e2a015737e7a706fa3be",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Multiplayer > Raw sub-streams",
@@ -2141,7 +2131,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "3f602832b84335d632b00214b5690dcc02641de6fdfab8b8242199785d2d331f",
+			"fingerprint": "514b21f4a8ed37e413627143520e5d3f7fd261bead904eed3c3202a74607dc1b",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Schema evolution > Demo + e2e: `subscribeAt(stream, { schemaVersion })`",

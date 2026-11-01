@@ -134,7 +134,9 @@ export function _generateSsrStubs(filePath, modulePath, dir = 'src/live') {
 
 	// Re-export non-stream exports, wrap store-like exports in readable() for SSR $ prefix support
 	const lines = [
-		`import { readable } from 'svelte/store';`,
+		`import { readable as svelteReadable } from 'svelte/store';`,
+		`const snapshot = (value) => Object.defineProperties(svelteReadable(value), { current: { enumerable: true, get: () => value }, [Symbol.for('svelte-realtime.ssr-snapshot')]: { value: true } });`,
+		`const readable = (value) => Object.assign(snapshot(value), { error: snapshot(null), status: snapshot('loading'), phase: snapshot('initialized'), rune() { return this; }, map(fn) { return readable(Array.isArray(value) ? value.map(fn) : []); }, when(condition) { return readable(condition === true ? value : undefined); } });`,
 		`import { __directCall } from 'svelte-realtime/server';`,
 		`export * from ${safePath};`
 	];
@@ -232,7 +234,7 @@ export function _generateSsrStubs(filePath, modulePath, dir = 'src/live') {
 		mpFactories.push(`typing: []`);
 		mpFactories.push(`locks: {}`);
 		mpFactories.push(`selections: {}`);
-		mpFactories.push(`reactions: []`);
+		mpFactories.push(info.reactions ? `reactions: (...args) => Object.assign(readable(undefined), { pending: readable(false) })` : `reactions: []`);
 		mpFactories.push(`setTyping: () => {}`);
 		mpFactories.push(`acquireLock: () => {}`);
 		mpFactories.push(`releaseLock: () => {}`);

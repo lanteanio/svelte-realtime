@@ -227,9 +227,9 @@ function _orphanSubscribe(id, ticket, heldTopic, parked, timeout) {
 	if (clientState.socketUp) arm();
 }
 import { derived, writable } from 'svelte/store';
-// Namespace import lets .rune() access fromStore (Svelte 5 only) without
-// breaking the module under Svelte 4 - missing exports become undefined,
-// not module-load errors.
+import { _withCurrent, _peekCurrent, _hasCurrent, _currentVersion } from './current.js';
+// Namespace import keeps foreign-store conversion optional on Svelte 4;
+// its missing fromStore export does not prevent ordinary store use.
 import * as _svelteStore from 'svelte/store';
 import { assert } from '../shared/assert.js';
 import { mergeKeyField, rebuildIndex, isStaleRow } from '../shared/merge.js';
@@ -259,16 +259,18 @@ import { _maybeHintPublishRate } from './rpc.js';
  * 4 this throws with guidance; the `{ subscribe }` store contract is the
  * version-portable baseline.
  *
- * `.rune()` on every stream/mapped store delegates here; the generated $live
- * accessors expose it the same way (`todos.rune()` in a component).
+ * Realtime stores already have `.current` and are returned unchanged.
+ * Foreign stores follow fromStore semantics, including a temporary
+ * subscription when read outside a reaction.
  *
  * @param {{ subscribe: (fn: (value: any) => void) => (() => void) } | ((fn: (value: any) => void) => (() => void))} source
  * @returns {{ readonly current: any }}
  */
 export function createReactiveStream(source) {
+	if (_hasCurrent(source)) return source;
 	if (typeof _svelteStore.fromStore !== 'function') {
 		throw new Error(
-			'[svelte-realtime] createReactiveStream / .rune() requires Svelte 5 (svelte/store does not export fromStore)'
+			'[svelte-realtime] createReactiveStream requires Svelte 5 for foreign stores (svelte/store does not export fromStore)'
 		);
 	}
 	const store = typeof source === 'function' ? { subscribe: source } : source;
@@ -582,7 +584,7 @@ export function _createStreamAtSchemaVersion(path, options, dynamicArgs, schemaV
  * unsubscribed on the last; the projection is recomputed per emission.
  *
  * Used by `StreamStore.map()` and chained from the returned mapped store
- * itself (so `stream.map(a).map(b).rune()` composes cleanly).
+ * itself (so `stream.map(a).map(b).current` composes cleanly).
  *
  * @template T, U
  * @param {{ subscribe: (fn: (v: any) => void) => () => void }} source
@@ -590,7 +592,10 @@ export function _createStreamAtSchemaVersion(path, options, dynamicArgs, schemaV
  * @returns {{ subscribe: (fn: (v: U[]) => void) => () => void, rune: () => { readonly current: U[] }, map: <V>(g: (item: U) => V) => any }}
  */
 function _createMappedStore(source, fn) {
-	const out = derived(source, (v) => {
+	let initialized = false;
+	let sourceVersion;
+	let current;
+	const project = (v) => {
 		if (v == null) return [];
 		if (Array.isArray(v)) return v.map(fn);
 		if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
@@ -600,9 +605,18 @@ function _createMappedStore(source, fn) {
 			);
 		}
 		return [];
-	});
-
-	return {
+	};
+	const snapshot = (value) => {
+		const version = _currentVersion(source);
+		if (!initialized || version !== sourceVersion) {
+			current = project(value);
+			sourceVersion = version;
+			initialized = true;
+		}
+		return current;
+	};
+	const out = derived(source, snapshot);
+	return _withCurrent({
 		subscribe: out.subscribe,
 		rune() {
 			return createReactiveStream(this);
@@ -613,7 +627,7 @@ function _createMappedStore(source, fn) {
 			}
 			return _createMappedStore(this, g);
 		}
-	};
+	}, () => snapshot(_peekCurrent(source)), () => _currentVersion(source));
 }
 
 /**
@@ -648,6 +662,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {any} */
 	let currentValue;
 	const store = writable(undefined);
+	let currentVersion = 0;
+	const setValue = store.set;
+	store.set = value => { currentVersion++; setValue(value); };
 
 	/** @type {RpcError | null} */
 	let _error = null;
@@ -2490,7 +2507,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_devtoolsStreamError(path, _error);
 	}
 
-	return {
+	return _withCurrent({
 		// Stamped metadata so test-affordances like `subscribeAt`
 		// (`svelte-realtime/testing/client`) can construct a parallel store
 		// at a chosen schemaVersion without needing the user to pass the
@@ -2498,10 +2515,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		__streamPath: path,
 		__streamOptions: options,
 		__streamArgs: dynamicArgs,
-		error: { subscribe: _errorStore.subscribe },
-		status: { subscribe: _statusStore.subscribe },
-		pending: { subscribe: _subscribePending },
-		phase: { subscribe: _phaseStore.subscribe },
+		error: _withCurrent({ subscribe: _errorStore.subscribe }, () => _error),
+		status: _withCurrent({ subscribe: _statusStore.subscribe }, () => _status),
+		pending: _withCurrent({ subscribe: _subscribePending }, () => _phase === 'attaching' && typeof window !== 'undefined' && monotonicNow() - _attachStarted >= pendingDelay),
+		phase: _withCurrent({ subscribe: _phaseStore.subscribe }, () => _phase),
 
 		/**
 		 * Explicitly attach the subscription and resolve once the server has
@@ -3141,32 +3158,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_recordHistory();
 		},
 
-		/**
-		 * Return a Svelte 5 reactive object backed by this stream's value.
-		 *
-		 * Internally calls `fromStore` from `svelte/store` (Svelte 5 only):
-		 * the returned object exposes a single `current` getter; reading
-		 * `current` inside an effect or component subscribes via
-		 * `createSubscriber` for fine-grained reactivity, and reading it
-		 * outside an effect synchronously returns the latest value.
-		 *
-		 * Throws under Svelte 4 (where `fromStore` is not exported). Apps
-		 * still on Svelte 4 should use the existing `Readable<T>` interface
-		 * via the `$store` auto-subscribe syntax.
-		 *
-		 * @returns {{ readonly current: any }}
-		 *
-		 * @example
-		 * ```svelte
-		 * <script>
-		 *   import { todos } from '$live/todos';
-		 *   const items = todos.rune();
-		 * </script>
-		 *
-		 * <p>{items.current?.length ?? 0} items</p>
-		 * {#each items.current ?? [] as todo}<li>{todo.title}</li>{/each}
-		 * ```
-		 */
+		/** Compatible alias of this store; `.current` is available directly. */
 		rune() {
 			return createReactiveStream(this);
 		},
@@ -3174,11 +3166,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		/**
 		 * Project each item of the stream's array through `fn`. Returns a
 		 * mapped store with the same `{ subscribe, rune, map }` shape as the
-		 * source, so it composes both with `$`-prefix auto-subscription
-		 * (`$mapped`) and with `.rune()` for Svelte 5 fine-grained
+		 * source, so it composes both with store auto-subscription
+		 * (`$mapped`) and with `.current` for Svelte 5 fine-grained
 		 * reactivity, and chains via further `.map()` calls.
 		 *
-		 * Semantics match the documented `($stream ?? []).map(fn)` pattern:
+		 * Semantics match the documented `(stream.current ?? []).map(fn)` pattern:
 		 * a null or undefined source emits `[]`; an array source emits
 		 * `source.map(fn)`; a non-array source emits `[]` after a dev-mode
 		 * console.warn (set-merge streams and paginated wrappers are not
@@ -3199,7 +3191,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 *   const titles = todos.map(t => t.title);
 		 * </script>
 		 *
-		 * {#each $titles as title}<li>{title}</li>{/each}
+		 * {#each titles.current as title}<li>{title}</li>{/each}
 		 * ```
 		 */
 		map(fn) {
@@ -3223,7 +3215,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		when(condition) {
 			const self = this;
 			let innerUnsub = null;
-			let currentVal = undefined;
+			let currentVal = condition === true ? currentValue : undefined;
+			let version = 0;
 			/** @type {Set<(v: any) => void>} */
 			const subs = new Set();
 			let subCount = 0;
@@ -3236,16 +3229,19 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				active = true;
 				innerUnsub = self.subscribe((v) => {
 					currentVal = v;
+					version++;
 					for (const s of subs) s(currentVal);
 				});
 			}
 
-			function deactivate() {
-				if (!innerUnsub) return;
+			function deactivate(keepValue = false) {
+				if (!innerUnsub && currentVal === undefined) return;
 				active = false;
-				innerUnsub();
+				innerUnsub?.();
 				innerUnsub = null;
+				if (keepValue) return;
 				currentVal = undefined;
+				version++;
 				for (const s of subs) s(currentVal);
 			}
 
@@ -3261,7 +3257,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const isStore = condition && typeof condition === 'object' && typeof condition.subscribe === 'function';
 			const isFn = typeof condition === 'function';
 
-			return {
+			return _withCurrent({
 				subscribe(fn) {
 					if (subCount++ === 0) {
 						if (isStore) {
@@ -3280,7 +3276,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					return () => {
 						subs.delete(fn);
 						if (--subCount === 0) {
-							deactivate();
+							deactivate(true);
 							if (conditionUnsub) {
 								conditionUnsub();
 								conditionUnsub = null;
@@ -3288,7 +3284,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						}
 					};
 				}
-			};
+			}, () => condition === true ? currentValue : currentVal, () => condition === true ? currentVersion : version);
 		}
-	};
+	}, () => currentValue, () => currentVersion);
 }

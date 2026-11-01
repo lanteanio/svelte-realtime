@@ -33,10 +33,10 @@ Handle loading in your template:
   import { messages } from '$live/chat';
 </script>
 
-{#if $messages === undefined}
+{#if messages.current === undefined}
   <p>Loading...</p>
 {:else}
-  {#each $messages as msg (msg.id)}
+  {#each messages.current as msg (msg.id)}
     <p>{msg.text}</p>
   {/each}
 {/if}

@@ -91,7 +91,7 @@ npm exec -- svelte-adapter-uws-preflight
 
 Mixed-version installs are rejected at install time with a peer-dep warning. SvelteKit 2 and 3 are supported. SvelteKit 3 development shares state between routes and WebSocket handlers only when the adapter is passed directly to `sveltekit()`, and a route edit can split that state until the dev server restarts; on either SvelteKit, restart the dev server after deleting `src/hooks.ws.js` and creating it again. The scaffolder and SvelteKit 3 need Node 22.17+ on 22.x, or Node 24+; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
 
-Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-support.md) gives exact versions and executable checks. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
+Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-support.md) gives exact versions and executable checks. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. Every store also has a cached `.current` value; reading it in a Svelte 5 reaction subscribes automatically.
 
 ---
 
@@ -211,11 +211,11 @@ export const counter = live.stream('count', () => count, { merge: 'set' });
 
 <h1>Shared counter</h1>
 <p role="status" aria-live="polite">
-  {#if failure || $error}{failure || $error.message}
-  {:else if $counter === undefined || $status !== 'connected'}Connecting...
-  {:else}Count: {$counter}{/if}
+  {#if failure || error.current}{failure || error.current.message}
+  {:else if counter.current === undefined || status.current !== 'connected'}Connecting...
+  {:else}Count: {counter.current}{/if}
 </p>
-<button onclick={increase} disabled={$status !== 'connected'} aria-disabled={pending}>
+<button onclick={increase} disabled={status.current !== 'connected'} aria-disabled={pending}>
   Increase count by one
 </button>
 ```
@@ -325,7 +325,7 @@ export const addTodo = live(async (ctx, text) => {
   import { todos, addTodo } from '$live/todos';
 </script>
 
-{#each $todos as todo (todo.id)}
+{#each todos.current as todo (todo.id)}
   <p>{todo.text}</p>
 {/each}
 ```
@@ -374,7 +374,7 @@ export const join = live(async (ctx, roomId) => {
   const users = presence(data.roomId);
 </script>
 
-{#each $users as user (user.key)}
+{#each users.current as user (user.key)}
   <span>{user.name}</span>
 {/each}
 ```
@@ -538,17 +538,17 @@ Reactive stores from `svelte-realtime/client` render connection state without ap
   import { status, failure, quiescent, health } from 'svelte-realtime/client';
 </script>
 
-{#if $health === 'degraded'}
+{#if health.current === 'degraded'}
   <Banner severity="warn">Real-time updates paused, reconnecting...</Banner>
-{:else if $failure?.class === 'TERMINAL'}
+{:else if failure.current?.class === 'TERMINAL'}
   <Banner severity="error">Session expired. <a href="/login">Sign in again</a></Banner>
-{:else if $failure?.class === 'THROTTLE'}
+{:else if failure.current?.class === 'THROTTLE'}
   <Banner severity="warn">Server is busy. Reconnecting more slowly...</Banner>
-{:else if $status === 'disconnected' || $status === 'connecting'}
+{:else if status.current === 'disconnected' || status.current === 'connecting'}
   <Banner severity="info">Connecting...</Banner>
 {/if}
 
-{#if !$quiescent}
+{#if !quiescent.current}
   <Spinner />
 {/if}
 ```
@@ -557,9 +557,9 @@ Reactive stores from `svelte-realtime/client` render connection state without ap
 |---|---|---|
 | `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = [closed for good](#connection-closed-for-good) (`close()`, a terminal close code, a rejected auth preflight or exhausted retries) |
 | `failure` | `{ kind, class, code, diagnosticReason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `DRAIN` (server restart advisory) / `AUTH` (HTTP preflight; carries `status` instead of `code`). Cleared on next `'open'`. Not set on intentional `close()` |
-| `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
+| `quiescent` | `CurrentReadable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
 | `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes - typically the extensions package's pub/sub bus circuit breaker |
-| `degradation` | `Readable<{ active, mitigation, recovery }>` | The server-pushed degradation detail. `mitigation` carries the precomputed client action (`bannerCopy`, `retryAfterMs`, unavailable `streams` / `rpcs`) a degradation policy attached, so you render a notice + schedule a retry with zero per-failure code. Additive companion to `health` |
+| `degradation` | `CurrentReadable<{ active, mitigation, recovery }>` | The server-pushed degradation detail. `mitigation` carries the precomputed client action (`bannerCopy`, `retryAfterMs`, unavailable `streams` / `rpcs`) a degradation policy attached, so you render a notice + schedule a retry with zero per-failure code. Additive companion to `health` |
 
 `failure` and `quiescent` are pure additions; apps that don't use them pay nothing. `health` lazily subscribes to `__realtime` only on first read; never reading it = no subscription.
 
@@ -570,8 +570,8 @@ When the extensions pub/sub bus is wired with a degradation policy (`createDegra
   import { degradation } from 'svelte-realtime/client';
 </script>
 
-{#if $degradation.active && $degradation.mitigation}
-  <Banner severity="warn">{$degradation.mitigation.bannerCopy}</Banner>
+{#if degradation.current.active && degradation.current.mitigation}
+  <Banner severity="warn">{degradation.current.mitigation.bannerCopy}</Banner>
 {/if}
 ```
 
@@ -592,61 +592,41 @@ on('__realtime').subscribe((envelope) => { /* full payload */ });
 
 ## Svelte 5 store helpers
 
-Generated `$live/*` stream stores work out of the box as Svelte 4 `Readable<T>` values via the `$store` auto-subscribe syntax. For Svelte 5 apps, two methods are exposed alongside the existing `subscribe` interface so component code stays terse without reaching for `$derived.by(() => $store ?? [])` boilerplate.
+Every store-shaped client value has a readonly `.current` getter. Read it directly in Svelte 5 components, `$derived`, `$effect`, or `.svelte.ts` classes. The `$store` syntax remains valid in components and is the Svelte 4 reactive path.
 
-### `store.rune()` - Svelte 5 reactive object
+### `store.current` - reactive cached value
 
-Returns an object with a single `current` getter, backed by Svelte's `fromStore` from `svelte/store`. Reading `current` inside an effect or component subscribes via Svelte's `createSubscriber` for fine-grained reactivity; reading it outside an effect synchronously returns the latest value.
+`current` covers streams, their `error` / `status` / `pending` / `phase` stores, room and multiplayer sub-streams, connection and health stores, offline indicators, `empty`, and `map()` / `when()` / `combine()` results. A reaction acquires the source on the next microtask and releases it when its last reader goes away. Plain reads return cached state without starting or stopping a wire subscription. Before a stream has loaded or been hydrated, its value is `undefined`.
+
+`rune()` remains a compatible alias of the same stream or mapped-store handle. No extra call or import is needed.
 
 ```svelte
 <script>
   import { todos } from '$live/todos';
-  const items = todos.rune();
+  import { status } from 'svelte-realtime/client';
 </script>
 
-<p>{items.current?.length ?? 0} items</p>
-{#each items.current ?? [] as todo}
-  <li>{todo.title}</li>
-{/each}
+<p>{status.current}: {todos.current?.length ?? 0} items</p>
+{#each todos.current ?? [] as todo}<li>{todo.title}</li>{/each}
 ```
 
-`rune()` requires Svelte 5 (the `fromStore` export is not available in Svelte 4) and throws a descriptive error if called against an older runtime. Apps still on Svelte 4 use the `$store` auto-subscribe syntax instead.
+The same access works in a state class:
 
-### `createReactiveStream(source)` - the first-class primitive
-
-`rune()` delegates to `createReactiveStream`, exported so ANY store-shaped source (or a bare subscribe function) gets the same fine-grained handle - only the `$derived`/template expressions that actually read `.current` re-evaluate on updates, and the upstream subscription starts on first read and stops when the last reader's effect tears down:
-
-```svelte
-<script>
-  import { createReactiveStream } from 'svelte-realtime/client';
-  import { todos } from '$live/todos';
-
-  const items = createReactiveStream(todos);          // same handle todos.rune() returns
-  const clock = createReactiveStream((set) => {       // any subscribe fn works
-    const t = setInterval(() => set(Date.now()), 1000);
-    return () => clearInterval(t);
-  });
-</script>
+```ts
+// src/lib/todo-state.svelte.ts
+import { todos } from '$live/todos';
+export class TodoState {
+  remaining = $derived((todos.current ?? []).filter((todo: { done: boolean }) => !todo.done));
+}
 ```
 
-Same Svelte 5 requirement as `rune()`; the `{ subscribe }` store contract stays the version-portable baseline.
+### `createReactiveStream(source)` - foreign stores
+
+Wrap a foreign Svelte store or subscribe function when it has no `.current` of its own. This helper needs Svelte 5 for foreign sources and follows Svelte's `fromStore` semantics, including a temporary subscription for a read outside a reaction. Passing a realtime store returns that same store.
 
 ### `store.map(fn)` - per-item projection
 
-Returns a mapped store with the same `{ subscribe, rune, map }` shape as the source. Idiomatic alternative to `$derived.by(() => ($stream ?? []).map(...))` and avoids the `$derived(() => ...)` footgun where storing a function reference instead of its return value silently breaks rendering.
-
-```svelte
-<script>
-  import { todos } from '$live/todos';
-  const titles = todos.map(t => t.title);
-  // Or compose with rune() for Svelte 5:
-  const titlesRune = todos.map(t => t.title).rune();
-</script>
-
-{#each $titles as title}<li>{title}</li>{/each}
-```
-
-Semantics match the documented `($stream ?? []).map(fn)` pattern: a `null` or `undefined` source emits `[]`; an array source emits `source.map(fn)`; a non-array source (set-merge stream, paginated wrapper) emits `[]` after a dev-mode `console.warn` pointing at the merge-strategy docs. Subscriptions are lazy: the source is only subscribed while at least one mapped consumer is active. Chains via further `.map()` calls preserve the same shape.
+`todos.map(todo => todo.title).current` exposes the projected array. The mapped store keeps the store contract and supports chained `map()` calls. Null and undefined inputs yield `[]`; a non-array input also yields `[]` with a development warning. A projection subscribes to its source only while observed.
 
 ### `empty` - bundled placeholder store
 
@@ -659,7 +639,7 @@ Every generated `$live/<name>.js` re-exports an `empty` store that holds `undefi
   const items = $derived(user ? todos(orgId) : empty);
 </script>
 
-{#each $items ?? [] as todo}
+{#each items.current ?? [] as todo}
   <li>{todo.title}</li>
 {/each}
 ```
@@ -674,10 +654,10 @@ The data store value never changes shape. It is always your data type or `undefi
 
 | Property | Type | Description |
 |---|---|---|
-| `$store` | `T \| undefined` | Your data. Never replaced by an error object. On failure, the last loaded value is preserved. |
-| `store.error` | `Readable<RpcError \| null>` | Current error, or `null` when healthy. |
-| `store.pending` | `Readable<boolean>` | Attach spinner indicator, delayed by 100ms by default; false on SSR. |
-| `store.status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` | Connection status. |
+| `store.current` | `T \| undefined` | Your data. Never replaced by an error object. On failure, the last loaded value is preserved. |
+| `store.error` | `CurrentReadable<RpcError \| null>` | Current error, or `null` when healthy. |
+| `store.pending` | `CurrentReadable<boolean>` | Attach spinner indicator, delayed by 100ms by default; false on SSR. |
+| `store.status` | `CurrentReadable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` | Connection status. |
 
 For a spinner without fast-response flicker, subscribe to `store.pending`. It becomes true only while an initial attach, reconnect, or resume takes longer than `pendingDelay`, and clears immediately on completion, failure, or detachment. Set `pendingDelay` in the `live.stream()` options to another nonnegative integer of milliseconds, or `0` for an immediate indicator; the build reads it, so write it in the options or in a module-level const. Observing this indicator alone does not attach the stream. Connection `status` and page quiescence still report work immediately. RPC promises, pagination and predicted writes do not expose this attach indicator.
 
@@ -694,16 +674,16 @@ To show errors, subscribe to `.error`. `code` is the stable key and `message` is
   const status = messages.status;
 </script>
 
-{#if $err}
-  <p>Error: {errorText($err)} ({$err.code})</p>
+{#if err.current}
+  <p>Error: {errorText(err.current)} ({err.current.code})</p>
 {/if}
 
-{#if $status === 'reconnecting'}
+{#if status.current === 'reconnecting'}
   <p>Reconnecting...</p>
 {/if}
 ```
 
-Defensive patterns like `($store ?? []).filter(...)` work correctly because `$store` is always an array or `undefined`.
+Defensive patterns like `(store.current ?? []).filter(...)` work correctly because `store.current` is always an array or `undefined`.
 
 ### Attach lifecycle: `store.phase`, `attach()`, `detach()`
 
@@ -768,7 +748,7 @@ For Svelte 5, you can build a reusable boundary that handles loading and error s
   /** @type {{ store: any, children: import('svelte').Snippet, loading?: import('svelte').Snippet, error?: import('svelte').Snippet<[any]> }} */
   let { store, children, loading, error } = $props();
 
-  let value = $derived($store);
+  let value = $derived(store.current);
   const err = store.error;
 </script>
 
@@ -778,11 +758,11 @@ For Svelte 5, you can build a reusable boundary that handles loading and error s
   {:else}
     <p>Loading...</p>
   {/if}
-{:else if $err}
+{:else if err.current}
   {#if error}
-    {@render error($err)}
+    {@render error(err.current)}
   {:else}
-    <p>Error: {errorText($err)}</p>
+    <p>Error: {errorText(err.current)}</p>
   {/if}
 {:else}
   {@render children()}
@@ -799,7 +779,7 @@ Use it to wrap any stream:
 </script>
 
 <StreamView store={messages}>
-  {#each $messages as msg (msg.id)}
+  {#each messages.current as msg (msg.id)}
     <p>{msg.text}</p>
   {/each}
 
@@ -825,7 +805,7 @@ With default slots, the minimal version is just:
 </script>
 
 <StreamView store={messages}>
-  {#each $messages as msg (msg.id)}
+  {#each messages.current as msg (msg.id)}
     <p>{msg.text}</p>
   {/each}
 </StreamView>
@@ -875,7 +855,7 @@ export const _guard = guard(
 
 Use a function instead of a string as the first argument to `live.stream()` for per-entity streams. The client-side stub becomes a factory function - call it with arguments to get a cached store for that entity.
 
-> **The first argument's shape decides the client export.** If the first argument is a string, the export is a Svelte store and you read it as `$messages`. If the first argument is a function, the export is a factory that returns a store, and you must call it first: `const messages = roomMessages(data.roomId); ... $messages`. Forgetting the call gives `Svelte error: store_invalid_shape - 'roomMessages' is not a store with a 'subscribe' method` during SSR. If the topic does not depend on arguments, prefer the string form.
+> **The first argument's shape decides the client export.** If the first argument is a string, the export is a Svelte store and you read it as `messages.current`. If the first argument is a function, the export is a factory that returns a store, and you must call it first: `const messages = roomMessages(data.roomId); ... messages.current`. Forgetting the call gives `Svelte error: store_invalid_shape - 'roomMessages' is not a store with a 'subscribe' method` during SSR. If the topic does not depend on arguments, prefer the string form.
 
 ```js
 // src/live/rooms.js
@@ -904,7 +884,7 @@ export const sendToRoom = live(async (ctx, roomId, text) => {
   const messages = roomMessages(data.roomId);
 </script>
 
-{#each $messages as msg (msg.id)}
+{#each messages.current as msg (msg.id)}
   <p>{msg.text}</p>
 {/each}
 ```
@@ -1022,7 +1002,7 @@ export const typing = live.channel('typing:lobby', { merge: 'presence' });
   import { typing } from '$live/typing';
 </script>
 
-{#each $typing as user (user.key)}
+{#each typing.current as user (user.key)}
   <span>{user.data.name} is typing...</span>
 {/each}
 ```
@@ -1073,7 +1053,7 @@ export async function load({ platform, locals }) {
   const msgs = messages.hydrate(data.messages);
 </script>
 
-{#each $msgs as msg (msg.id)}
+{#each msgs.current as msg (msg.id)}
   <p>{msg.text}</p>
 {/each}
 ```
@@ -1101,7 +1081,7 @@ export async function load({ platform, locals, params }) {
   const invites = invitations(page.params.id).hydrate(data.invitations);
 </script>
 
-{#each $invites as invite (invite.id)}
+{#each invites.current as invite (invite.id)}
   <p>{invite.email}</p>
 {/each}
 ```
@@ -1374,7 +1354,7 @@ export const posts = live.stream('posts', async (ctx) => {
   }
 </script>
 
-{#each $posts as post (post.id)}
+{#each posts.current as post (post.id)}
   <p>{post.title}</p>
 {/each}
 
@@ -1851,7 +1831,7 @@ Compose multiple stream stores into a single derived store. When any source upda
   }));
 </script>
 
-<p>Pending: {$dashboard.pendingOrders}</p>
+<p>Pending: {dashboard.current.pendingOrders}</p>
 ```
 
 `combine()` accepts 2-6 stores with typed overloads, plus a variadic fallback for more. Zero network overhead - all computation happens client-side.
@@ -2189,14 +2169,14 @@ When a server-side subscribe denial fires (guard rejection, access predicate, ra
   const err = auditFeed.error;
 </script>
 
-{#if $err?.code === 'UNAUTHENTICATED'}
+{#if err.current?.code === 'UNAUTHENTICATED'}
   <p>Please sign in to view audit history.</p>
-{:else if $err?.code === 'FORBIDDEN'}
+{:else if err.current?.code === 'FORBIDDEN'}
   <p>You don't have access to this organization's audit log.</p>
-{:else if $err?.code === 'RATE_LIMITED'}
+{:else if err.current?.code === 'RATE_LIMITED'}
   <p>Too many requests. Please wait a moment.</p>
-{:else if $err}
-  <p>Audit feed unavailable: {errorText($err)}</p>
+{:else if err.current}
+  <p>Audit feed unavailable: {errorText(err.current)}</p>
 {/if}
 ```
 
@@ -3108,7 +3088,7 @@ On the client, the flag is a readable store carrying the current value:
   import { maintenance } from '$live/flags';
 </script>
 
-{#if $maintenance}
+{#if maintenance.current}
   <Banner>Down for maintenance</Banner>
 {/if}
 ```
@@ -3158,7 +3138,7 @@ On the client, derived streams work like regular streams:
   import { dashboardStats } from '$live/dashboard';
 </script>
 
-<p>Orders: {$dashboardStats?.totalOrders}</p>
+<p>Orders: {dashboardStats.current?.totalOrders}</p>
 ```
 
 ### Dynamic derived streams
@@ -3188,7 +3168,7 @@ On the client, dynamic derived streams are called like functions:
   let { orgId } = $props();
 </script>
 
-<p>Members: {$orgStats(orgId)?.members}</p>
+<p>Members: {orgStats.current(orgId)?.members}</p>
 ```
 
 Dynamic instances are isolated by authenticated identity, tenant, and arguments. Anonymous connections each get their own instance. Instances are created when the first subscriber connects and cleaned up when the last subscriber disconnects. Recomputations use the current user data of an active subscriber, and discard pending results when that subscriber leaves. The shared recomputation context has `ctx.ws === null`; scope callbacks receive the actual subscribing socket.
@@ -3309,10 +3289,10 @@ Output topics: `events:view:topk:last10min`, `events:view:topk:today`, `events:v
 </script>
 
 <h2>Last 10 min</h2>
-<ul>{#each $trending.last10min?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
+<ul>{#each trending.last10min.current?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
 
 <h2>Today</h2>
-<ul>{#each $trending.today?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
+<ul>{#each trending.today.current?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
 ```
 
 <a id="privacy-k-anonymity-and-differential-privacy"></a>
@@ -3406,8 +3386,8 @@ export const betaFeed = live.gate(
   const feed = betaFeed.when(tabActive);
 </script>
 
-{#if $feed}
-  {#each $feed as item (item.id)}
+{#if feed.current}
+  {#each feed.current as item (item.id)}
     <p>{item.title}</p>
   {/each}
 {/if}
@@ -3633,7 +3613,7 @@ On the client, the room export becomes an object with sub-streams and actions. R
   const cursors = board.cursors(boardId);    // cursor stream
 </script>
 
-{#each $data as card (card.id)}
+{#each data.current as card (card.id)}
   <Card {card} />
 {/each}
 
@@ -3812,8 +3792,8 @@ export const game = live.room({
   const owner = game.owner(gameId);   // { key, reason } - live
 </script>
 
-{#if $owner?.key}
-  <p>Host: {$owner.key}</p>
+{#if owner.current?.key}
+  <p>Host: {owner.current.key}</p>
 {/if}
 ```
 
@@ -3946,7 +3926,7 @@ The raw `data` / `presence` / `cursors` factory stores stay on the export for ba
   const status = board.status;            // connection status store
 </script>
 
-{#each $data as card (card.id)}
+{#each data.current as card (card.id)}
   <Card {card} />
 {/each}
 ```
@@ -4595,9 +4575,9 @@ The migration codepath only fires across a real deploy boundary - a v1 server is
 </script>
 
 <section>
-  <h3>Live (v3): {JSON.stringify($todos)}</h3>
-  <h3>Stale v1 client would see: {JSON.stringify($todosAsV1)}</h3>
-  <h3>Stale v2 client would see: {JSON.stringify($todosAsV2)}</h3>
+  <h3>Live (v3): {JSON.stringify(todos.current)}</h3>
+  <h3>Stale v1 client would see: {JSON.stringify(todosAsV1.current)}</h3>
+  <h3>Stale v2 client would see: {JSON.stringify(todosAsV2.current)}</h3>
 </section>
 ```
 
@@ -5501,8 +5481,8 @@ Import from `svelte-realtime/client`.
 
 | Method/Property | Description |
 |---|---|
-| `error` | `Readable<RpcError \| null>` - current error, or `null` when healthy |
-| `status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` - connection status |
+| `error` | `CurrentReadable<RpcError \| null>` - current error, or `null` when healthy |
+| `status` | `CurrentReadable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` - connection status |
 | `optimistic(event, data)` | Apply instant UI update, returns rollback function |
 | `hydrate(initialData)` | Pre-populate with SSR data |
 | `loadMore(...extraArgs)` | Load next page (cursor-based) |
