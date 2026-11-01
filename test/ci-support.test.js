@@ -12,10 +12,15 @@ describe('runtime coverage', () => {
 	it('runs the complete application browser suite on every runtime', () => {
 		expect(workflow.jobs.verify.steps.some(step => step.run === 'npm run verify:browser')).toBe(true);
 	});
-	it('keeps the full peer product on a required nightly and manual lane', () => {
-		expect(workflow.jobs.peers.if).toBe("${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}");
+	it('keeps the full peer product on development pushes, nightly and manual runs', () => {
+		expect(workflow.jobs.peers.if).toBe("${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/dev') }}");
 		const changed = structuredClone(input);
 		changed.workflow.jobs.peers.if = false;
+		expect(() => validateSupport(changed, today)).toThrow(/execution condition/);
+	});
+	it('rejects peer coverage that never automatically runs on the development branch', () => {
+		const changed = structuredClone(input);
+		changed.workflow.jobs.peers.if = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}";
 		expect(() => validateSupport(changed, today)).toThrow(/execution condition/);
 	});
 	it.each(['kit2-svelte5-vite5', 'kit2-svelte5-vite8'])('rejects removing compatible combination %s', id => {

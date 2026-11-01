@@ -29,7 +29,7 @@ The [runtime and peer matrix](docs/ci-support.md) is generated from
 `docs/ci-support.v1.json` and checked by `npm run check:ci-support`. Linux runs
 the exact Node baseline plus the newest patch of each maintained Node major,
 including native, browser, lifecycle and recovery suites on every leg.
-Nightly and explicitly dispatched consumers cover each compatible Svelte/Kit/Vite major
+Dev pushes, nightly schedules and explicit dispatches cover each compatible Svelte/Kit/Vite major
 combination with each package separately at its floor and latest version on
 every maintained Node major. Each consumer records its target and resolved versions.
 When changing supported ranges, update the lifecycle table and compatible
