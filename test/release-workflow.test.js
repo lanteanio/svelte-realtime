@@ -41,6 +41,24 @@ describe('trusted release workflow', () => {
 		expect(validateReleaseWorkflow(workflow, pkg, policy)).toEqual([]);
 	});
 
+	it('pins the CI support check and its invocation in the release script inventory', () => {
+		expect(pkg.scripts['check:ci-support']).toBe('node scripts/check-ci-support.js');
+		expect(pkg.scripts.check).toContain('npm run check:ci-support &&');
+		expect(validateReleaseWorkflow(workflow, pkg, policy)).toEqual([]);
+		for (const [name, body] of [
+			['check:ci-support', 'echo ok'],
+			['check', pkg.scripts.check.replace('npm run check:ci-support && ', '')]
+		]) {
+			const mutant = { ...pkg, scripts: { ...pkg.scripts, [name]: body } };
+			expect(validateReleaseWorkflow(workflow, mutant, policy)
+				.some((error) => error.includes('"' + name + '"') && error.includes('pinned body'))).toBe(true);
+		}
+		const scripts = { ...pkg.scripts };
+		delete scripts['check:ci-support'];
+		expect(validateReleaseWorkflow(workflow, { ...pkg, scripts }, policy)
+			.some((error) => error.includes('missing') && error.includes('check:ci-support'))).toBe(true);
+	});
+
 	it('rejects trigger, permission, token, and source-publication widening', () => {
 		const mutants = [
 			workflow.replace("tags:\n      - 'svelte-realtime@*'", 'branches: [main]'),
