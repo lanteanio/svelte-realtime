@@ -16,8 +16,8 @@ import { state } from './state.js';
  * This mechanism does not provide a differential privacy guarantee: it does
  * not clip contributions or account for composed releases. The offset stays
  * constant within each window, so differences between releases expose exact
- * aggregate changes. Single-state and lifetime aggregates reuse their offset
- * across restarts with the same secret, topic and noise configuration. One known
+ * aggregate changes. Erasure resets change the offset generation; an optional
+ * durable store restores that generation across restarts and replicas. One known
  * true value removes that offset from past and future releases of that field.
  * A sliding window re-seeds only on a slide that changes its value; a continuous
  * observer still learns each bucket's exact change, so it can link the releases
@@ -117,7 +117,7 @@ let _noiseBlockCacheSecret = null;
  * offline search recovers the noise and subtracts it. Drawing straight from the
  * MAC stream keeps the search space the key's, not the seed width's.
  *
- * The stream restarts per call, so a given (tenant, topic, window) always yields
+ * The stream restarts per call, so a given (tenant, topic, window, generation) always yields
  * the same vector - replicas sharing the secret agree, which is what the
  * cross-replica consistency requirement needs.
  *
@@ -272,13 +272,13 @@ export function _gateAggregate(holder, computed, topic) {
 	} else {
 		cohortSize = holder.cohort ? holder.cohort.size : 0;
 	}
-	// NUL-joined so distinct (tenantId, topic, windowStart) triples cannot collide
+	// NUL-joined so distinct tenant, topic, window and generation values cannot collide
 	// into the same seed - topics and ids never contain NUL, whereas a space
 	// separator would be ambiguous the moment either field could hold one.
 	// tenantId is '' under the global-aggregate model (aggregates are one entry
 	// per topic, already tenant-distinct upstream); the slot is reserved for a
 	// future per-tenant identity.
-	const seedStr = (holder._tenantId || '') + '\0' + topic + '\0' + (holder._windowStart || 0);
+	const seedStr = (holder._tenantId || '') + '\0' + topic + '\0' + (holder._windowStart || 0) + (holder._noiseGeneration || '');
 	const r = _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg, state.privacySecret);
 	if (r.suppress) return { publish: false };
 	holder._lastWire = r.value;

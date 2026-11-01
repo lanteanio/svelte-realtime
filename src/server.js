@@ -65,6 +65,7 @@ import { _setTenantResolver, _resolveTenant, _validTenantId, _validateTenantConf
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _resolveRedactor, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
+import { _invalidateAggregateGeneration, _configureAggregateGeneration, _bootstrapAggregateGeneration } from './server/aggregate-generation.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, _rpcClosedSockets, installMetrics } from './server/metrics.js';
@@ -2960,7 +2961,7 @@ export function __registerAggregate(path, fn) {
 	const privacy = /** @type {any} */ (fn).__aggregatePrivacy || null;
 	const initial = _createAggregateState(reducers, forget);
 	const entry = {
-		source, reducers, topic, state: initial, snapshot, debounce, timer: null, forget, _generation: 0,
+		source, reducers, topic, state: initial, snapshot, debounce, timer: null, forget, _generation: 0, _declaration: fn,
 		_reducerEntries: Object.entries(reducers), _hydrationPromise: null,
 		// k-anon / DP privacy state. `cohort` counts distinct contributors (only
 		// when a contributor extractor is configured); `_lastWire` holds the last
@@ -2973,18 +2974,25 @@ export function __registerAggregate(path, fn) {
 		_lastWire: privacy ? _computeAggregateState(forget === 'reset' ? _copyAggregateState(initial) : { ...initial }, reducers) : undefined
 	};
 
-	if (snapshot) {
-		const generation = entry._generation;
-		entry._hydrationPromise = (async () => {
-			try {
-				const snapshotState = await snapshot();
-				if (entry._generation === generation && snapshotState && typeof snapshotState === 'object') {
-					_safeAssignSnapshot(entry.state, snapshotState);
-				}
-			} catch {}
-			if (entry._generation === generation) entry._hydrationPromise = null;
-		})();
-	}
+	_bootstrapAggregateGeneration(entry);
+	entry._startHydration = () => {
+		if (snapshot) {
+			const generation = entry._generation;
+			entry._hydrationPromise = (async () => {
+				try {
+					if (entry._persistedGeneration) await entry._persistedGeneration.bootstrap;
+					if (entry._generation !== generation) return;
+					const snapshotState = await snapshot();
+					if (entry._generation === generation && snapshotState && typeof snapshotState === 'object') {
+						entry._aggregateUsed = true;
+						_safeAssignSnapshot(entry.state, snapshotState);
+					}
+				} catch {}
+				if (entry._generation === generation) entry._hydrationPromise = null;
+			})();
+		}
+	};
+	entry._startHydration();
 
 	aggregateRegistry.set(path, entry);
 	_aggregateByTopic.set(topic, entry);
@@ -3028,7 +3036,7 @@ function _registerWindowedAggregate(path, fn) {
 		debounce,
 		_hydrationPromise: null,
 		windowed: true,
-		forget, _generation: 0,
+		forget, _generation: 0, _declaration: fn,
 		// The event fold checks for a passed boundary only when a window tumbles.
 		_tumbling: Object.values(windowsSpec).some((spec) => spec.type === 'tumbling'),
 		privacy
@@ -3108,21 +3116,27 @@ function _registerWindowedAggregate(path, fn) {
 	// Hydrate per-window snapshots in parallel. Lifetime can also be fed
 	// by the legacy `snapshot` option for backwards compat with apps that
 	// adopted windows by adding a single `lifetime` slot.
-	const hydrationTasks = [];
-	const generation = entry._generation;
-	for (const [wn, win] of windowStates) {
-		const perWindowSnap = snapshots[wn] || (wn === 'lifetime' ? legacySnapshot : null);
-		if (!perWindowSnap || win.type === 'sliding') continue;
-		hydrationTasks.push((async () => {
-			try {
-				const s = await perWindowSnap();
-				if (entry._generation === generation && s && typeof s === 'object') _safeAssignSnapshot(win.state, s);
-			} catch {}
-		})());
-	}
-	if (hydrationTasks.length > 0) {
-		entry._hydrationPromise = Promise.all(hydrationTasks).then(() => { if (entry._generation === generation) entry._hydrationPromise = null; });
-	}
+	_bootstrapAggregateGeneration(entry);
+	entry._startHydration = () => {
+		const hydrationTasks = [];
+		const generation = entry._generation;
+		for (const [wn, win] of windowStates) {
+			const perWindowSnap = snapshots[wn] || (wn === 'lifetime' ? legacySnapshot : null);
+			if (!perWindowSnap || win.type === 'sliding') continue;
+			hydrationTasks.push((async () => {
+				try {
+					if (entry._persistedGeneration) await entry._persistedGeneration.bootstrap;
+					if (entry._generation !== generation) return;
+					const s = await perWindowSnap();
+					if (entry._generation === generation && s && typeof s === 'object') { entry._aggregateUsed = true; _safeAssignSnapshot(win.state, s); }
+				} catch {}
+			})());
+		}
+		if (hydrationTasks.length > 0) {
+			entry._hydrationPromise = Promise.all(hydrationTasks).then(() => { if (entry._generation === generation) entry._hydrationPromise = null; });
+		}
+	};
+	entry._startHydration();
 
 	aggregateRegistry.set(path, entry);
 	_aggregateByTopic.set(baseTopic, entry);
@@ -3217,12 +3231,17 @@ function _scheduleNextSlide(entry, win) {
 	win.slideTimer = setTimer(() => {
 		win.slideTimer = null;
 		try {
+			if (entry._aggregateBlocked) return;
+			const generation = entry._generation;
 			// With keyed noise, remember the true value before the eviction: a
 			// slide that leaves it unchanged must not draw fresh noise over it.
-			const before = win.privacy ? _slideFingerprint(_computeWindowState(win, entry.reducers)) : null;
+			const before = win.privacy ? _slideFingerprint(_computeWindowState(win, entry.reducers, entry._reducerEntries)) : null;
+			if (generation !== entry._generation) return;
 			// Advance the ring head and clear the new current bucket.
 			win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
-			win.buckets[win.bucketIndex] = _createAggregateState(entry.reducers, entry.forget);
+			const initial = _createAggregateState(entry.reducers, entry.forget);
+			if (generation !== entry._generation) return;
+			win.buckets[win.bucketIndex] = initial;
 			// The evicted bucket's contributors leave the k-anonymity cohort too.
 			if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
 			// An eviction that changes nothing (an idle window, or an empty bucket
@@ -3232,7 +3251,10 @@ function _scheduleNextSlide(entry, win) {
 			// already hold the value, and a pending debounced publish still lands.
 			// Eviction only shrinks the cohort, so skipping cannot hide a value the
 			// threshold would newly release.
-			if (before !== null && before === _slideFingerprint(_computeWindowState(win, entry.reducers))) return;
+			if (before !== null) {
+				const after = _slideFingerprint(_computeWindowState(win, entry.reducers, entry._reducerEntries));
+				if (generation !== entry._generation || before === after) return;
+			}
 			// Refresh the noise seed on a slide that changes the value, from the
 			// exact wall-clock slide epoch (replicas sliding in the same epoch share
 			// it), so the noise offset does not stay constant across changing
@@ -3283,6 +3305,8 @@ function _clearAggregateTimers(entry) {
  */
 export function _resetAggregates() {
 	for (const e of aggregateRegistry.values()) {
+		_invalidateAggregateGeneration(e);
+		e._aggregateBlocked = true;
 		if (e.timer) clearTimer(e.timer);
 		_clearAggregateTimers(e);
 	}
@@ -3804,6 +3828,8 @@ export function _prepareHmr() {
 	}
 	for (const e of effectRegistry.values()) { if (e.timer) clearTimer(e.timer); }
 	for (const e of aggregateRegistry.values()) {
+		_invalidateAggregateGeneration(e);
+		e._aggregateBlocked = true;
 		if (e.timer) clearTimer(e.timer);
 		_clearAggregateTimers(e);
 	}
@@ -3940,7 +3966,11 @@ export function _restoreHmr(snap) {
 
 	// Restore aggregates
 	for (const [k, v] of snap.aggregates) {
+		// A durable generation may have advanced while the registration was
+		// absent. Re-register to read it before restoring snapshots or output.
+		if (v._persistedGeneration) { __registerAggregate(k, v._declaration); continue; }
 		v.timer = null;
+		if (!v._persistedGeneration) v._aggregateBlocked = false;
 		aggregateRegistry.set(k, v);
 		_aggregateByTopic.set(v.baseTopic || v.topic, v);
 		let srcSet = _aggregateBySource.get(v.source);
@@ -4493,6 +4523,7 @@ export function publish(topic, event, data, options) {
  *   upgrade?: (...args: any[]) => any,
  *   onError?: (path: string, error: unknown) => void,
  *   privacySecret?: string,
+ *   aggregateGenerationStore?: import('./server.d.ts').AggregateGenerationStore | null,
  *   authorizeDelivery?: (ctx: any, delivery: any) => unknown,
  *   deliveryAuthorizationOptions?: { maxPendingBytes?: number, timeoutMs?: number },
  *   rpc?: { perConnectionConcurrent?: number, perConnectionQueue?: number, perRouteConcurrent?: number, globalConcurrent?: number, maxQueue?: number, timeout?: number },
@@ -4500,7 +4531,7 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, authorizeDelivery, deliveryAuthorizationOptions, rpc } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, aggregateGenerationStore, authorizeDelivery, deliveryAuthorizationOptions, rpc } = cfg;
 
 	// RPC admission limits for this worker. Validated here, so a bad value
 	// fails at startup; omitted keys keep their defaults.
@@ -4510,6 +4541,8 @@ export function realtime(config) {
 	// at the first capture point: init fails without the adapter capability, and
 	// an app without an init export has each connection closed instead.
 	const deliveryPolicy = configureDeliveryAuthorization(authorizeDelivery, deliveryAuthorizationOptions);
+
+	if (aggregateGenerationStore !== undefined) _configureAggregateGeneration(aggregateGenerationStore);
 
 	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over

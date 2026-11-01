@@ -5,6 +5,8 @@ import { wallEpoch } from '../shared/runtime.js';
 import { _derivedScope, _derivedTopic } from './derived-topic.js';
 import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
+import { _awaitAggregateGeneration } from './aggregate-generation.js';
+import { _setResponseFence } from './response-fence.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { UNSEQUENCED } from './publish-helpers.js';
 import { _validateLaneLimit, _validateLaneTimeout, EFFECT_MAX_CONCURRENT, EFFECT_MAX_QUEUED, EFFECT_TIMEOUT_MS } from './work-lane.js';
@@ -360,20 +362,27 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 		const windowStreams = {};
 		for (const wn of windowKeys) {
 			const outputTopic = `${topic}:${wn}`;
-			const perWindowInit = async function aggregatePerWindowInit() {
+			const perWindowInit = async function aggregatePerWindowInit(ctx) {
 				const entry = _aggregateByTopic.get(topic);
 				if (!entry || !entry.windowStates) {
 					return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
 				}
-				if (entry._hydrationPromise) await entry._hydrationPromise;
-				const winState = entry.windowStates.get(wn);
-				if (!winState) return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
-				// A load after the boundary, before the boundary timer has run,
-				// closes the ended window first, as the timer would have.
-				if (winState.type === 'tumbling') _rollTumblingWindow(entry, winState, wallEpoch());
-				// With privacy, serve the last gated window value (see aggregateInit).
-				if (winState.privacy) return winState._lastWire;
-				return _computeWindowState(winState, reducers);
+				for (;;) {
+					await _awaitAggregateGeneration(entry);
+					const generation = entry._generation;
+					const winState = entry.windowStates.get(wn);
+					if (!winState) return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
+					// A load after the boundary, before the boundary timer has run,
+					// closes the ended window first, as the timer would have.
+					if (winState.type === 'tumbling') _rollTumblingWindow(entry, winState, wallEpoch());
+					if (generation !== entry._generation) continue;
+					// With privacy, serve the last gated window value (see aggregateInit).
+					const value = winState.privacy ? winState._lastWire : _computeWindowState(winState, reducers, entry._reducerEntries);
+					if (generation === entry._generation && !entry._aggregateBlocked) {
+						_fenceAggregateLoad(ctx, entry, topic, generation);
+						return value;
+					}
+				}
 			};
 			/** @type {any} */ (perWindowInit).__isStream = true;
 			/** @type {any} */ (perWindowInit).__isLive = true;
@@ -392,15 +401,19 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	}
 
 	// ---- Single-state form ----
-	const initFn = async function aggregateInit() {
+	const initFn = async function aggregateInit(ctx) {
 		const entry = _aggregateByTopic.get(topic);
 		if (entry) {
-			// Wait for snapshot hydration to finish before returning state
-			if (entry._hydrationPromise) await entry._hydrationPromise;
-			// With privacy, the initial load must serve the last GATED value
-			// (k-anon held / DP-noised), never the live below-k aggregate.
-			if (entry.privacy) return entry._lastWire;
-			return _computeAggregateState(entry.state, reducers);
+			for (;;) {
+				await _awaitAggregateGeneration(entry);
+				const generation = entry._generation;
+				// With privacy, serve the last gated value, never live below-k state.
+				const value = entry.privacy ? entry._lastWire : _computeAggregateState(entry.state, reducers, entry._reducerEntries);
+				if (generation === entry._generation && !entry._aggregateBlocked) {
+					_fenceAggregateLoad(ctx, entry, topic, generation);
+					return value;
+				}
+			}
 		}
 		return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
 	};
@@ -420,3 +433,9 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	/** @type {any} */ (initFn).__onUnsubscribePublic = options?.onUnsubscribe;
 	return initFn;
 };
+
+/** @param {any} ctx @param {any} entry @param {string} topic @param {number} generation */
+function _fenceAggregateLoad(ctx, entry, topic, generation) {
+	_setResponseFence(ctx, () => entry._generation === generation && !entry._aggregateBlocked && _aggregateByTopic.get(topic) === entry,
+		{ code: 'UNAVAILABLE', error: 'Aggregate state changed while preparing the response. Retry the request.' });
+}

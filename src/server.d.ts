@@ -1399,9 +1399,9 @@ export function live<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T,
  * suppression and keyed statistical noise on the published aggregate.
  * No differential privacy guarantee: contributions are not clipped, releases
  * are not budgeted, and a constant per-window offset exposes exact changes.
- * Single-state and lifetime offsets persist across restarts with the same secret,
- * topic and noise configuration. One known true value removes that offset from
- * past and future releases of the corresponding field. A sliding window draws
+ * Erasure resets change the noise generation. With aggregateGenerationStore,
+ * that generation persists across restarts and is shared by workers. One known true value removes that offset from
+ * past and future releases of that field in the same window and generation. A sliding window draws
  * fresh noise on each slide that changes its value (an unchanged slide keeps the
  * offset and publishes nothing); a continuous subscriber learns each bucket's
  * exact change, links the releases around every changing slide, and can average
@@ -1430,6 +1430,35 @@ export interface AggregatePrivacyConfig {
 	contributor?(data: any): string | number;
 	/** Restrict noise to these numeric field names (default: all numeric fields). */
 	fields?: string[];
+}
+
+/** A durable, store-issued aggregate erasure identity. Contains no user identity. */
+export interface AggregateErasureToken {
+	/** Stable store namespace: 1-128 ASCII letters, digits, underscores or hyphens. */
+	readonly namespace: string;
+	/** Canonical unsigned 128-bit decimal sequence; issued identities start at 1. */
+	readonly sequence: string;
+}
+
+/**
+ * Durable aggregate reset generations. Configure before aggregates are used.
+ * Every worker uses the same store namespace and persisted topic high-water marks.
+ * The caller persists one issued token per logical erasure and passes that token
+ * to live.forget on every worker and retry. The store does not fan out erasures.
+ * See docs/aggregate-generations.md for ordering, bootstrap and capacity rules.
+ */
+export interface AggregateGenerationStore {
+	readonly namespace: string;
+	/** Durably allocate a never-reused, increasing positive sequence. Refuse exhaustion. */
+	issueErasure(): Promise<AggregateErasureToken>;
+	/** Read the topic high-water mark, or sequence "0" for a never-reset topic. */
+	readGeneration(topic: string): Promise<AggregateErasureToken>;
+	/**
+	 * Validate the issued token and atomically persist max(current, token).
+	 * Return the durable current generation, including on duplicate/older tokens.
+	 * Never evict high-water marks or reuse their namespace. Refuse capacity limits.
+	 */
+	advanceGeneration(topic: string, erasure: AggregateErasureToken): Promise<AggregateErasureToken>;
 }
 
 /**
@@ -2573,6 +2602,8 @@ export namespace live {
 		opts?: {
 			tenantId?: string | null;
 			cascade?: boolean | { crdt?: string[] };
+			/** Required with aggregateGenerationStore: reuse one issued token on every worker and retry. */
+			aggregateErasure?: AggregateErasureToken;
 			/**
 			 * Audit HMAC key: UTF-8 string or bytes, at least 32 bytes. Overrides
 			 * configureForget for this call; null selects the legacy unkeyed hash.
@@ -5637,7 +5668,7 @@ export interface RealtimeConfig {
 	 * Operator secret keying the keyed statistical noise seed for
 	 * `live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy. The
 	 * per-window noise is seeded by HMAC-SHA256 of this secret over
-	 * topic and windowStart (the reserved tenant slot is empty), so replicas draw
+	 * topic, windowStart and reset generation (the reserved tenant slot is empty), so replicas draw
 	 * identical noise with the same secret. Public inputs alone cannot reproduce
 	 * the draws; a known true value can expose a reused offset. REQUIRED: without it a
 	 * `perturb` / `hybrid` aggregate throws at publish time rather than emit
@@ -5645,6 +5676,13 @@ export interface RealtimeConfig {
 	 * need it. @default undefined
 	 */
 	privacySecret?: string;
+	/**
+	 * Persist reset generations for aggregates with forget: 'reset'. Default null
+	 * keeps generations worker-local. Configure before the first aggregate load,
+	 * source fold, snapshot settlement or timer publication; imports may register
+	 * aggregates first. Failed bootstrap/reset blocks aggregate loads and output.
+	 */
+	aggregateGenerationStore?: AggregateGenerationStore | null;
 	/**
 	 * Wire-subscribe authorization (default `true`). realtime requires the
 	 * adapter's strict policy, so a client's raw WebSocket `subscribe` frame is

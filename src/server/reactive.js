@@ -12,6 +12,7 @@ import { LiveError } from './live-error.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish, UNSEQUENCED } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
+import { _invalidateAggregateGeneration, _invalidateAggregatePublication, _advanceAggregateGeneration, _advanceLocalAggregateGeneration } from './aggregate-generation.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 import { _derivedScope, _matchesDerivedScope } from './derived-topic.js';
@@ -43,12 +44,13 @@ export function installReactive(seams) {
  *
  * @param {any} winState
  * @param {Record<string, any>} reducers
+ * @param {[string, any][]} [entries]
  * @returns {any}
  */
-export function _computeWindowState(winState, reducers) {
+export function _computeWindowState(winState, reducers, entries = Object.entries(reducers)) {
 	if (winState.type === 'sliding') {
 		const merged = {};
-		for (const [field, r] of Object.entries(reducers)) {
+		for (const [field, r] of entries) {
 			if (r.combine) {
 				const slices = winState.buckets.map(b => b?.[field]);
 				merged[field] = r.combine(...slices);
@@ -56,20 +58,21 @@ export function _computeWindowState(winState, reducers) {
 				merged[field] = r.init();
 			}
 		}
-		return _computeAggregateState(merged, reducers);
+		return _computeAggregateState(merged, reducers, entries);
 	}
-	return _computeAggregateState(winState.state, reducers);
+	return _computeAggregateState(winState.state, reducers, entries);
 }
 
 /**
  * Compute aggregate state including computed fields.
  * @param {any} state
  * @param {Record<string, any>} reducers
+ * @param {[string, any][]} [entries]
  * @returns {any}
  */
-export function _computeAggregateState(state, reducers) {
+export function _computeAggregateState(state, reducers, entries = Object.entries(reducers)) {
 	const result = { ...state };
-	for (const [field, r] of Object.entries(reducers)) {
+	for (const [field, r] of entries) {
 		if (r.compute) {
 			result[field] = r.compute(result);
 		}
@@ -144,15 +147,18 @@ export function _warnAggregateWindowFailure(entry, err, what = 'publish') {
  * @param {any} [platform]
  */
 export function _publishWindow(entry, win, platform = state.cronPlatform) {
-	if (!platform) return;
-	const computed = _computeWindowState(win, entry.reducers);
+	if (!platform || entry._aggregateBlocked) return;
+	entry._aggregateUsed = true;
+	const generation = entry._generation;
+	const computed = _computeWindowState(win, entry.reducers, entry._reducerEntries);
 	// Privacy gate (k-anon suppress / keyed noise) then piiRedact, mirroring the
 	// event-fold publish in fireWatchers so the timer-driven boundary / slide
 	// publishes are gated identically.
+	if (generation !== entry._generation) return;
 	const gated = _gateAggregate(win, computed, win.outputTopic);
 	if (!gated.publish) return; // below k: hold the last published value
 	const wire = _redactOrDrop(win.outputTopic, gated.value);
-	if (wire === REDACT_DROP) return;
+	if (wire === REDACT_DROP || generation !== entry._generation) return;
 	_platformPublish(platform, win.outputTopic, 'set', wire, UNSEQUENCED);
 }
 
@@ -171,6 +177,7 @@ export function _publishWindow(entry, win, platform = state.cronPlatform) {
  */
 export function _rollTumblingWindow(entry, win, wall, platform) {
 	if (wall < win.nextBoundary) return;
+	const generation = entry._generation;
 	const closing = win.nextBoundary;
 	// Advance before any app code runs, so nothing that throws below can leave
 	// the window on a boundary that has already passed.
@@ -188,6 +195,7 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 	// boundary closes first, whichever timer fires first: its closing state
 	// belongs to the period that is ending here.
 	_closeUpstream(entry.source, closing, wall, platform, 0);
+	if (generation !== entry._generation) return;
 	// A pending debounced publish carries the closing window's state; the final
 	// publish below supersedes it rather than letting it land in the new window.
 	if (win.timer) {
@@ -207,11 +215,14 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 	} finally {
 		_closingBoundary = outerClosing;
 	}
+	if (generation !== entry._generation) return;
 	// An init() that throws keeps the window's previous state rather than
 	// failing the publish or subscribe that happened to close the window.
 	let reset = false;
 	try {
-		win.state = _createAggregateState(entry.reducers, entry.forget);
+		const initial = _createAggregateState(entry.reducers, entry.forget);
+		if (generation !== entry._generation) return;
+		win.state = initial;
 		reset = true;
 	} catch (err) {
 		_warnAggregateWindowFailure(entry, err, 'init');
@@ -494,6 +505,10 @@ function _wrapPlatformPublish(platform) {
 		const aggregateEntries = _aggregateBySource.get(topic);
 		if (aggregateEntries) {
 			for (const entry of aggregateEntries) {
+				if (entry._aggregateBlocked) continue;
+				entry._aggregateUsed = true;
+				const generation = entry._generation;
+				const boundary = entry._generationChanged;
 				if (entry.windowed) {
 					// Windowed branch: each window holds its own state slice
 					// (or hop-bucket array for sliding) and publishes to its
@@ -517,22 +532,28 @@ function _wrapPlatformPublish(platform) {
 							const bucket = win.buckets[win.bucketIndex];
 							for (const [field, reducer] of entry._reducerEntries) {
 								if (reducer.reduce) {
-									bucket[field] = reducer.reduce(bucket[field], event, data);
+									const value = reducer.reduce(bucket[field], event, data);
+									if (generation !== entry._generation) break;
+									bucket[field] = value;
 								}
 							}
 						} else {
 							for (const [field, reducer] of entry._reducerEntries) {
 								if (reducer.reduce) {
-									win.state[field] = reducer.reduce(win.state[field], event, data);
+									const value = reducer.reduce(win.state[field], event, data);
+									if (generation !== entry._generation) break;
+									win.state[field] = value;
 								}
 							}
 						}
+						if (generation !== entry._generation) break;
 						const winRef = win;
 						// Track the k-anonymity cohort for this window from the event's
 						// contributor before gating the publish.
 						if (winRef.privacy && winRef.privacy.contributor) {
 							try {
 								const _c = winRef.privacy.contributor(data);
+								if (boundary !== entry._generationChanged) break;
 								const _k = winRef.privacy.k;
 								if (winRef.bucketCohorts) _cohortAdd(winRef.bucketCohorts[winRef.bucketIndex], _c, _k);
 								else if (winRef.cohort) _cohortAdd(winRef.cohort, _c, _k);
@@ -540,14 +561,17 @@ function _wrapPlatformPublish(platform) {
 						}
 						// Privacy gate (k-anon suppress / keyed noise), then uniform piiRedact
 						// (a no-op unless this output topic is also a declared piiRedact stream).
-						const _gw = _gateAggregate(winRef, _computeWindowState(win, entry.reducers), winRef.outputTopic);
+						const raw = _computeWindowState(win, entry.reducers, entry._reducerEntries);
+						if (generation !== entry._generation) break;
+						const _gw = _gateAggregate(winRef, raw, winRef.outputTopic);
 						if (!_gw.publish) continue; // below k: hold the last published value
 						const computed = _redactOrDrop(winRef.outputTopic, _gw.value);
-						if (computed === REDACT_DROP) continue;
+						if (computed === REDACT_DROP || generation !== entry._generation) continue;
 						if (winRef.debounce > 0) {
 							if (winRef.timer) clearTimer(winRef.timer);
 							winRef.timer = setTimer(() => {
 								winRef.timer = null;
+								if (generation !== entry._generation) return;
 								_platformPublish(platform, winRef.outputTopic, 'set', computed, UNSEQUENCED);
 							}, winRef.debounce);
 						} else {
@@ -560,24 +584,34 @@ function _wrapPlatformPublish(platform) {
 				// Apply reducers (single-state)
 				for (const [field, reducer] of entry._reducerEntries) {
 					if (reducer.reduce) {
-						entry.state[field] = reducer.reduce(entry.state[field], event, data);
+						const value = reducer.reduce(entry.state[field], event, data);
+						if (generation !== entry._generation) break;
+						entry.state[field] = value;
 					}
 				}
 
+				if (generation !== entry._generation) continue;
 				// Track the k-anonymity cohort from the event's contributor.
 				if (entry.privacy && entry.privacy.contributor) {
-					try { _cohortAdd(entry.cohort, entry.privacy.contributor(data), entry.privacy.k); } catch {}
+					try {
+						const contributor = entry.privacy.contributor(data);
+						if (boundary !== entry._generationChanged) continue;
+						_cohortAdd(entry.cohort, contributor, entry.privacy.k);
+					} catch {}
 				}
 				// Privacy gate (k-anon suppress / keyed noise), then uniform piiRedact.
-				const _ga = _gateAggregate(entry, _computeAggregateState(entry.state, entry.reducers), entry.topic);
+				const raw = _computeAggregateState(entry.state, entry.reducers, entry._reducerEntries);
+				if (generation !== entry._generation) continue;
+				const _ga = _gateAggregate(entry, raw, entry.topic);
 				if (!_ga.publish) continue; // below k: hold the last published value
 				const computed = _redactOrDrop(entry.topic, _ga.value);
-				if (computed === REDACT_DROP) continue;
+				if (computed === REDACT_DROP || generation !== entry._generation) continue;
 
 				if (entry.debounce > 0) {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.timer = setTimer(() => {
 						entry.timer = null;
+						if (generation !== entry._generation) return;
 						_platformPublish(platform, entry.topic, 'set', computed, UNSEQUENCED);
 					}, entry.debounce);
 				} else {
@@ -859,9 +893,10 @@ async function _recomputeDerived(entry, platform) {
  * @param {string} contributorId
  * @param {any} [platform]
  * @param {{ done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }} [holders]
+ * @param {any[]} [selected]
  * @returns {number}
  */
-export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform, holders) {
+function _purgeAggregateEntries(contributorId, platform, holders, selected) {
 	/** @param {any} entry @param {any} holder */
 	const keyOf = (entry, holder) => holder.outputTopic || entry.topic;
 	/** @param {any} entry */
@@ -883,22 +918,25 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 		const key = keyOf(entry, holder);
 		return holders.known.has(key) && !holders.done.has(key) && !holders.never.has(key);
 	});
-	const entries = new Set(all.filter((entry) => pendingHolders(entry).length > 0));
-	const memberships = [];
+	const entries = new Set((selected || all).filter((entry) => pendingHolders(entry).length > 0));
+	const quarantined = [];
 	const failures = [];
 	const resets = [];
 	let count = 0;
 	// Quarantine every aggregate before invoking application initializers or
 	// publishers: reentrant source events must not repopulate an erased holder.
-	for (const group of _aggregateBySource.values()) {
-		for (const entry of entries) if (group.delete(entry)) memberships.push([group, entry]);
+	for (const entry of entries) {
+		entry._aggregateUsed = true;
+		quarantined.push([entry, entry._aggregateBlocked]);
+		entry._aggregateBlocked = true;
 	}
 	try {
 		for (const entry of entries) {
 			if (entry.forget === 'reset') {
-				entry._generation++;
+				_advanceLocalAggregateGeneration(entry);
+				_invalidateAggregateGeneration(entry);
 				entry._hydrationPromise = null;
-			}
+			} else if (entry.forget === 'retain') _invalidateAggregatePublication(entry);
 			for (const holder of pendingHolders(entry)) {
 				if (entry.forget === 'retain') {
 					if (holder.cohort) holder.cohort.clear();
@@ -921,23 +959,32 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 				holder._lastWire = undefined;
 				if (holder.cohort) holder.cohort.clear();
 				if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.clear();
-				resets.push([entry, holder]);
+				resets.push([entry, holder, entry._generation]);
 			}
 		}
 		// All old holder references are gone before any initializer runs.
-		for (const [entry, holder] of resets) {
+		for (const [entry, holder, generation] of resets) {
 			try {
+				if (entry._generation !== generation) throw new Error('Aggregate reset was superseded');
 				if (holder.buckets) {
-					holder.buckets = Array.from({ length: holder.bucketCount }, () => _createAggregateState(entry.reducers, entry.forget));
+					const buckets = Array.from({ length: holder.bucketCount }, () => _createAggregateState(entry.reducers, entry.forget));
+					if (entry._generation !== generation) throw new Error('Aggregate reset was superseded');
+					holder.buckets = buckets;
 					holder.bucketIndex = 0;
-				} else holder.state = _createAggregateState(entry.reducers, entry.forget);
-				const clean = _copyAggregateState(entry.windowStates ? _computeWindowState(holder, entry.reducers) : _computeAggregateState(holder.state, entry.reducers));
+				} else {
+					const initial = _createAggregateState(entry.reducers, entry.forget);
+					if (entry._generation !== generation) throw new Error('Aggregate reset was superseded');
+					holder.state = initial;
+				}
+				const clean = _copyAggregateState(entry.windowStates ? _computeWindowState(holder, entry.reducers, entry._reducerEntries) : _computeAggregateState(holder.state, entry.reducers, entry._reducerEntries));
+				if (entry._generation !== generation) throw new Error('Aggregate reset was superseded');
 				holder._lastWire = clean;
 				const topic = holder.outputTopic || entry.topic;
 				// A reset emits the clean initial value even below k, so clients
 				// discard the previously held value containing erased input.
 				const wire = _redactOrDrop(topic, clean);
 				if (wire === REDACT_DROP) throw new Error('Aggregate erasure reset was dropped by redaction');
+				if (entry._generation !== generation) throw new Error('Aggregate reset was superseded');
 				if (platform) _platformPublish(platform, topic, 'set', wire, UNSEQUENCED);
 				count++;
 				holders?.done.add(keyOf(entry, holder));
@@ -948,10 +995,50 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 			}
 		}
 	} finally {
-		for (const [group, entry] of memberships) group.add(entry);
+		for (const [entry, blocked] of quarantined) entry._aggregateBlocked = blocked;
 	}
-	if (failures.length || (holders && holders.never.size > 0)) throw new AggregateError(failures, 'Aggregate erasure incomplete');
+	if (failures.length || (!selected && holders && holders.never.size > 0)) throw new AggregateError(failures, 'Aggregate erasure incomplete');
 	return count;
+}
+
+/**
+ * Reset local holders after advancing the optional durable generation. Entries
+ * remain in the source index while awaiting storage so overlapping erasures
+ * reach them, but source folds, timers and loaders cannot use their old state.
+ * @param {string} contributorId @param {any} [platform] @param {any} [holders]
+ * @param {any} [erasure] @param {(value: any) => any} [wait]
+ * @returns {number | Promise<number>}
+ */
+export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform, holders, erasure, wait = value => value) {
+	const all = [...new Set([..._aggregateBySource.values()].flatMap(group => [...group]))];
+	const persisted = all.filter(entry => entry._persistedGeneration);
+	if (!persisted.length) return _purgeAggregateEntries(contributorId, platform, holders);
+	const failures = [];
+	let count = 0;
+	try { count = _purgeAggregateEntries(contributorId, platform, holders, all.filter(entry => !entry._persistedGeneration)); }
+	catch (error) { failures.push(error); }
+	const tasks = persisted.map(entry => {
+		try {
+			return _advanceAggregateGeneration(entry, erasure, () => {
+				for (const holder of entry.windowStates ? entry.windowStates.values() : [entry]) {
+					if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }
+					if (holder.buckets) holder.buckets = Array.from({ length: holder.bucketCount }, () => ({}));
+					else holder.state = {};
+					holder._lastWire = undefined;
+					holder.cohort?.clear();
+					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.clear();
+				}
+			}, () => _purgeAggregateEntries(contributorId, platform, holders, [entry]), wait);
+		} catch (error) { return Promise.reject(error); }
+	});
+	return Promise.allSettled(tasks).then(results => {
+		for (const result of results) {
+			if (result.status === 'fulfilled') count += result.value;
+			else failures.push(result.reason);
+		}
+		if (failures.length || (holders && holders.never.size > 0)) throw new AggregateError(failures, 'Aggregate erasure incomplete');
+		return count;
+	});
 }
 
 /**

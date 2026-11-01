@@ -31,6 +31,7 @@ import { _purgeRateLimitUser } from './rate-limit.js';
 import { _purgeIdempotencyUser } from './idempotency.js';
 import { _purgeSmoothUser } from './smooth.js';
 import { _purgeAggregateCohorts } from './reactive.js';
+import { _readAggregateErasure } from './aggregate-generation.js';
 import { _purgeCrdtDocs } from './crdt.js';
 import { _ownerEmit } from './room-owner.js';
 import { state } from './state.js';
@@ -144,7 +145,7 @@ const _REFUSED_TRIES = 3;
  * running them needs, per-holder progress, and when to try again. Only this
  * process can finish them, and a holder it finished is never run again here;
  * a process that exits takes this state, and the data it describes, with it.
- * @type {Map<string, { userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, open: Set<string>, blocked: Set<string>, holders: Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }>, attempts: number, createdAt: number, updatedAt: number, retryAt: number, exhausted: boolean, exhaustedAt: number }>}
+ * @type {Map<string, { userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, aggregateErasure?: any, open: Set<string>, blocked: Set<string>, holders: Map<string, { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }>, attempts: number, createdAt: number, updatedAt: number, retryAt: number, exhausted: boolean, exhaustedAt: number }>}
  */
 const _localJobs = new Map();
 
@@ -365,7 +366,7 @@ function _hashUserId(userId, key) {
  * count it removed (sync or async). Adding a new user-keyed in-memory store
  * without a descriptor here trips the completeness test. Durable stores are NOT
  * listed here - they ride the `store.purgeUser` seam.
- * @type {Array<{ name: string, run: (tenantId: string | null, userId: string, cascade: any, holders?: { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }) => number | Promise<number> }>}
+ * @type {Array<{ name: string, run: (tenantId: string | null, userId: string, cascade: any, holders?: { done: Set<string>, failed: Set<string>, never: Set<string>, known: Set<string>, scoped: boolean }, aggregateErasure?: any, wait?: (value: any) => any) => number | Promise<number> }>}
  */
 const _descriptors = [
 	{ name: 'push', run: (t, u) => _purgePushUser(t, u) },
@@ -391,7 +392,7 @@ const _descriptors = [
 	} },
 	// Aggregate reducer state is arbitrary: an explicit reset policy must
 	// discard every holder, or this surface reports incomplete erasure.
-	{ name: 'aggregateCohorts', run: (_t, u, _c, holders) => _purgeAggregateCohorts(u, _forgetPlatform || undefined, holders) }
+	{ name: 'aggregateCohorts', run: (_t, u, _c, holders, erasure, wait) => _purgeAggregateCohorts(u, _forgetPlatform || undefined, holders, erasure, wait) }
 ];
 
 /**
@@ -573,6 +574,7 @@ const _liveForget = async function forget(userId, opts) {
 	if (cascadeProblem === 'shape') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade must be a boolean or an object ({ crdt?: string[] })');
 	}
+	const aggregateErasure = _readAggregateErasure(o.aggregateErasure);
 	const onForget = o.onForget;
 	if (onForget !== undefined && typeof onForget !== 'function') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: onForget must be a function');
@@ -593,7 +595,7 @@ const _liveForget = async function forget(userId, opts) {
 	const job = jobs === null ? null : {
 		id: randomUuid(), runId: randomUuid(), attempts: 1, claimed: false, shared, local: _localSteps(cascade, shared)
 	};
-	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade }, onForget);
+	return _runErasure(jobs, job, { userId, userIdHash, tenantId, cascade, aggregateErasure }, onForget);
 };
 
 /**
@@ -605,12 +607,12 @@ const _liveForget = async function forget(userId, opts) {
  * In-memory steps left open stay with this process, which retries them itself.
  * @param {any} jobs
  * @param {{ id: string, runId: string, attempts: number, claimed: boolean, shared: string[], local: string[] } | null} job
- * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any }} run
+ * @param {{ userId: string, userIdHash: string | null, tenantId: string | null, cascade: any, aggregateErasure?: any }} run
  * @param {Function | undefined} onForget
  * @returns {Promise<ForgetResult>}
  */
 async function _runErasure(jobs, job, run, onForget) {
-	const { userId, userIdHash, tenantId, cascade } = run;
+	const { userId, userIdHash, tenantId, cascade, aggregateErasure } = run;
 	const jobId = job === null ? null : job.id;
 	// Participate in graceful drain so a shutdown waits for an in-progress
 	// erasure rather than tearing it down half-applied (same contract as a cron
@@ -663,7 +665,7 @@ async function _runErasure(jobs, job, run, onForget) {
 		let error = null;
 		try {
 			erased = await _erase(userId, tenantId, cascade, jobId, failure, plan, holders,
-				job === null ? undefined : controller.signal, job === null ? undefined : lease.signal);
+				job === null ? undefined : controller.signal, job === null ? undefined : lease.signal, aggregateErasure);
 		} catch (err) {
 			error = err;
 		}
@@ -697,7 +699,7 @@ async function _runErasure(jobs, job, run, onForget) {
 			const localOpen = job.local.filter((step) => !done.has(step) && !blocked.has(step));
 			const localBlocked = job.local.filter((step) => blocked.has(step));
 			if (localOpen.length + localBlocked.length > 0 && holders !== null) {
-				_keepLocal(job.id, { userId, userIdHash, tenantId, cascade }, localOpen, localBlocked, holders);
+				_keepLocal(job.id, { userId, userIdHash, tenantId, cascade, aggregateErasure }, localOpen, localBlocked, holders);
 			}
 			const sharedOpen = job.shared.filter((step) => !done.has(step));
 			/** @type {'recorded' | 'unrecorded' | 'cancelled' | null} */
@@ -909,7 +911,7 @@ function _keepLocal(id, run, open, blocked, holders) {
 	const now = wallEpoch();
 	const exhausted = open.length === 0;
 	_localJobs.set(id, {
-		userId: run.userId, userIdHash: run.userIdHash, tenantId: run.tenantId, cascade: run.cascade,
+		userId: run.userId, userIdHash: run.userIdHash, tenantId: run.tenantId, cascade: run.cascade, aggregateErasure: run.aggregateErasure,
 		open: new Set(open), blocked: new Set(blocked), holders, attempts: 1,
 		createdAt: now, updatedAt: now, retryAt: now + _retryDelay(1), exhausted, exhaustedAt: exhausted ? monotonicNow() : 0
 	});
@@ -994,7 +996,7 @@ async function _retryLocalDue(id, includeExhausted = false) {
 			const failure = { failedSurfaces: [], doneSurfaces: [], blockedSurfaces: [], rowsAffected: 0 };
 			let code = null;
 			try {
-				await _erase(entry.userId, entry.tenantId, entry.cascade, jobId, failure, new Set(entry.open), entry.holders, controller.signal);
+				await _erase(entry.userId, entry.tenantId, entry.cascade, jobId, failure, new Set(entry.open), entry.holders, controller.signal, controller.signal, entry.aggregateErasure);
 			} catch (err) {
 				code = String(/** @type {any} */ (err)?.code || 'INTERNAL_ERROR');
 			}
@@ -1096,9 +1098,10 @@ function _noteBlocked(failure, step, holders) {
  *   step starts, and the waits on store calls end
  * @param {AbortSignal} [sharedSignal] fires when the run is cancelled or loses
  *   its lease: no further shared step starts, and their waits end
+ * @param {any} [aggregateErasure]
  * @returns {Promise<{ surfaces: Record<string, number>, rowsAffected: number }>}
  */
-async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders = null, signal = undefined, sharedSignal = signal) {
+async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders = null, signal = undefined, sharedSignal = signal, aggregateErasure = undefined) {
 	const crdtDocs = cascade !== null && typeof cascade === 'object' && Array.isArray(cascade.crdt) ? cascade.crdt : null;
 	/** @type {Record<string, number>} */
 	const surfaces = {};
@@ -1127,7 +1130,10 @@ async function _erase(userId, tenantId, cascade, jobId, failure, plan, holders =
 		if (isShared && sharedSignal?.aborted) { sharedStopped = true; continue; }
 		let count = 0;
 		try {
-			count = await _bounded(d.run(tenantId, userId, cascade, holders?.get(d.name)), undefined, isShared ? sharedSignal : signal);
+			const purged = d.run(tenantId, userId, cascade, holders?.get(d.name), aggregateErasure, value => _bounded(value, undefined, isShared ? sharedSignal : signal));
+			// Aggregate advances fence their own store waits. A competing outer
+			// timer could report failure before that fence closes publication.
+			count = d.name === 'aggregateCohorts' ? await purged : await _bounded(purged, undefined, isShared ? sharedSignal : signal);
 			if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
 			doneSurfaces.push(d.name);
 		} catch {
