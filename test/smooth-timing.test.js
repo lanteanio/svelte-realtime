@@ -161,6 +161,8 @@ it('stops catch-up when the clock fence removes cluster ownership', async () => 
 	platform.smooth = { releaseOwner: () => { releases++; } };
 	platform.clockFence = { fenced: () => stamps.length === 1 };
 	record.owned = true;
+	record.ownerEpoch = '1';
+	record.ownerDeadline = 10000;
 	record.registry.set('player', ws);
 	fire(100);
 	expect(stamps).toHaveLength(1);

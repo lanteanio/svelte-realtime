@@ -8,6 +8,23 @@ it('accepts typed server options and rejects invalid values', () => {
 import { configureForget, introspect, live, type SmoothConfig, type TenantConfig } from '../src/server.js';
 import { LiveError, type ErrorMetadata } from '../src/server.js';
 import { RpcError } from '../src/client.js';
+import type { SmoothCluster, SmoothClusterHandlers, SmoothOwnershipLease } from '../src/server.js';
+declare const coordinator: SmoothCluster;
+declare const handlers: SmoothClusterHandlers;
+const lease: SmoothOwnershipLease = { epoch: '9007199254740993', leaseMs: 10000 };
+coordinator.renewOwner('__smooth:room', lease.epoch);
+coordinator.relayBroadcast('__smooth:room', 'event', {}, undefined, 0, lease.epoch);
+handlers.onBroadcast('__smooth:room', 'event', {}, undefined, 0, 'owner', lease.epoch);
+// @ts-expect-error epochs preserve exact decimal strings
+const numericEpoch: SmoothOwnershipLease = { epoch: 1, leaseMs: 10000 };
+// @ts-expect-error a renewal must name the tenure
+coordinator.renewOwner('__smooth:room');
+// @ts-expect-error authoritative frames must carry their epoch
+handlers.onAck('__smooth:room', 'user', { id: 1, state: {}, t: 0 });
+// @ts-expect-error boolean acquisition has no fenced lease
+const unfenced: SmoothCluster['acquireOwner'] = async () => true;
+void numericEpoch; void unfenced;
+
 const publicError = new LiveError('LIMIT', 'Limit reached', { params: { count: 3 }, details: ['retry', null] });
 const receivedError = new RpcError('LIMIT', 'Limit reached', { params: { count: 3 } });
 const metadata: ErrorMetadata = { params: publicError.params, details: receivedError.details };

@@ -37,6 +37,8 @@ afterEach(async () => {
 
 async function pair(interest, options = {}) {
 	const urls = [];
+	urls.controls = new Set();
+	urls.applied = [];
 	const errors = [];
 	const local = ['A', 'B'].map(instanceId => fork(
 		fileURLToPath(new URL('./helpers/smooth-cluster-instance.js', import.meta.url)),
@@ -44,6 +46,7 @@ async function pair(interest, options = {}) {
 		{ execArgv: [], windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }
 	));
 	workers.push(...local);
+	urls.workers = local;
 	local.forEach((worker, i) => {
 		worker.on('error', error => errors.push(error));
 		worker.stderr.on('data', data => {
@@ -52,6 +55,8 @@ async function pair(interest, options = {}) {
 		});
 		worker.on('message', message => {
 			if (message.type === 'ready') urls[i] = message.url;
+			else if (message.type === 'controlled') urls.controls.add(message.id);
+			else if (message.type === 'applied') urls.applied.push(message);
 			else if (message.type === 'relay' && local[1 - i].connected) local[1 - i].send(message);
 		});
 	});
@@ -96,6 +101,28 @@ it.skipIf(!native).each([false, true])('announces idle local and remote joins to
 		await sleep(60);
 		expect(earlier.updates(later.you)).toHaveLength(count);
 	}
+}, 30000);
+
+it.skipIf(!native)('keeps stalled and replacement owners from interleaving local or relayed frames', async () => {
+	const pairState = await pair(false, { leaseMs: 250, reportApply: true });
+	const old = await join(pairState[0]);
+	const control = async (index, message) => {
+		pairState.workers[index].send(message);
+		await until(() => pairState.controls.has(message.id), message.type);
+	};
+	await control(0, { type: 'stall', ms: 1000, id: 'stall' });
+	await control(1, { type: 'takeover', epoch: '2', id: 'takeover' });
+	const next = await join(pairState[1]);
+	old.ws.send(JSON.stringify({ rpc: 'idle/shape/__smooth/command', args: ['room', [{ id: 1, cmd: { dx: 7 } }]] }));
+	next.ws.send(JSON.stringify({ rpc: 'idle/shape/__smooth/command', args: ['room', [{ id: 1, cmd: { dx: 10 } }]] }));
+	await until(() => old.messages.some(message => message.event === 'ack' && message.data.state.x === 7), 'forwarded command acknowledgement');
+	expect(pairState.applied.filter(message => message.instance === 'A')).toEqual([]);
+	expect(pairState.applied.filter(message => message.dx === 7).map(message => message.instance)).toEqual(['B']);
+	for (const worker of pairState.workers) worker.send({ type: 'relay', method: 'onBroadcast', args: [
+		'__smooth:idle:room', 'update', { key: next.you, data: { x: 999, y: 0 } }, undefined, 900, 'A', '1'
+	] });
+	await sleep(80);
+	for (const client of [old, next]) expect(client.updates(next.you).some(message => message.data.data.x === 999)).toBe(false);
 }, 30000);
 
 const budgetRuntime = process.env.REALTIME_SMOOTH_BUDGET_RUNTIME;

@@ -786,6 +786,16 @@ export function createInterestState(interest) {
 			if (elapsed > 0) return slewApplied(r.applied, targetDelayMs(r.ewma), elapsed);
 			return r.applied;
 		},
+		/** Forget delivered state after a handoff while preserving subscriber centers. */
+		invalidateDelivery() {
+			lod.clear();
+			sendCadence.clear();
+			last = new Map();
+			lastN = 0;
+			lastUseIndex = false;
+			exits.clear();
+			index.reset();
+		},
 		/** Drop every center, band record, cadence, and the spatial scratch (topic teardown). */
 		reset() {
 			centers.clear();

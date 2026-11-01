@@ -1153,7 +1153,10 @@ function scriptedSmoothCluster(opts = {}) {
 	let handlers = null;
 	let owner = opts.owner !== undefined ? opts.owner : true;
 	let resolveReadFn = null;
+	let epoch = 1;
+	const lease = () => ({ epoch: String(epoch), leaseMs: 10000 });
 	const cluster = {
+		ownershipVersion: 1,
 		instanceId: opts.instanceId || 'A',
 		onMessage(h) { handlers = h; },
 		relayCommand(...a) { calls.relayCommand.push(a); },
@@ -1163,8 +1166,8 @@ function scriptedSmoothCluster(opts = {}) {
 		relayBroadcast(...a) { calls.relayBroadcast.push(a); },
 		relayAck(...a) { calls.relayAck.push(a); },
 		relayLeave(...a) { calls.relayLeave.push(a); },
-		async acquireOwner(t) { calls.acquireOwner.push(t); return owner; },
-		async renewOwner(t) { calls.renewOwner.push(t); return opts.renew !== undefined ? opts.renew : true; },
+		async acquireOwner(t) { calls.acquireOwner.push(t); return owner ? lease() : null; },
+		async renewOwner(t) { calls.renewOwner.push(t); return opts.renew === false ? null : lease(); },
 		async releaseOwner(t) { calls.releaseOwner.push(t); return true; },
 		async writeSnapshot(t, payload) { calls.writeSnapshot.push([t, payload]); },
 		async readSnapshot(t) {
@@ -1177,14 +1180,14 @@ function scriptedSmoothCluster(opts = {}) {
 	return {
 		cluster,
 		calls,
-		setOwner(v) { owner = v; },
+		setOwner(v) { if (v) epoch++; owner = v; },
 		resolveRead() { if (resolveReadFn) resolveReadFn(); },
 		emit: {
 			command: (...a) => handlers.onCommand(...a),
 			sync: (...a) => handlers.onSync(...a),
-			syncReply: (...a) => handlers.onSyncReply(...a),
-			broadcast: (...a) => handlers.onBroadcast(...a),
-			ack: (...a) => handlers.onAck(...a),
+			syncReply: (...a) => handlers.onSyncReply(...a, String(epoch)),
+			broadcast: (...a) => handlers.onBroadcast(...(a.length === 7 ? a : [...a, String(epoch)])),
+			ack: (...a) => handlers.onAck(...a, String(epoch)),
 			leave: (...a) => handlers.onLeave(...a),
 			shoot: (...a) => handlers.onShoot(...a)
 		}
@@ -1489,7 +1492,7 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(platform.wireSent.filter((s) => s.event === 'update')).toHaveLength(0);
 	});
 
-	it('becoming the owner discards the receive-side shadow and resumes immediate delivery', async () => {
+	it('becoming the owner discards the receive-side shadow and rejects old owner frames', async () => {
 		const { name } = declareShape({
 			tickMs: 20,
 			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
@@ -1511,12 +1514,11 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		// the shadow (the authoritative catalog supersedes it).
 		sc.setOwner(true);
 		await call(mockWs({ id: 'owner1' }), platform, name + '/shape/__smooth/sync', ['r1']);
-		// As the owner, a further relayed frame (a handoff-overlap straggler) is delivered
-		// immediately, not buffered into a now-discarded shadow.
-		sc.emit.broadcast(WT, 'update', { key: 'late', data: { x: 5, y: 0 } }, undefined, 5, 'A');
+		// The previous owner cannot publish into the new tenure.
+		sc.emit.broadcast(WT, 'update', { key: 'late', data: { x: 5, y: 0 } }, undefined, 5, 'A', '1');
 		expect(
 			platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'late')
-		).toHaveLength(1);
+		).toHaveLength(0);
 	});
 
 	it('delivers a relayed ack to the registered local socket', async () => {
@@ -1534,7 +1536,7 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(ack.data.id).toBe(7);
 	});
 
-	it('drops a redelivered or regressing broadcast seq, and resets the watermark on an owner change', async () => {
+	it('drops a redelivered or regressing broadcast seq, and resets the watermark on a higher epoch', async () => {
 		const { name } = declareShape();
 		const sc = scriptedSmoothCluster({ owner: false });
 		const platform = clusterPlatform(sc);
@@ -1542,14 +1544,14 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		await vi.advanceTimersByTimeAsync(1);
 		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
 		await vi.advanceTimersByTimeAsync(1);
-		const ev = (key, seq, owner) => sc.emit.broadcast(WT, 'event', { type: 'x', key, data: {}, id: 1 }, undefined, seq, owner);
+		const ev = (key, seq, owner, epoch = '1') => sc.emit.broadcast(WT, 'event', { type: 'x', key, data: {}, id: 1 }, undefined, seq, owner, epoch);
 		ev('1:0', 5, 'A');
 		ev('1:1', 5, 'A'); // duplicate seq -> dropped
 		ev('1:2', 3, 'A'); // regressing seq -> dropped
 		expect(platform.wirePublished.filter((p) => p.event === 'event')).toHaveLength(1);
 		// A new owner restarts the seq counter; the watermark resets so its lower
 		// seqs are NOT dropped.
-		ev('2:0', 0, 'B');
+		ev('2:0', 0, 'B', '2');
 		expect(platform.wirePublished.filter((p) => p.event === 'event')).toHaveLength(2);
 	});
 

@@ -157,21 +157,21 @@ describe('failed smooth sync against the installed adapter', () => {
 	});
 	it('releases an inert cluster owner and its registry after initial failure', async () => {
 		const releaseOwner = vi.fn();
-		server.platform.smooth = { acquireOwner: async () => true, releaseOwner };
+		server.platform.smooth = { ownershipVersion: 1, renewOwner: async () => ({ epoch: '1', leaseMs: 10000 }), acquireOwner: async () => ({ epoch: '1', leaseMs: 10000 }), releaseOwner };
 		let fail = true;
 		const name = shape(() => { if (fail) throw Error('cluster initial refused'); return { x: 0, y: 0 }; });
 		const peer = await connect();
 		expect((await rpc(peer, name + '/sync')).ok).toBe(false);
 		expect(peer.native.isSubscribed(wireTopic)).toBe(false);
 		expect(_smoothTopics.has(topic)).toBe(false);
-		expect(releaseOwner).toHaveBeenCalledWith(wireTopic);
+		expect(releaseOwner).toHaveBeenCalledWith(wireTopic, '1');
 		fail = false;
 		const retry = await rpc(peer, name + '/sync');
 		expect(retry.ok).toBe(true);
 		expect(_smoothTopics.get(topic).registry.get(retry.data.you)).toBe(peer.native);
 	});
 	it('preserves a live cluster member when another socket with the same identity fails initial', async () => {
-		server.platform.smooth = { acquireOwner: async () => true, releaseOwner() {} };
+		server.platform.smooth = { ownershipVersion: 1, renewOwner: async () => ({ epoch: '1', leaseMs: 10000 }), acquireOwner: async () => ({ epoch: '1', leaseMs: 10000 }), releaseOwner() {} };
 		let fail = false;
 		const name = shape(() => { if (fail) throw Error('replacement refused'); return { x: 0, y: 0 }; });
 		const accepted = await connect(), refused = await connect();
@@ -205,7 +205,7 @@ describe('failed smooth sync against the installed adapter', () => {
 		let handlers;
 		const requests = [], relayLeave = vi.fn();
 		server.platform.smooth = {
-			instanceId: 'edge', acquireOwner: async () => false, relayLeave,
+			ownershipVersion: 1, renewOwner: async () => null, releaseOwner() {}, instanceId: 'edge', acquireOwner: async () => null, relayLeave,
 			onMessage(value) { handlers = value; },
 			requestSync(wire, identity, origin, corr) { requests.push({ wire, identity, corr }); }
 		};
@@ -224,7 +224,7 @@ describe('failed smooth sync against the installed adapter', () => {
 		expect(_smoothTopics.get(topic)).toBe(rec);
 		expect(rec.pendingSync.size).toBe(1);
 		const request = requests[1];
-		handlers.onSyncReply(request.wire, request.corr, { ack: 0, states: [] });
+		handlers.onSyncReply(request.wire, request.corr, { ack: 0, states: [] }, '1');
 		expect((await pending).ok).toBe(true);
 		expect(rec.registry.get(request.identity)).toBe(remaining.native);
 		if (!sameIdentity) expect(relayLeave.mock.calls[0][1]).toBe(requests[0].identity);
@@ -233,7 +233,7 @@ describe('failed smooth sync against the installed adapter', () => {
 	}
 	for (const clustered of [false, true]) {
 		it('rolls back throwing wire packing without taking an existing entity (clustered: ' + clustered + ')', async () => {
-			if (clustered) server.platform.smooth = { acquireOwner: async () => true, releaseOwner() {} };
+			if (clustered) server.platform.smooth = { ownershipVersion: 1, renewOwner: async () => ({ epoch: '1', leaseMs: 10000 }), acquireOwner: async () => ({ epoch: '1', leaseMs: 10000 }), releaseOwner() {} };
 			let fail = true;
 			const name = shape({ x: 0, y: 0 }, { tickMs: 60000, wire: { state: {
 				pack(state) { if (fail) throw Error('packing refused'); return state; }, unpack: state => state
@@ -262,10 +262,10 @@ describe('failed smooth sync against the installed adapter', () => {
 		let handlers, fail = true;
 		const relayLeave = vi.fn();
 		server.platform.smooth = {
-			instanceId: 'edge', acquireOwner: async () => false, relayLeave,
+			ownershipVersion: 1, renewOwner: async () => null, releaseOwner() {}, instanceId: 'edge', acquireOwner: async () => null, relayLeave,
 			onMessage(value) { handlers = value; },
 			requestSync(wire, identity, origin, corr) {
-				queueMicrotask(() => handlers.onSyncReply(wire, corr, { ack: 0, states: [{ key: identity, state: { x: 0, y: 0 } }] }));
+				queueMicrotask(() => handlers.onSyncReply(wire, corr, { ack: 0, states: [{ key: identity, state: { x: 0, y: 0 } }] }, '1'));
 			}
 		};
 		const name = shape({ x: 0, y: 0 }, { wire: { state: {

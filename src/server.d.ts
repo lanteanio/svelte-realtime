@@ -3734,9 +3734,51 @@ export interface MultiplayerExport extends RoomExport {
 	};
 }
 
+/** A positive canonical decimal string; compare by length, then lexically. */
+export type SmoothOwnershipEpoch = string;
+
+/** A live lease measured conservatively from the start of the coordinator call. */
+export interface SmoothOwnershipLease {
+	epoch: SmoothOwnershipEpoch;
+	/** Positive safe integer milliseconds. Network and await time count against it. */
+	leaseMs: number;
+}
+
+/** Inbound coordinator transport. Owner epochs are mandatory on authoritative replies. */
+export interface SmoothClusterHandlers {
+	onCommand(topic: string, identity: string, origin: string, commands: Array<{ id: number; cmd: any }>): void;
+	onSync(topic: string, identity: string, origin: string, correlation: string): void;
+	onSyncReply(topic: string, correlation: string, payload: { ack: number; states: Array<{ key: string; state: any }> }, epoch: SmoothOwnershipEpoch): void;
+	onBroadcast(topic: string, event: string, data: any, excludeIdentity: string | undefined, sequence: number, ownerInstance: string, epoch: SmoothOwnershipEpoch): void;
+	onAck(topic: string, identity: string, payload: { id: number; state: any; t: number }, epoch: SmoothOwnershipEpoch): void;
+	onLeave(topic: string, identity: string, origin: string): void;
+	onShoot(topic: string, identity: string, origin: string, payload: any): void;
+}
+
 /**
- * Configuration for `live.smooth()`.
+ * Coordinator installed as platform.smooth. Lease mutation and authoritative
+ * publishing must atomically check the live owner and epoch at the backend.
+ * See docs/smooth-cluster.md for lifetime, durability, ordering, and cell rules.
  */
+export interface SmoothCluster {
+	readonly ownershipVersion: 1;
+	readonly instanceId: string;
+	acquireOwner(topic: string): Promise<SmoothOwnershipLease | null>;
+	renewOwner(topic: string, epoch: SmoothOwnershipEpoch): Promise<SmoothOwnershipLease | null>;
+	releaseOwner(topic: string, epoch: SmoothOwnershipEpoch): void | Promise<unknown>;
+	onMessage(handlers: SmoothClusterHandlers): void;
+	relayCommand(topic: string, identity: string, origin: string, commands: Array<{ id: number; cmd: any }>): void;
+	requestSync(topic: string, identity: string, origin: string, correlation: string): void;
+	sendSyncReply(topic: string, correlation: string, origin: string, payload: { ack: number; states: Array<{ key: string; state: any }> }, epoch: SmoothOwnershipEpoch): void;
+	relayBroadcast(topic: string, event: string, data: any, excludeIdentity: string | undefined, sequence: number, epoch: SmoothOwnershipEpoch): void;
+	relayAck(topic: string, identity: string, origin: string, payload: { id: number; state: any; t: number }, epoch: SmoothOwnershipEpoch): void;
+	relayLeave(topic: string, identity: string, origin: string): void;
+	relayShoot?(topic: string, identity: string, origin: string, payload: any): void;
+	readSnapshot?(topic: string): Promise<Array<{ key: string; state: any }> | null>;
+	writeSnapshot?(topic: string, states: Array<{ key: string; state: any }>, epoch: SmoothOwnershipEpoch): Promise<unknown>;
+}
+
+/** Configuration for `live.smooth()`. */
 export interface SmoothConfig {
 	/** Topic name, or a function computing it from context and room args. */
 	topic: string | ((ctx: LiveContext, ...args: any[]) => string);

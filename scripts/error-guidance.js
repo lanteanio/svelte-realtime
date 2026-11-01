@@ -256,10 +256,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Sign the user in and reconnect so the connection carries an identity with `id`, `user_id` or `userId`. Check the guard and the auth wiring in the upgrade hook.'
 	}),
 	UNAVAILABLE: Object.freeze({
-		cause: 'The server is draining for graceful shutdown, so it rejects new RPC, binary, upload and server-side direct calls.',
-		consequence: 'The new call gets an error reply (RpcError on the client), or a server-side direct call throws a LiveError unless a `fallback` is configured. Work already in flight continues.',
-		automaticRecovery: 'None for the rejected call. The client reconnects in the normal way once the draining server closes the socket.',
-		nextAction: 'Retry after reconnecting to a healthy instance. Pass a `fallback` for direct calls so pages render degraded during deploys.'
+		cause: 'The server is draining for graceful shutdown, or a smooth owner lease expires while preparing a sync reply.',
+		consequence: 'The call gets an error reply (RpcError on the client), or a server-side direct call throws a LiveError unless a `fallback` is configured. A smooth sync does not return an expired owner basis.',
+		automaticRecovery: 'None for the rejected call. The client reconnects in the normal way once a draining server closes the socket; a smooth view retries its sync.',
+		nextAction: 'Retry against a healthy instance. For repeated smooth sync expiry, check coordinator latency and slow application callbacks. Pass a `fallback` for direct calls so pages render degraded during deploys.'
 	}),
 	UNKNOWN: Object.freeze({
 		cause: 'An RPC, batch, stream or upload error reply arrives with no `code` field, for example from an incompatible server or a custom handler that writes raw replies.',

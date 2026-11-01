@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer, setImmediateTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _setResponseFence } from './response-fence.js';
 import { _subscribeTracked, releaseSubscription } from './membership.js';
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _topicInTenant } from './tenant.js';
@@ -512,9 +513,9 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// the owner-side stand-in socket per remote (instance, identity) so the
 			// authority's by-reference ownership check holds across ticks;
 			// `pendingSync` correlates a non-owner's in-flight sync request;
-			// `eventSeq` is the owner's outbound broadcast counter; `lastSeenSeq` /
-			// `lastSeenOwner` are the receiver's dedup watermark for the current
-			// owner; `owned` is whether this instance currently holds the tick lease.
+			// `eventSeq` is the owner's outbound broadcast counter. Receivers share
+			// an epoch/sequence watermark across the base and all cell topics.
+			// Ownership additionally requires a live monotonic duration deadline.
 			cfg,
 			registry: new Map(),
 			// In-flight joins share a wire reservation until every attempt settles.
@@ -529,6 +530,14 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			shootEventSeq: 0,
 			lastSeenSeq: -1,
 			lastSeenOwner: null,
+			lastSeenEpoch: null,
+			ownerEpoch: null,
+			ownerDeadline: 0,
+			ownerGeneration: 0,
+			ownerAcquiring: null,
+			ownerRenewing: false,
+			ownerRenewMs: _SMOOTH_RENEW_MS,
+			runtime: rt,
 			lastRenew: 0,
 			owned: false,
 			// Owner wall-clock basis captured at a non-owner from inbound acks (which
@@ -738,9 +747,11 @@ function _smoothLoadSnapshot(rec, cluster) {
 		rec.snapshotReady = Promise.resolve();
 		return rec.snapshotReady;
 	}
+	const generation = rec.ownerGeneration;
 	rec.snapshotReady = (async () => {
 		let snap = null;
 		try { snap = await cluster.readSnapshot(rec.wireTopic); } catch { snap = null; }
+		if (rec.ownerGeneration !== generation || _smoothTopics.get(rec.name) !== rec) return;
 		if (Array.isArray(snap) && snap.length > 0) {
 			const pending = new Map();
 			for (let i = 0; i < snap.length; i++) {
@@ -808,9 +819,10 @@ function _smoothWireFrame(rec, event, data) {
 	return data;
 }
 
-function _smoothPublish(rec, event, data, excludeWs) {
+function _smoothPublish(rec, event, data, excludeWs, received = false) {
 	const platform = rec.platform;
 	data = _smoothWireFrame(rec, event, data);
+	if (platform.smooth && (received ? received !== rec.lastSeenEpoch : !_smoothOwnerValid(rec))) return;
 	if (rec.codec && typeof platform.publishWire === 'function') {
 		platform.publishWire(rec.wireTopic, event, data, rec.codec, excludeWs !== undefined ? { excludeWs, seq: false } : UNSEQUENCED);
 	} else {
@@ -820,9 +832,10 @@ function _smoothPublish(rec, event, data, excludeWs) {
 	}
 }
 
-function _smoothSendTo(rec, ws, event, data) {
+function _smoothSendTo(rec, ws, event, data, received = false) {
 	const platform = rec.platform;
 	data = _smoothWireFrame(rec, event, data);
+	if (platform.smooth && (received ? received !== rec.lastSeenEpoch : !_smoothOwnerValid(rec))) return;
 	if (rec.codec && typeof platform.sendWire === 'function') {
 		platform.sendWire(ws, rec.wireTopic, event, data, rec.codec);
 	} else if (typeof platform.send === 'function') {
@@ -848,6 +861,7 @@ function _smoothPublishUpdates(rec, list) {
 				excludeWs: list[i].excludeWs
 			};
 		}
+		if (platform.smooth && !_smoothOwnerValid(rec)) return;
 		platform.publishWireBatch(rec.wireTopic, 'update', entries, rec.codec, UNSEQUENCED);
 		return;
 	}
@@ -861,7 +875,7 @@ function _smoothPublishUpdates(rec, list) {
  * single-target wire send, the whole set is one frame; otherwise the
  * per-entity sends this call replaces. Entries: { key, state }.
  */
-function _smoothSendUpdatesTo(rec, ws, list) {
+function _smoothSendUpdatesTo(rec, ws, list, received = false) {
 	if (list.length === 0) return;
 	const platform = rec.platform;
 	if (rec.codec && list.length > 1 && typeof platform.sendWireBatch === 'function') {
@@ -869,11 +883,12 @@ function _smoothSendUpdatesTo(rec, ws, list) {
 		for (let i = 0; i < list.length; i++) {
 			entries[i] = { data: _smoothWireFrame(rec, 'update', { key: list[i].key, data: list[i].state }) };
 		}
+		if (platform.smooth && (received ? received !== rec.lastSeenEpoch : !_smoothOwnerValid(rec))) return;
 		platform.sendWireBatch(ws, rec.wireTopic, 'update', entries, rec.codec);
 		return;
 	}
 	for (let i = 0; i < list.length; i++) {
-		_smoothSendTo(rec, ws, 'update', { key: list[i].key, data: list[i].state });
+		_smoothSendTo(rec, ws, 'update', { key: list[i].key, data: list[i].state }, received);
 	}
 }
 
@@ -982,10 +997,11 @@ function _cellBlock(cells, x, y, extra) {
 }
 
 /** Publish a cell-scoped frame (update / remove) via the stateless shared codec. */
-function _smoothPublishCell(rec, cellKey, event, data) {
+function _smoothPublishCell(rec, cellKey, event, data, received = false) {
 	const cells = rec.cells;
 	const platform = rec.platform;
 	data = _smoothWireFrame(rec, event, data);
+	if (platform.smooth && (received ? received !== rec.lastSeenEpoch : !_smoothOwnerValid(rec))) return;
 	const topic = cells.prefix + cellKey;
 	if (cells.codec && typeof platform.publishWire === 'function') {
 		if (!cells.registered && typeof platform.registerWireCodec === 'function') {
@@ -1008,8 +1024,8 @@ function _smoothPublishCell(rec, cellKey, event, data) {
  */
 function _smoothRelayCell(rec, cellKey, event, data) {
 	const cluster = rec.platform && rec.platform.smooth;
-	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {
-		cluster.relayBroadcast(rec.cells.prefix + cellKey, event, data, undefined, rec.eventSeq++);
+	if (cluster && _smoothOwnerValid(rec) && typeof cluster.relayBroadcast === 'function') {
+		cluster.relayBroadcast(rec.cells.prefix + cellKey, event, data, undefined, rec.eventSeq++, rec.ownerEpoch);
 	}
 }
 
@@ -1085,28 +1101,30 @@ function _updateCellSubs(rec, identity, ws, x, y) {
  * precedence flips: a positioned own entity (or lastPos) beats the override, so
  * only a connection with no entity anywhere resolves through its report.
  */
-function _placeCellSubscriber(rec, identity, ws) {
-	if (!ws) return;
+function _placeCellSubscriber(rec, identity, ws, valid) {
+	if (!ws || (valid && !valid())) return false;
 	const cells = rec.cells;
 	const center = cells.centers.get(identity);
 	if (center !== undefined && !cells.ownFirst) {
 		_updateCellSubs(rec, identity, ws, center.x, center.y);
-		return;
+		return true;
 	}
 	const own = rec.authority.get(identity);
 	if (own !== undefined) {
 		const p = cells.position(own.state);
+		if (valid && !valid()) return false;
 		if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
 			_updateCellSubs(rec, identity, ws, p.x, p.y);
-			return;
+			return true;
 		}
 	}
 	const last = cells.lastPos.get(identity);
 	if (last !== undefined) {
 		_updateCellSubs(rec, identity, ws, last.x, last.y);
-		return;
+		return true;
 	}
-	if (center !== undefined) _updateCellSubs(rec, identity, ws, center.x, center.y);
+	if (center !== undefined) { _updateCellSubs(rec, identity, ws, center.x, center.y); return true; }
+	return false;
 }
 
 /**
@@ -1116,17 +1134,19 @@ function _placeCellSubscriber(rec, identity, ws) {
  * subscriber's cell block from it. The non-owner counterpart of the tick's
  * own-entity follow.
  */
-function _smoothCellFollow(rec, identity, ws, state) {
-	if (!ws) return;
+function _smoothCellFollow(rec, identity, ws, state, epoch) {
+	if (!ws || (epoch !== undefined && epoch !== rec.lastSeenEpoch)) return false;
 	const cells = rec.cells;
 	const p = cells.position(state);
-	if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+	if (epoch !== undefined && epoch !== rec.lastSeenEpoch) return false;
+	if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return false;
 	let last = cells.lastPos.get(identity);
 	if (last === undefined) { last = { x: p.x, y: p.y }; cells.lastPos.set(identity, last); }
 	else { last.x = p.x; last.y = p.y; }
 	// Under 'own-entity' the entity always drives the block (a stored override is
 	// inert for an entity owner); otherwise a reported center wins.
 	if (cells.ownFirst || !cells.centers.has(identity)) _updateCellSubs(rec, identity, ws, p.x, p.y);
+	return true;
 }
 
 /** Drop a departed subscriber's cell bookkeeping. The platform auto-unsubscribes
@@ -1135,6 +1155,45 @@ function _releaseCellSubs(rec, identity) {
 	rec.cells.subs.delete(identity);
 	rec.cells.centers.delete(identity);
 	rec.cells.lastPos.delete(identity);
+}
+
+// Sync placement can invoke application position callbacks. Keep reservations
+// reversible until the caller's ownership basis has survived that work.
+function _smoothSyncPlacement(rec, identity, ws, place, valid) {
+	const epoch = rec.lastSeenEpoch;
+	let changed = false;
+	const cells = rec.cells;
+	const previous = cells && cells.subs.get(identity);
+	const before = previous && new Set(previous);
+	const last = cells && cells.lastPos.get(identity);
+	const previousPosition = last && { ...last };
+	try {
+		changed = place() === true;
+		if (!valid()) throw new LiveError('UNAVAILABLE', 'Smooth owner changed during sync; retry');
+	} catch (error) {
+		if (!changed && epoch !== rec.lastSeenEpoch) throw error;
+		if (cells) {
+			const current = cells.subs.get(identity);
+			if (current) for (const cell of current) {
+				if (before && before.has(cell)) continue;
+				const topic = cells.prefix + cell;
+				let released = false;
+				try { released = releaseSubscription(ws, topic); } catch { /* freed handle */ }
+				if (!released) try { ws.unsubscribe(topic); } catch { /* freed handle */ }
+			}
+			if (before) {
+				const priorSocket = rec.registry.get(identity) || ws;
+				for (const cell of before) {
+					if (current && current.has(cell)) continue;
+					try { rec.platform.subscribe(priorSocket, cells.prefix + cell); } catch { /* closing connection */ }
+				}
+				cells.subs.set(identity, before);
+			} else cells.subs.delete(identity);
+			if (previousPosition) cells.lastPos.set(identity, previousPosition);
+			else cells.lastPos.delete(identity);
+		}
+		throw error;
+	}
 }
 
 /**
@@ -1343,7 +1402,7 @@ function _smoothSyncAdmit(rec, identity) {
  * @param {Map<string, { state: any, exclude: string | undefined }>} moved entities that changed this tick
  * @param {number} t wall stamp for the send-cadence estimator (hitTest only)
  */
-function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
+function _smoothDeliverCulled(rec, relevancy, lookup, moved, t, received = false) {
 	for (const [identity, ws] of rec.registry) {
 		const relSet = relevancy.get(identity);
 		if (relSet === undefined) continue;
@@ -1369,7 +1428,8 @@ function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
 				if (key !== identity) delivered = true;
 			}
 		}
-		_smoothSendUpdatesTo(rec, ws, toSend);
+		_smoothSendUpdatesTo(rec, ws, toSend, received);
+		if (received && received !== rec.lastSeenEpoch) return;
 		// Release what left this subscriber's range. Without it the client holds an
 		// out-of-range entity until its TTL sweep reaps it, so panning an interest
 		// center across a board inflates the received set well past the radius
@@ -1379,7 +1439,7 @@ function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
 			for (let i = 0; i < exited.length; i++) {
 				// Never evict the subscriber's own entity - it is always relevant to
 				// itself regardless of where the reported center is looking.
-				if (exited[i] !== identity) _smoothSendTo(rec, ws, 'remove', { key: exited[i] });
+				if (exited[i] !== identity) _smoothSendTo(rec, ws, 'remove', { key: exited[i] }, received);
 			}
 		}
 		// The cadence seed is the WIRE interval (tickMs widened by the broadcast
@@ -1403,6 +1463,7 @@ function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
  */
 function _smoothCullTick(rec) {
 	if (rec.interest === null) return;
+	const epoch = rec.lastSeenEpoch;
 	if (!(rec.shadowDirty || rec.interestDirty) || rec.registry.size === 0 || rec.shadow.size === 0) {
 		rec.shadowDirty = false;
 		rec.interestDirty = false;
@@ -1418,10 +1479,146 @@ function _smoothCullTick(rec) {
 	const catalog = [];
 	for (const [key, state] of rec.shadow) catalog.push({ key, state });
 	const relevancy = rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++, rec.budgetOf ?? undefined);
-	_smoothDeliverCulled(rec, relevancy, (key) => rec.shadow.get(key), rec.pendingRelay, t);
+	if (epoch !== rec.lastSeenEpoch) {
+		rec.interest.invalidateDelivery();
+		if (rec.shadowDirty) _armSmoothTick(rec);
+		return;
+	}
+	_smoothDeliverCulled(rec, relevancy, (key) => rec.shadow.get(key), rec.pendingRelay, t, epoch);
+	if (epoch !== rec.lastSeenEpoch) {
+		rec.interest.invalidateDelivery();
+		if (rec.shadowDirty) _armSmoothTick(rec);
+		return;
+	}
 	rec.pendingRelay.clear();
 	rec.shadowDirty = false;
 	rec.interestDirty = false;
+}
+
+function _smoothEpoch(value) {
+	return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+}
+
+function _smoothCompareEpoch(a, b) {
+	return b === null ? 1 : a.length !== b.length ? a.length - b.length : a === b ? 0 : a < b ? -1 : 1;
+}
+
+function _smoothDemote(rec) {
+	rec.owned = false;
+	rec.ownerDeadline = 0;
+	rec.ownerGeneration++;
+	rec.ownerRenewing = false;
+	rec.pendingWire.clear();
+	rec.pendingJoins.clear();
+	_smoothClearSnapshotState(rec);
+	if (rec.registry.size === 0 && rec.syncPending === 0 && _smoothTopics.get(rec.name) === rec) _smoothForget(rec);
+}
+
+// Deadline checks use elapsed monotonic time, including every awaited operation.
+// A late renewal cannot revive a tenure once any path has fenced it.
+function _smoothOwnerValid(rec, epoch = rec.ownerEpoch) {
+	if (!rec.owned || rec.ownerEpoch !== epoch) return false;
+	const fence = rec.platform.clockFence;
+	let fenced = false;
+	try { fenced = fence && typeof fence.fenced === 'function' && fence.fenced() === true; } catch { /* duration lease still bounds this tenure */ }
+	if (fenced) {
+		_smoothDemote(rec);
+		try { Promise.resolve(rec.platform.smooth.releaseOwner(rec.wireTopic, epoch)).catch(() => {}); } catch { /* expires at its deadline */ }
+		return false;
+	}
+	if (monotonicNow() < rec.ownerDeadline) return true;
+	_smoothDemote(rec);
+	return false;
+}
+
+function _smoothLease(grant, started) {
+	return grant && _smoothEpoch(grant.epoch) && Number.isSafeInteger(grant.leaseMs) && grant.leaseMs > 0
+		&& started + grant.leaseMs > monotonicNow();
+}
+
+function _smoothAcceptEpoch(rec, epoch, owner) {
+	if (!_smoothEpoch(epoch)) return false;
+	const order = _smoothCompareEpoch(epoch, rec.lastSeenEpoch);
+	if (order < 0 || (order === 0 && owner !== undefined && rec.lastSeenOwner !== null && owner !== rec.lastSeenOwner)) return false;
+	if (order > 0) {
+		if (rec.ownerEpoch !== null && _smoothCompareEpoch(epoch, rec.ownerEpoch) > 0) _smoothDemote(rec);
+		rec.lastSeenEpoch = epoch;
+		rec.lastSeenOwner = owner ?? null;
+		rec.lastSeenSeq = -1;
+		rec.shadow.clear();
+		rec.pendingRelay.clear();
+		rec.shadowDirty = false;
+		if (rec.interest) rec.interest.invalidateDelivery();
+	} else if (owner !== undefined) rec.lastSeenOwner = owner;
+	return true;
+}
+
+function _smoothRenew(rec, cluster) {
+	const started = monotonicNow();
+	if (rec.ownerRenewing || started - rec.lastRenew < rec.ownerRenewMs) return;
+	rec.lastRenew = started;
+	rec.ownerRenewing = true;
+	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
+	Promise.resolve().then(() => {
+		if (!_smoothOwnerValid(rec, epoch) || generation !== rec.ownerGeneration) return null;
+		return cluster.renewOwner(rec.wireTopic, epoch);
+	}).then(grant => {
+		if (generation !== rec.ownerGeneration || _smoothTopics.get(rec.name) !== rec) return;
+		rec.ownerRenewing = false;
+		if (!_smoothOwnerValid(rec, epoch)) return;
+		if (!_smoothLease(grant, started) || grant.epoch !== epoch) { _smoothDemote(rec); return; }
+		rec.ownerDeadline = started + grant.leaseMs;
+		rec.ownerRenewMs = Math.min(_SMOOTH_RENEW_MS, grant.leaseMs / 3);
+	}, () => {
+		if (generation === rec.ownerGeneration && _smoothTopics.get(rec.name) === rec) _smoothDemote(rec);
+	});
+}
+
+function _smoothAcquire(rec, cluster) {
+	if (rec.ownerAcquiring !== null) return rec.ownerAcquiring;
+	const started = monotonicNow();
+	let generation = rec.ownerGeneration;
+	const pending = (async () => {
+		let grant;
+		try { grant = await cluster.acquireOwner(rec.wireTopic); } catch { grant = null; }
+		if (_smoothTopics.get(rec.name) !== rec || rec.ownerGeneration !== generation) return false;
+		if (rec.owned && monotonicNow() >= rec.ownerDeadline) { _smoothDemote(rec); return false; }
+		if (!_smoothLease(grant, started) || _smoothCompareEpoch(grant.epoch, rec.lastSeenEpoch) < 0
+			|| (!rec.owned && rec.ownerEpoch !== null && _smoothCompareEpoch(grant.epoch, rec.ownerEpoch) <= 0)) {
+			_smoothDemote(rec);
+			return false;
+		}
+		if (rec.ownerEpoch !== grant.epoch || !rec.owned) {
+			rec.owned = false;
+			generation = ++rec.ownerGeneration;
+			rec.ownerRenewing = false;
+			// A reacquisition starts with no queued commands or state from the old
+			// tenure. Reconnecting clients rebind from the persisted snapshot.
+			if (rec.ownerEpoch !== null) {
+				rec.authority = rec.runtime.createSmoothAuthority({ apply: rec.cfg.apply, onMissing: rec.cfg.onMissing,
+					queueCap: rec.cfg.queueCap, maxCommandsPerTick: rec.cfg.maxCommandsPerTick });
+				rec.surrogates.clear();
+				if (rec.lagComp !== null) rec.lagComp.reset();
+				if (rec.cells) rec.cells.entityCell.clear();
+				if (rec.cfg.onTick) rec.world = _smoothWorld(rec);
+			}
+			_smoothClearSnapshotState(rec);
+			rec.ownerEpoch = grant.epoch;
+			rec.eventSeq = 0;
+		}
+		rec.ownerDeadline = started + grant.leaseMs;
+		rec.ownerRenewMs = Math.min(_SMOOTH_RENEW_MS, grant.leaseMs / 3);
+		rec.lastRenew = started - _SMOOTH_RENEW_MS;
+		if (!_smoothAcceptEpoch(rec, grant.epoch, cluster.instanceId)) { _smoothDemote(rec); return false; }
+		if (rec.cfg.snapshot) await _smoothLoadSnapshot(rec, cluster);
+		if (rec.ownerGeneration !== generation || _smoothTopics.get(rec.name) !== rec) return false;
+		if (monotonicNow() >= rec.ownerDeadline) { _smoothDemote(rec); return false; }
+		rec.owned = true;
+		return true;
+	})();
+	rec.ownerAcquiring = pending;
+	pending.finally(() => { if (rec.ownerAcquiring === pending) rec.ownerAcquiring = null; }).catch(() => {});
+	return pending;
 }
 
 function _smoothTick(rec) {
@@ -1430,36 +1627,7 @@ function _smoothTick(rec) {
 	// it relayed (and their acks routed back). When falsy, the single-instance
 	// path below runs unchanged.
 	const cluster = rec.platform && rec.platform.smooth;
-	// Clock fence: a fenced instance's wall clock is untrustworthy for the
-	// rewind axis and the owner-stamped `t` on ack/sync frames, so a fenced
-	// owner stands down through the same path a failed lease renewal takes -
-	// fenced behaves like dead, and crash takeover is an already-shipped,
-	// already-tested path. The lease is released proactively so a
-	// healthy-clocked sibling claims immediately instead of waiting out the
-	// TTL. Clustered mode only: fencing needs the cluster reference clock to
-	// measure against, and a single instance has no sibling to hand off to.
-	const clockFence = rec.platform && rec.platform.clockFence;
-	let clockFenced = false;
-	if (cluster && rec.owned && clockFence && typeof clockFence.fenced === 'function') {
-		// Contained like the release below: the predicate is app/extension-
-		// supplied, and a throw here would kill the tick permanently (the
-		// timer only re-arms at the tail). An erroring fence reads unfenced.
-		try { clockFenced = clockFence.fenced() === true; } catch { /* unfenced on error */ }
-	}
-	if (clockFenced) {
-		rec.owned = false;
-		_smoothClearSnapshotState(rec);
-		if (typeof cluster.releaseOwner === 'function') {
-			try {
-				const r = cluster.releaseOwner(rec.wireTopic);
-				if (r && typeof r.catch === 'function') r.catch(() => {});
-			} catch { /* release is best-effort; the lease TTL is the backstop */ }
-		}
-		if (rec.registry.size === 0) {
-			_smoothForget(rec);
-			return;
-		}
-	}
+	if (cluster && rec.owned) _smoothOwnerValid(rec);
 	// A non-owner does not tick the authority (a demoted owner that lost the lease is
 	// no longer authoritative and must not drain or relay stale state). When it has
 	// opted into interest it runs a receive-side relevancy cull instead - delivering
@@ -1467,15 +1635,18 @@ function _smoothTick(rec) {
 	// interest off the cull tick is a no-op and the non-owner stays on the immediate
 	// broadcast path (byte-identical). Its local subscribers reconcile by re-syncing to
 	// the new owner after a handoff.
-	if (cluster && !rec.owned) {
+	if (cluster && !_smoothOwnerValid(rec)) {
 		rec.pendingJoins.clear();
 		_smoothCullTick(rec);
 		return;
 	}
+	const epoch = rec.ownerEpoch;
+	if (cluster) _smoothRenew(rec, cluster);
 	// Drain first, publish after: `apply` is pure state -> state, so nothing
 	// can publish mid-drain, and subscribers observe each tick atomically -
 	// every update and acknowledgement below reflects the same drained state.
 	const { updates, acks, events = [], idle } = rec.authority.drain();
+	if (cluster && !_smoothOwnerValid(rec, epoch)) return;
 	const t = wallEpoch();
 	// Server world hook (the ticking instance only - a cluster non-owner
 	// returned before the drain above). Runs post-drain so it reads the tick's
@@ -1483,6 +1654,7 @@ function _smoothTick(rec) {
 	// in the catalog taken below, so they broadcast, ring-record, and cull
 	// atomically with the drain.
 	const worldRun = rec.world !== null ? rec.world.run(updates, acks, t) : null;
+	if (cluster && !_smoothOwnerValid(rec, epoch)) return;
 	if (rec.pendingJoins.size > 0) {
 		const changed = new Set(updates.map(update => update.key));
 		for (const key of rec.pendingJoins) {
@@ -1614,7 +1786,7 @@ function _smoothTick(rec) {
 			// instance. The entity key IS the author identity.
 			const relayExclude = rec.noEcho && u.commanded && _isSmoothSurrogate(u.ws) ? u.key : undefined;
 			if (typeof cluster.relayBroadcast === 'function') {
-				cluster.relayBroadcast(rec.wireTopic, 'update', { key: u.key, data: u.state }, relayExclude, rec.eventSeq++);
+				if (_smoothOwnerValid(rec, epoch)) cluster.relayBroadcast(rec.wireTopic, 'update', { key: u.key, data: u.state }, relayExclude, rec.eventSeq++, epoch);
 			}
 		} else if (relevancy) {
 			// Interest-on: updates fan out per subscriber after this loop (the
@@ -1664,7 +1836,7 @@ function _smoothTick(rec) {
 		// never a closed-ws ghost - a remote departure arrives as onLeave.)
 		if (cluster && _isSmoothSurrogate(a.ws)) {
 			if (typeof cluster.relayAck === 'function') {
-				cluster.relayAck(rec.wireTopic, a.key, a.ws.originInstance, { id: a.id, state: a.state, t });
+				if (_smoothOwnerValid(rec, epoch)) cluster.relayAck(rec.wireTopic, a.key, a.ws.originInstance, { id: a.id, state: a.state, t }, epoch);
 			}
 			continue;
 		}
@@ -1711,37 +1883,17 @@ function _smoothTick(rec) {
 			// (the surrogate carries the author's identity).
 			const relayExclude = !authorIncluded && rec.noEcho && e.commanded && _isSmoothSurrogate(e.ws) ? e.ws.identity : undefined;
 			if (typeof cluster.relayBroadcast === 'function') {
-				cluster.relayBroadcast(rec.wireTopic, 'event', wire, relayExclude, rec.eventSeq++);
+				if (_smoothOwnerValid(rec, epoch)) cluster.relayBroadcast(rec.wireTopic, 'event', wire, relayExclude, rec.eventSeq++, epoch);
 			}
 		} else {
 			const excludeWs = !authorIncluded && rec.noEcho && e.commanded ? e.ws : undefined;
 			_smoothPublish(rec, 'event', wire, excludeWs);
 		}
 	}
-	// Owner: refresh the ownership lease while ticking so the lease only rotates
-	// when this instance goes quiet or dies. Fire-and-forget on a coarse cadence;
-	// losing the lease (Redis blip or a takeover) drops ownership and the next
-	// sync re-establishes it.
-	if (cluster && rec.owned && t - rec.lastRenew >= _SMOOTH_RENEW_MS && typeof cluster.renewOwner === 'function') {
-		rec.lastRenew = t;
-		cluster.renewOwner(rec.wireTopic).then((ok) => {
-			if (ok) return;
-			rec.owned = false;
-			// Drop this tenure's warm-handoff state so a re-acquire reads the
-			// snapshot fresh.
-			_smoothClearSnapshotState(rec);
-			// A demoted owner stops ticking (the top-of-tick bail) and ignores
-			// inbound leaves (onLeave is owner-gated). If it has no local
-			// subscriber, no future close will ever reclaim it, so its record and
-			// surrogate entities would leak - forget it now. A demoted owner that
-			// still has local subscribers is reclaimed when they re-sync or close.
-			if (rec.registry.size === 0) _smoothForget(rec);
-		}).catch(() => {});
-	}
 	// Owner with the snapshot opt-in: debounce-persist the topic state so a sibling
 	// that takes over after this owner dies can resume entities from their last
 	// state. Fire-and-forget on its own throttle (the same `t` the renew gate uses).
-	if (cluster && rec.owned && rec.cfg.snapshot && typeof cluster.writeSnapshot === 'function') {
+	if (cluster && _smoothOwnerValid(rec, epoch) && rec.cfg.snapshot && typeof cluster.writeSnapshot === 'function') {
 		// Past the grace window a still-absent recovered client has departed: drop
 		// its pending state so the cache stays bounded and the snapshot tracks the
 		// live roster.
@@ -1754,7 +1906,7 @@ function _smoothTick(rec) {
 		// before they reconnect still recovers them.
 		if (rec.authority.size > 0 && t - rec.lastSnap >= rec.cfg.snapshotDebounceMs) {
 			rec.lastSnap = t;
-			cluster.writeSnapshot(rec.wireTopic, _smoothSnapshotPayload(rec)).catch(() => {});
+			cluster.writeSnapshot(rec.wireTopic, _smoothSnapshotPayload(rec), rec.ownerEpoch).catch(() => {});
 		}
 	}
 	if (rec.authority.size === 0) {
@@ -1825,7 +1977,7 @@ export function _drainSmoothOnClose(ws) {
 				// the single-instance branch below, so a churning cluster node does
 				// not accrete subs/centers entries until topic teardown.
 				if (rec.cells) _releaseCellSubs(rec, identity);
-				if (!rec.owned && typeof cluster.relayLeave === 'function') {
+				if (!_smoothOwnerValid(rec) && typeof cluster.relayLeave === 'function') {
 					cluster.relayLeave(rec.wireTopic, identity, cluster.instanceId);
 				}
 			}
@@ -1913,8 +2065,8 @@ function _smoothForget(rec) {
 	const removed = _smoothTopics.get(rec.name) === rec && _smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
 	if (removed && rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
-		rec.owned = false;
-		try { cluster.releaseOwner(rec.wireTopic); } catch { /* best-effort; the lease TTL is the safety net */ }
+		_smoothDemote(rec);
+		try { Promise.resolve(cluster.releaseOwner(rec.wireTopic, rec.ownerEpoch)).catch(() => {}); } catch { /* best-effort; the lease TTL is the safety net */ }
 	}
 	if (removed && rec.cfg.onEmpty) {
 		try { rec.cfg.onEmpty(rec.name); }
@@ -1937,8 +2089,8 @@ function _smoothRelayRemove(rec, key) {
 	if (rec.cells) { _smoothCellRemove(rec, key); return; }
 	_smoothPublish(rec, 'remove', { key }, undefined);
 	const cluster = rec.platform && rec.platform.smooth;
-	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {
-		cluster.relayBroadcast(rec.wireTopic, 'remove', { key }, undefined, rec.eventSeq++);
+	if (cluster && _smoothOwnerValid(rec) && typeof cluster.relayBroadcast === 'function') {
+		cluster.relayBroadcast(rec.wireTopic, 'remove', { key }, undefined, rec.eventSeq++, rec.ownerEpoch);
 	}
 }
 
@@ -1970,7 +2122,11 @@ function _smoothRequestSync(rec, cluster, identity, corr, ws) {
  * @param {any} smooth
  */
 function _ensureSmoothCluster(smooth) {
-	if (!smooth || typeof smooth.onMessage !== 'function' || _smoothClustersWired.has(smooth)) return;
+	if (!smooth) return;
+	if (smooth.ownershipVersion !== 1 || typeof smooth.acquireOwner !== 'function' || typeof smooth.renewOwner !== 'function' || typeof smooth.releaseOwner !== 'function') {
+		throw new LiveError('INTERNAL', 'Smooth cluster requires ownershipVersion: 1 and fenced lease methods; upgrade the coordinator to the SmoothCluster contract');
+	}
+	if (typeof smooth.onMessage !== 'function' || _smoothClustersWired.has(smooth)) return;
 	_smoothClustersWired.add(smooth);
 	smooth.onMessage({
 		// Owner: a non-owner forwarded a client's command batch. Ensure the
@@ -1979,7 +2135,7 @@ function _ensureSmoothCluster(smooth) {
 		// idempotent discard, not a re-apply), enqueue, and arm the tick.
 		onCommand: (wireTopic, identity, originInstance, batch) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !rec.owned || !Array.isArray(batch) || batch.length === 0) return;
+			if (!rec || !_smoothOwnerValid(rec) || !Array.isArray(batch) || batch.length === 0) return;
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
 			let existing = rec.authority.get(identity);
 			if (existing === undefined) {
@@ -1994,7 +2150,7 @@ function _ensureSmoothCluster(smooth) {
 			const lastAcked = existing ? existing.lastAckedId : 0;
 			const fresh = batch.filter((c) => c && typeof c.id === 'number' && c.id > lastAcked);
 			if (fresh.length === 0) return;
-			if (rec.authority.enqueue(identity, fresh)) _armSmoothTick(rec);
+			if (_smoothOwnerValid(rec) && rec.authority.enqueue(identity, fresh)) _armSmoothTick(rec);
 		},
 		// Owner: a non-owner asked for the catalog on behalf of a cold-joining
 		// client. Ensure its surrogate, answer with the client's basis + catalog.
@@ -2004,26 +2160,26 @@ function _ensureSmoothCluster(smooth) {
 		// the others' cull (a stationary in-range entity would turn invisible).
 		onSync: (wireTopic, identity, originInstance, corr) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !rec.owned) return;
+			if (!rec || !_smoothOwnerValid(rec)) return;
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
 			const ensured = _smoothEnsureJoined(rec, identity, surrogate, _smoothSeed(rec, identity));
 			if (typeof smooth.sendSyncReply === 'function') {
-				smooth.sendSyncReply(wireTopic, corr, originInstance, { ack: ensured.lastAckedId, states: rec.authority.catalog() });
+				if (_smoothOwnerValid(rec)) smooth.sendSyncReply(wireTopic, corr, originInstance, { ack: ensured.lastAckedId, states: rec.authority.catalog() }, rec.ownerEpoch);
 			}
 		},
 		// Requester: the owner answered our cold-join sync. Resolve the pending.
-		onSyncReply: (wireTopic, corr, payload) => {
+		onSyncReply: (wireTopic, corr, payload, epoch) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec) return;
+			if (!rec || !_smoothAcceptEpoch(rec, epoch)) return;
 			const pending = rec.pendingSync.get(corr);
 			if (!pending) return;
 			rec.pendingSync.delete(corr);
 			if (pending.timer !== null) clearTimer(pending.timer);
-			pending.resolve(payload);
+			pending.resolve({ payload, epoch });
 		},
-		// Every instance: the owner relayed a broadcast. Drop a seen/regressing
-		// seq (reset on an ownership handoff, since a fresh owner restarts the
-		// counter), then deliver to local subscribers. With interest off, re-emit
+		// Every instance: the owner relayed a broadcast. Drop older epochs and
+		// seen/regressing sequences; only a higher epoch resets the counter.
+		// Then deliver to local subscribers. With interest off, re-emit
 		// immediately to all (excluding the author's local socket when the relay names
 		// one) - byte-identical to the pre-cull behavior. With interest on, buffer
 		// `update` frames into the shadow catalog and deliver them culled per local
@@ -2033,45 +2189,36 @@ function _ensureSmoothCluster(smooth) {
 		// by its cell prefix and republished to this instance's own cell topic -
 		// native local fan-out to exactly the sockets subscribed to that cell here,
 		// never the base topic.
-		onBroadcast: (wireTopic, event, data, excludeIdentity, seq, ownerInstance) => {
+		onBroadcast: (wireTopic, event, data, excludeIdentity, seq, ownerInstance, epoch) => {
+			if (!Number.isSafeInteger(seq) || seq < 0) return;
 			const cellHit = _smoothCellRecByWire(wireTopic);
 			if (cellHit !== null) {
 				const rec = cellHit.rec;
 				// The owner stamps base events and cell frames from ONE counter
 				// (rec.eventSeq) on one in-order channel, so the record's per-owner
 				// watermark covers both families.
-				if (ownerInstance !== rec.lastSeenOwner) {
-					rec.lastSeenOwner = ownerInstance;
-					rec.lastSeenSeq = -1;
-				}
-				if (typeof seq === 'number') {
-					if (seq <= rec.lastSeenSeq) return;
-					rec.lastSeenSeq = seq;
-				}
+				if (!_smoothAcceptEpoch(rec, epoch, ownerInstance)) return;
+				if (seq <= rec.lastSeenSeq) return;
+				rec.lastSeenSeq = seq;
 				// A live owner republishes nothing (its own publish already reached
 				// local sockets; its own relays are instanceId-suppressed anyway).
 				if (rec.owned) return;
-				_smoothPublishCell(rec, cellHit.cellKey, event, data);
+				_smoothPublishCell(rec, cellHit.cellKey, event, data, epoch);
 				// Own-entity follow: a relayed update for a LOCAL subscriber's own
 				// entity re-places its cell block (the non-owner has no tick follow).
 				// Covers server-driven (onMissing) motion; commanded motion is also
 				// followed on the ack path.
 				if (event === 'update' && data && typeof data.key === 'string') {
 					const ws = rec.registry.get(data.key);
-					if (ws !== undefined) _smoothCellFollow(rec, data.key, ws, data.data);
+					if (ws !== undefined) _smoothCellFollow(rec, data.key, ws, data.data, epoch);
 				}
 				return;
 			}
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec) return;
-			if (ownerInstance !== rec.lastSeenOwner) {
-				rec.lastSeenOwner = ownerInstance;
-				rec.lastSeenSeq = -1;
-			}
-			if (typeof seq === 'number') {
-				if (seq <= rec.lastSeenSeq) return;
-				rec.lastSeenSeq = seq;
-			}
+			if (!_smoothAcceptEpoch(rec, epoch, ownerInstance)) return;
+			if (seq <= rec.lastSeenSeq) return;
+			rec.lastSeenSeq = seq;
 			if (rec.interest !== null && !rec.owned) {
 				if (event === 'update' && data && rec.registry.size > 0) {
 					// Buffer into the shadow catalog (the non-owner's running view) and
@@ -2089,12 +2236,12 @@ function _ensureSmoothCluster(smooth) {
 				}
 			}
 			const excludeWs = excludeIdentity !== undefined ? rec.registry.get(excludeIdentity) : undefined;
-			_smoothPublish(rec, event, data, excludeWs);
+			if (!rec.owned) _smoothPublish(rec, event, data, excludeWs, epoch);
 		},
 		// The commanding client's instance: deliver the owner's ack to its socket.
-		onAck: (wireTopic, identity, payload) => {
+		onAck: (wireTopic, identity, payload, epoch) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec) return;
+			if (!rec || !_smoothAcceptEpoch(rec, epoch)) return;
 			// Capture the owner's wall stamp (carried on every ack) so a non-owner can
 			// reconstruct the owner's clock for an edge-measured forwarded shot. Gated
 			// on hitTest so a non-lag-comp topic pays nothing.
@@ -2104,12 +2251,12 @@ function _ensureSmoothCluster(smooth) {
 			}
 			const ws = rec.registry.get(identity);
 			if (ws !== undefined) {
-				_smoothSendTo(rec, ws, 'ack', payload);
+				_smoothSendTo(rec, ws, 'ack', payload, epoch);
 				// Cells mode: the ack carries the authoritative post-drain state, so a
 				// non-owner follows its local subscriber's own entity from it (the
 				// non-owner counterpart of the tick's own-entity follow).
 				if (rec.cells && payload && payload.state !== undefined) {
-					_smoothCellFollow(rec, identity, ws, payload.state);
+					_smoothCellFollow(rec, identity, ws, payload.state, epoch);
 				}
 			}
 		},
@@ -2117,7 +2264,7 @@ function _ensureSmoothCluster(smooth) {
 		// the removal so every instance forgets it.
 		onLeave: (wireTopic, identity, originInstance) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !rec.owned) return;
+			if (!rec || !_smoothOwnerValid(rec)) return;
 			const surrogate = rec.surrogates.get(originInstance + '\u0000' + identity);
 			if (surrogate === undefined) return;
 			rec.surrogates.delete(originInstance + '\u0000' + identity);
@@ -2135,7 +2282,7 @@ function _ensureSmoothCluster(smooth) {
 		// needs no correlated reply.
 		onShoot: (wireTopic, identity, originInstance, payload) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !rec.owned || rec.lagComp === null) return;
+			if (!rec || !_smoothOwnerValid(rec) || rec.lagComp === null) return;
 			if (!payload || typeof payload !== 'object') return;
 			const shooterEntity = rec.authority.get(identity);
 			if (shooterEntity === undefined) return; // no entity here: this shooter cannot aim
@@ -2762,6 +2909,9 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono) {
 	const ht = rec.cfg.hitTest;
 	const cluster = ctxPlatform && ctxPlatform.smooth;
+	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
+	const valid = () => _smoothTopics.get(name) === rec && (!cluster || (generation === rec.ownerGeneration && _smoothOwnerValid(rec, epoch)));
+	if (!valid()) return;
 	// Candidate set, gated at the REWIND instant rather than at receipt: a target
 	// the shooter had on screen when it fired is a valid hit even if it drifted
 	// out of range in flight, and one that drifted in only after firing is not.
@@ -2858,7 +3008,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 		identity: shooterKey,
 		platform: ctxPlatform,
 		applyTo(victimKey, victimCmd) {
-			if (typeof victimKey !== 'string') return false;
+			if (!valid() || typeof victimKey !== 'string') return false;
 			if (rec.authority.inject(victimKey, victimCmd)) {
 				armed = true;
 				return true;
@@ -2866,7 +3016,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 			return false;
 		},
 		emitEvent(type, data, opts) {
-			if (typeof type !== 'string') return;
+			if (!valid() || typeof type !== 'string') return;
 			pendingEvents.push({ type, data, opts });
 		}
 	};
@@ -2899,12 +3049,13 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 		const h = hits[i];
 		const target = { key: h.key, pos: h.pos, state: h.state };
 		const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, rewindMs: h.fallback ? 0 : nowMono - rewindAt, fallback: h.fallback };
+		if (!valid()) return;
 		const verdict = await ht.onHit(shootCtx, target, info);
 		if (verdict && verdict.stop) break;
 	}
 	// onHit may have awaited; if the topic was forgotten or this instance lost
 	// ownership meanwhile, do not publish the events or arm a dead/demoted record.
-	if (_smoothTopics.get(name) !== rec || (cluster && !rec.owned)) return;
+	if (!valid()) return;
 	for (let i = 0; i < pendingEvents.length; i++) {
 		const pe = pendingEvents[i];
 		const wire = {
@@ -2915,7 +3066,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 		};
 		_smoothPublish(rec, 'event', wire, undefined);
 		if (cluster && typeof cluster.relayBroadcast === 'function') {
-			cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++);
+			if (valid()) cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++, epoch);
 		}
 	}
 	if (armed) _armSmoothTick(rec);
@@ -3165,46 +3316,7 @@ export const _smoothRegister = function smooth(config) {
 				// Bind the registry only after initialization succeeds, so a failed
 				// replacement cannot displace a live socket with the same identity.
 				_ensureSmoothCluster(cluster);
-				// On a Redis failure, degrade to a local authority (owned=true) so the
-				// client keeps a working entity rather than a frozen one. Deliberate
-				// availability tradeoff: during a sustained outage the coordinator's
-				// breaker opens and outbound relays no-op, so each instance runs
-				// isolated (no cross-instance traffic, no cross-owner event double-fire);
-				// only the brief pre-breaker window can relay from two pseudo-owners,
-				// which the per-owner seq dedup does not cover - an outage-only artifact.
-				const wasOwned = rec.owned;
-				let owned = true;
-				try {
-					owned = await cluster.acquireOwner(rec.wireTopic);
-				} catch {
-					owned = true;
-				}
-				// A demotion observed on this path (we held the tick, the lease is gone)
-				// drops this tenure's warm-handoff state so a later re-acquire reads the
-				// snapshot fresh rather than reusing a stale pending set. (A rare Redis
-				// lease flap landing between two concurrent same-instance syncs could let
-				// this clear wipe the other sync's just-loaded pending; the only effect is
-				// that topic's entities fall back to `initial` - the snapshot-off default -
-				// for that one handoff, never an incorrect state, a leak, or a hang.)
-				if (wasOwned && !owned) _smoothClearSnapshotState(rec);
-				if (owned && rec.cfg.snapshot) {
-					// Warm handoff (opt-in): a fresh owner LOADS the snapshot the previous
-					// owner persisted BEFORE it publishes ownership, so neither a concurrent
-					// sync nor a relay handler (both gated on `rec.owned`) can seed an entity
-					// from `initial` while the read is still in flight. Loaded once per
-					// tenure into `pendingSnapshot` behind a shared barrier promise; each
-					// entity is then seeded the moment its real client re-binds
-					// (`_smoothSeed`), so a client that never returns never enters the
-					// authority. Its recovered state waits in `pendingSnapshot`, re-persisted
-					// on write (a second failover still recovers it) and grace-dropped on
-					// the tick (the cache stays bounded).
-					await _smoothLoadSnapshot(rec, cluster);
-				}
-				// Publish ownership AFTER the snapshot is ready (so the relay seed sites
-				// see a populated `pendingSnapshot`) but BEFORE the liveness re-check, so a
-				// socket that closed during either await releases the lease via
-				// _smoothForget rather than leaking it until the TTL.
-				rec.owned = owned;
+				const owned = await _smoothAcquire(rec, cluster);
 				// Became the ticking owner: the authoritative catalog supersedes any
 				// receive-side shadow built while this instance was a non-owner, so drop it
 				// (a later demotion rebuilds it from inbound relays). No-op when this
@@ -3224,24 +3336,32 @@ export const _smoothRegister = function smooth(config) {
 					// declared initial - identical to single-instance when snapshot is off).
 					const initial = _smoothSeed(rec, key, false);
 					const states = _smoothSyncRoster(rec, key, initial);
+					if (!_smoothOwnerValid(rec)) throw new LiveError('UNAVAILABLE', 'Smooth owner lease expired during sync; retry');
 					const ensured = _smoothEnsureJoined(rec, key, ctx.ws, initial);
 					if (rec.pendingSnapshot !== null) rec.pendingSnapshot.delete(key);
-					if (ctx.ws) rec.registry.set(key, ctx.ws);
 					// Cells mode: place the joiner's cell block now (from its just-ensured
 					// entity, or a retained reported center) - without this an owner-local
 					// joiner received nothing until its entity first moved.
-					if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
+					if (rec.cells && ctx.ws) _smoothSyncPlacement(rec, key, ctx.ws,
+						() => _placeCellSubscriber(rec, key, ctx.ws, () => _smoothOwnerValid(rec)), () => _smoothOwnerValid(rec));
 					// New entities already arm their announcement. An existing entity may
 					// rejoin an idle world, which must resume even without a new command.
 					if (rec.world !== null) _armSmoothTick(rec);
+					if (!_smoothOwnerValid(rec)) throw new LiveError('UNAVAILABLE', 'Smooth owner lease expired during sync; retry');
+					if (ctx.ws) rec.registry.set(key, ctx.ws);
 					if (join) join.retained = true;
+					const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
+					_setResponseFence(ctx, () => _smoothTopics.get(name) === rec && rec.ownerGeneration === generation && _smoothOwnerValid(rec, epoch));
 					return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states, ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 				}
 				// Non-owner: ask the owner for the catalog. On a timeout, return a
 				// local-empty basis - incoming broadcasts reconcile the client.
 				const corr = cluster.instanceId + ':' + (++_smoothCorrSeq);
 				remoteSync = true;
-				const reply = await _smoothRequestSync(rec, cluster, key, corr, ctx.ws);
+				const received = await _smoothRequestSync(rec, cluster, key, corr, ctx.ws);
+				const reply = received && received.payload;
+				const valid = () => !received || received.epoch === rec.lastSeenEpoch;
+				if (!valid()) throw new LiveError('UNAVAILABLE', 'Smooth owner changed during sync; retry');
 				if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
 					if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
 					throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
@@ -3249,6 +3369,19 @@ export const _smoothRegister = function smooth(config) {
 				// Scope and pack before committing any local subscriber state.
 				const catalog = reply && Array.isArray(reply.states) ? reply.states : [];
 				const states = _smoothWireStates(rec, _smoothJoinSnapshot(rec, key, catalog));
+				// Cells mode on a non-owner: the local authority is empty, so place the
+				// joiner's cell block from its own entry in the owner's reply (recorded
+				// into lastPos by the follow), and scope the client-facing roster to its
+				// cell block - the owner's reply is deliberately the FULL catalog (it is
+				// also the own-position source here), but the client gets O(block).
+				if (rec.cells && ctx.ws) {
+					_smoothSyncPlacement(rec, key, ctx.ws, () => {
+						const ownEntry = catalog.find((s) => s && s.key === key);
+						if (ownEntry !== undefined) return _smoothCellFollow(rec, key, ctx.ws, ownEntry.state, received && received.epoch);
+						return _placeCellSubscriber(rec, key, ctx.ws, valid); // a reported center / lastPos fallback
+					}, valid);
+				}
+				if (!valid()) throw new LiveError('UNAVAILABLE', 'Smooth owner changed during sync; retry');
 				if (ctx.ws) rec.registry.set(key, ctx.ws);
 				// Seed the receive-side shadow catalog from the owner's snapshot so the cull
 				// can deliver a stationary in-range remote entity on first sight (an entity
@@ -3259,20 +3392,9 @@ export const _smoothRegister = function smooth(config) {
 				if (rec.interest !== null && reply && Array.isArray(reply.states)) {
 					for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
 				}
-				// Cells mode on a non-owner: the local authority is empty, so place the
-				// joiner's cell block from its own entry in the owner's reply (recorded
-				// into lastPos by the follow), and scope the client-facing roster to its
-				// cell block - the owner's reply is deliberately the FULL catalog (it is
-				// also the own-position source here), but the client gets O(block).
-				if (rec.cells) {
-					if (ctx.ws) {
-						const ownEntry = catalog.find((s) => s && s.key === key);
-						if (ownEntry !== undefined) _smoothCellFollow(rec, key, ctx.ws, ownEntry.state);
-						else _placeCellSubscriber(rec, key, ctx.ws); // a reported center / lastPos fallback
-					}
-				}
 				if (join) join.retained = true;
 				remoteSync = false;
+				_setResponseFence(ctx, () => _smoothTopics.get(name) === rec && valid());
 				return {
 					topic: name,
 					t: wallEpoch(),
@@ -3374,7 +3496,7 @@ export const _smoothRegister = function smooth(config) {
 		const rec = _smoothRecord(name, cfg, ctx.platform, rt);
 		const key = _getIdentityKey(ctx);
 		const cluster = ctx.platform && ctx.platform.smooth;
-		if (cluster && !rec.owned) {
+		if (cluster && !_smoothOwnerValid(rec)) {
 			// Non-owner: forward the batch to the topic's owner as one envelope
 			// (fire-and-forget; the owner drops already-acked ids and ticks).
 			if (typeof cluster.relayCommand === 'function') {
@@ -3396,7 +3518,7 @@ export const _smoothRegister = function smooth(config) {
 			// by racing commands.
 			return;
 		}
-		if (rec.authority.enqueue(key, batch)) _armSmoothTick(rec);
+		if ((!cluster || _smoothOwnerValid(rec)) && rec.authority.enqueue(key, batch)) _armSmoothTick(rec);
 	});
 
 	// Report (or clear) a subscriber's area-of-interest center - the optional
@@ -3502,7 +3624,7 @@ export const _smoothRegister = function smooth(config) {
 		if (rec === undefined || rec.lagComp === null) return;
 		const shooterKey = _getIdentityKey(ctx);
 		const cluster = ctx.platform && ctx.platform.smooth;
-		if (cluster && !rec.owned) {
+		if (cluster && !_smoothOwnerValid(rec)) {
 			// EDGE: this instance does not own the ring (the authoritative catalog and
 			// the history ring live on the owner). Measure latency against the
 			// reconstructed owner clock, run the replay defense, and forward the
