@@ -537,9 +537,13 @@ describe('repeated live module updates', () => {
 		const s = server();
 		mkdirSync(join(root, 'src/live/locked.js'));
 		const update = { file: join(root, 'src/live/locked.js').replaceAll('\\', '/'), server: s };
+		await expect(p.handleHotUpdate(update)).rejects.toMatchObject({ code: 'EISDIR' });
+		await expect(p.handleHotUpdate(update)).rejects.toMatchObject({ code: 'EISDIR' });
+		expect(s.runtime._prepareHmr).not.toHaveBeenCalled();
+		rmSync(join(root, 'src/live/locked.js'), { recursive: true });
+		writeFileSync(join(root, 'src/live/locked.js'), 'export const unlocked = live(() => true);');
 		await p.handleHotUpdate(update);
-		await p.handleHotUpdate(update);
-		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+		expect(s.runtime._prepareHmr).toHaveBeenCalledOnce();
 	});
 	it('logs a failed live file event and reloads the same write when it is reported again', async () => {
 		const p = plugin();

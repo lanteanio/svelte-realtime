@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, statSync } from 'fs';
 import { resolve, relative, sep } from 'path';
 import { VIRTUAL_PREFIX, REGISTRY_ID, REGISTRY_PUBLIC_ID, DEVTOOLS_ID, DEVTOOLS_PUBLIC_ID, SERVER_ID, SERVER_PUBLIC_ID } from './constants.js';
-import { _fileCache, _codeCache, _warnedExports, _readCached } from './source-cache.js';
+import { _fileCache, _codeCache, _warnedExports, _readCached, _readChangedSource } from './source-cache.js';
 import { _writeTypeDeclarations } from './codegen-types.js';
 import { _checkHooksFile, _buildTopicsRegistry, _generateRegistry, _resolveFile } from './codegen-registry.js';
 import { _generateSsrStubs } from './codegen-ssr.js';
@@ -64,13 +64,14 @@ export default function svelteRealtime(options) {
 	 * save has a new mtime even when its content is unchanged. A file that
 	 * exists but cannot be read right now is never treated as handled.
 	 * @param {string} file
+	 * @param {string | undefined} [source]
 	 * @returns {string | null}
 	 */
-	const claimVersion = (file) => {
+	const claimVersion = (file, source) => {
 		let version;
 		try {
 			const { mtimeMs } = statSync(file);
-			version = mtimeMs + '\0' + readFileSync(file, 'utf8');
+			version = mtimeMs + '\0' + (source ?? readFileSync(file, 'utf8'));
 		} catch (error) {
 			if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') {
 				handledVersions.delete(file);
@@ -426,7 +427,7 @@ export default function svelteRealtime(options) {
 			}
 		},
 
-		async handleHotUpdate({ file: reported, server }) {
+		async handleHotUpdate({ file: reported, server, read }) {
 			const file = ownedLiveFile(reported);
 			if (!file) return;
 			// The generated $types.d.ts must never re-enter this handler: the
@@ -442,7 +443,7 @@ export default function svelteRealtime(options) {
 				// A repeated event for an already handled write skips the server
 				// reload. It runs after that reload in the queue, so its client
 				// update never runs ahead of the handlers.
-				const reloaded = await reloadWrite(server, file, resolve(root, reported));
+				const reloaded = await reloadWrite(server, file, resolve(root, reported), read);
 				// A save whose reload failed updates no module: an SSR update would
 				// make Vite reload the whole server graph, and the WebSocket hooks
 				// would then load a new runtime without the restored handlers.
@@ -467,10 +468,18 @@ export default function svelteRealtime(options) {
 	 * @param {any} server
 	 * @param {string} file - The live file, spelled under liveDir
 	 * @param {string | null} reported - The path a change event named, or null for add/unlink
+	 * @param {() => Promise<string>} [read] Vite's settled source reader for change events
 	 * @returns {Promise<boolean | undefined>} Whether the reload registered the handlers; undefined when an earlier event handled this write
 	 */
-	async function reloadWrite(server, file, reported) {
-		const version = claimVersion(file);
+	async function reloadWrite(server, file, reported, read) {
+		// Watchers can report truncation before the write has filled the file.
+		// Use one settled source for the version, declarations and registry.
+		let source;
+		try { source = read ? await read() : await _readChangedSource(file); }
+		catch (error) {
+			if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error;
+		}
+		const version = claimVersion(file, source);
 		if (version === null) return;
 		let reloaded = false;
 		try {
@@ -483,6 +492,7 @@ export default function svelteRealtime(options) {
 				_codeCache.delete('client:' + file);
 				_codeCache.delete('ssr:' + file);
 			}
+			if (source !== undefined) _fileCache.set(file, source);
 
 			// Regenerate type declarations on file change
 			if (typedImports) _writeTypeDeclarations(liveDir, dir);

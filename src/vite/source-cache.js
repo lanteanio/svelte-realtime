@@ -11,6 +11,26 @@ export const _fileCache = new Map();
 export const _codeCache = new Map();
 
 /**
+ * Read a watcher addition that has no Vite change-context reader. Empty
+ * writes get a bounded chance to finish; a deliberately empty file still
+ * removes its exports, and a removed file contributes no cached source.
+ * @param {string} filePath
+ * @returns {Promise<string | undefined>}
+ */
+export async function _readChangedSource(filePath) {
+	for (let attempt = 0; ; attempt++) {
+		let source;
+		try { source = readFileSync(filePath, 'utf8'); }
+		catch (error) {
+			if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return undefined;
+			throw error;
+		}
+		if (source || attempt === 10) return source;
+		await new Promise(resolve => setTimeout(resolve, 10)); // determinism-allow: bounds an empty development-file write, outside the realtime runtime
+	}
+}
+
+/**
  * Read a file with caching. Returns cached content if available.
  * @param {string} filePath
  * @returns {string}

@@ -288,6 +288,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Smoothed topic owners stop accepting commands and emitting frames when their lease expires, including after event-loop stalls, slow application callbacks, and late renewal replies. Base and cell receivers share an epoch watermark, so older owners cannot reopen delivery by alternating instance identities.
 
+- Live-module reloads use Vite's settled source read before claiming the edit, generating declarations or clearing handlers. Watcher additions give an empty write a bounded chance to finish, and the registry and client stubs share that source, so a save observed during truncation no longer reports success with missing handlers. Deliberately empty files still remove their exports; unreadable files leave the previous registry intact and can be retried.
+
 - Cold development starts leave Vite's client dependency crawl open until the first page loads. Eager generated-module warmup could finish that crawl before SvelteKit contributed its imports, forcing another optimization and reload that broke Svelte hydration on older supported Kit versions. Generated client dependencies remain included before navigation, and server-side live registration still completes before requests are served.
 
 - Development handlers share one native server runtime across dependency optimization and live-module reloads, including imports from both `svelte-realtime` and `svelte-realtime/server`. Cached WebSocket hooks and application Node imports keep seeing the current registry; client and rune modules retain their Vite transforms.

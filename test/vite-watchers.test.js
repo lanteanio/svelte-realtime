@@ -44,6 +44,26 @@ it('loads the server registry without starting a client dependency crawl before 
 	expect(server.warmupRequest).not.toHaveBeenCalled();
 });
 
+it('waits for the settled change source before clearing handlers or generating declarations', async () => {
+	const { plugin, server, runtime, start } = fixture({ typedImports: true });
+	await start();
+	let finish;
+	const read = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+	const file = join(liveDir, 'chat.js');
+	writeFileSync(file, '');
+	const changed = plugin.handleHotUpdate({ file, server, read });
+	await flush();
+	expect(runtime._prepareHmr).not.toHaveBeenCalled();
+	const source = 'export const updated = live(async () => {});';
+	writeFileSync(file, source);
+	finish(source);
+	await changed;
+	expect(read).toHaveBeenCalledOnce();
+	expect(runtime._prepareHmr).toHaveBeenCalledOnce();
+	expect(readFileSync(join(liveDir, '$types.d.ts'), 'utf8')).toContain('updated');
+	expect(plugin.load('\0live:__registry', { ssr: true })).toContain('chat/updated');
+});
+
 it.each(['add', 'unlink'])('ignores foreign and adjacent live directories on %s', async event => {
 	const { server, start } = fixture();
 	await start(); server.ssrLoadModule.mockClear();
