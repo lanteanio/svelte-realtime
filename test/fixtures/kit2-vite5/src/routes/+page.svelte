@@ -7,4 +7,4 @@
 	});
 </script>
 <h1>Realtime compatibility</h1>
-<p data-testid="counter">{$counter === undefined ? 'connecting' : $counter}</p>
+<p data-testid="counter">{counter.current === undefined ? 'connecting' : counter.current}</p>
