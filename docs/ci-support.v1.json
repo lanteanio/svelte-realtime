@@ -40,12 +40,19 @@
       ]
     }
   },
+  "plugins": [
+    { "version": "3.1.2", "svelte": "^4.0.0 || ^5.0.0-next.0", "vite": "^5.0.0" },
+    { "version": "4.0.4", "svelte": "^5.0.0-next.96 || ^5.0.0", "vite": "^5.0.0" },
+    { "version": "5.1.1", "svelte": "^5.0.0", "vite": "^6.0.0" },
+    { "version": "6.2.4", "svelte": "^5.0.0", "vite": "^6.3.0 || ^7.0.0" },
+    { "version": "7.0.0", "svelte": "^5.46.4", "vite": "^8.0.0-beta.7 || ^8.0.0" }
+  ],
   "combinations": [
-    { "kit": 2, "svelte": 4, "vite": 5, "plugin": 3 },
-    { "kit": 2, "svelte": 5, "vite": 5, "plugin": 4 },
-    { "kit": 2, "svelte": 5, "vite": 6, "plugin": 5 },
-    { "kit": 2, "svelte": 5, "vite": 7, "plugin": 6 },
-    { "kit": 2, "svelte": 5, "vite": 8, "plugin": 7 },
-    { "kit": 3, "svelte": 5, "vite": 8, "plugin": 7 }
+    { "kit": 2, "svelte": 4, "vite": 5, "plugin": 3, "adapter": 0 },
+    { "kit": 2, "svelte": 5, "vite": 5, "plugin": 4, "adapter": 0 },
+    { "kit": 2, "svelte": 5, "vite": 6, "plugin": 5, "adapter": 0 },
+    { "kit": 2, "svelte": 5, "vite": 7, "plugin": 6, "adapter": 0 },
+    { "kit": 2, "svelte": 5, "vite": 8, "plugin": 7, "adapter": 0 },
+    { "kit": 3, "svelte": 5, "vite": 8, "plugin": 7, "adapter": 0 }
   ]
 }

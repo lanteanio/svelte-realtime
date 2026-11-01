@@ -12,21 +12,24 @@ const load = (file) => JSON.parse(readFileSync(resolve(root, file), 'utf8'));
 const date = /^\d{4}-\d{2}-\d{2}$/;
 const matrixExpression = '${{ fromJSON(needs.support.outputs.node) }}';
 const peersExpression = '${{ fromJSON(needs.support.outputs.peers) }}';
+const peerSchedule = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}";
 const majorRange = major => '>=' + major + '.0.0-0 <' + (major + 1) + '.0.0-0';
 const intersects = (left, right) => semver.intersects(left, right, { includePrerelease: true });
+export const targetPackages = { kit: '@sveltejs/kit', svelte: 'svelte', vite: 'vite', adapter: 'svelte-adapter-uws' };
 
 export function readSupport() {
 	return {
 		table: load('docs/ci-support.v1.json'),
 		pkg: load('package.json'),
 		kits: ['kit2', 'kit3'].map(name => load('test/fixtures/' + name + '/package-lock.json').packages['node_modules/@sveltejs/kit']),
+		adapters: [load('test/fixtures/kit3/package-lock.json').packages['node_modules/svelte-adapter-uws']],
 		workflow: parse(readFileSync(resolve(root, '.github/workflows/verify.yml'), 'utf8')),
 		chaos: parse(readFileSync(resolve(root, '.github/workflows/chaos-recovery.yml'), 'utf8'))
 	};
 }
 
 export function combinationId(row) {
-	return 'kit' + row.kit + '-svelte' + row.svelte + '-vite' + row.vite;
+	return 'kit' + row.kit + '-svelte' + row.svelte + '-vite' + row.vite + '-adapter' + row.adapter;
 }
 
 export function supportMatrices({ table, pkg }, today = new Date().toISOString().slice(0, 10)) {
@@ -48,7 +51,7 @@ export function supportMatrices({ table, pkg }, today = new Date().toISOString()
 	assert.ok(baseline && semver.satisfies(baseline, pkg.engines.node), 'Pinned Node baseline must satisfy engines.node');
 	assert.ok(lines.some(row => row.major === semver.major(baseline)), 'Pinned Node baseline targets an EOL or unreleased line');
 	const node = { include: [{ node: baseline }, ...lines.map(row => ({ node: row.major + '.x' }))] };
-	const peers = { include: lines.flatMap(line => table.combinations.flatMap(row => ['floor', 'latest'].map(edge => ({ node: line.major + '.x', combination: combinationId(row), edge })))) };
+	const peers = { include: lines.flatMap(line => table.combinations.flatMap(row => Object.keys(targetPackages).flatMap(target => ['floor', 'latest'].map(edge => ({ node: line.major + '.x', combination: combinationId(row), target, edge }))))) };
 	return { node, peers };
 }
 
@@ -57,24 +60,46 @@ function expectedMajors(range, recorded) {
 	return Array.from({ length: maximum + 1 }, (_, major) => major).filter(major => intersects(range, majorRange(major)));
 }
 
-export function validatePeerCoverage({ table, pkg, kits }, today = new Date().toISOString().slice(0, 10)) {
-	const aliases = { '@sveltejs/kit': 'kit', svelte: 'svelte', vite: 'vite' };
+export function compatibleCombinations({ table, kits, adapters }) {
+	const rows = [];
+	for (const kit of kits) for (const svelte of table.peers.svelte.lines) for (const vite of table.peers.vite.lines) for (const adapter of adapters) {
+		const kitMajor = semver.major(kit.version);
+		const adapterMajor = semver.major(adapter.version);
+		if (!intersects(kit.peerDependencies.svelte, majorRange(svelte.major)) || !intersects(kit.peerDependencies.vite, majorRange(vite.major))) continue;
+		if (!intersects(adapter.peerDependencies['@sveltejs/kit'], majorRange(kitMajor)) || !intersects(adapter.peerDependencies.svelte, majorRange(svelte.major))) continue;
+		if (!table.plugins.some(plugin => semver.satisfies(plugin.version, kit.peerDependencies['@sveltejs/vite-plugin-svelte']) && intersects(plugin.svelte, majorRange(svelte.major)) && intersects(plugin.vite, majorRange(vite.major)))) continue;
+		rows.push({ kit: kitMajor, svelte: svelte.major, vite: vite.major, adapter: adapterMajor });
+	}
+	return rows;
+}
+
+export function validatePeerCoverage(input, today = new Date().toISOString().slice(0, 10)) {
+	const { table, pkg, kits, adapters } = input;
+	const aliases = Object.fromEntries(Object.entries(targetPackages).map(([alias, name]) => [name, alias]));
 	for (const [name, range] of Object.entries(pkg.peerDependencies)) {
 		const entry = table.peers[name];
 		assert.ok(entry?.lines?.length, name + ' is missing from the support table');
 		const actual = entry.lines.map(row => row.major).sort((a, b) => a - b);
 		assert.deepEqual(actual, expectedMajors(range, actual), name + ' supported majors disagree with peerDependencies');
-		if (aliases[name]) assert.deepEqual([...new Set(table.combinations.map(row => row[aliases[name]]))].sort((a, b) => a - b), actual, name + ' has no compatible CI combination');
+		assert.ok(aliases[name], name + ' needs an explicit peer matrix dimension');
+		assert.deepEqual([...new Set(table.combinations.map(row => row[aliases[name]]))].sort((a, b) => a - b), actual, name + ' has no compatible CI combination');
 	}
+	assert.deepEqual([...new Set(adapters.map(adapter => semver.major(adapter.version)))].sort((a, b) => a - b), table.peers['svelte-adapter-uws'].lines.map(row => row.major).sort((a, b) => a - b), 'Every supported adapter major needs a fixture manifest');
+	assert.deepEqual([...new Set(kits.map(kit => semver.major(kit.version)))].sort((a, b) => a - b), table.peers['@sveltejs/kit'].lines.map(row => row.major).sort((a, b) => a - b), 'Every supported Kit major needs a fixture manifest');
+	const pluginMajors = table.plugins.map(plugin => semver.major(plugin.version)).sort((a, b) => a - b);
+	assert.deepEqual(pluginMajors, [...new Set(kits.flatMap(kit => expectedMajors(kit.peerDependencies['@sveltejs/vite-plugin-svelte'], pluginMajors)))].sort((a, b) => a - b), 'Vite plugin majors disagree with the supported Kit peers');
 	const viteMajors = table.peers.vite.lines.map(row => row.major).sort((a, b) => a - b);
 	assert.deepEqual(viteMajors, [...new Set(kits.flatMap(kit => expectedMajors(kit.peerDependencies.vite, viteMajors)))].sort((a, b) => a - b), 'Vite majors disagree with the supported Kit peers');
 	assert.deepEqual([...new Set(table.combinations.map(row => row.vite))].sort((a, b) => a - b), viteMajors, 'Vite has no compatible CI combination');
 	assert.equal(new Set(table.combinations.map(combinationId)).size, table.combinations.length, 'Duplicate peer combination');
+	assert.deepEqual(table.combinations.map(combinationId).sort(), compatibleCombinations(input).map(combinationId).sort(), 'CI combinations must cover the complete compatible peer product');
 	for (const row of table.combinations) {
 		for (const [name, field] of Object.entries(aliases)) assert.ok(table.peers[name].lines.some(line => line.major === row[field]), 'Unsupported ' + name + ' combination');
 		assert.ok(Number.isInteger(row.plugin) && row.plugin > 0, 'A peer combination needs its compatible Vite plugin major');
 		const kit = kits.find(kit => semver.major(kit.version) === row.kit);
 		assert.ok(kit && intersects(kit.peerDependencies.svelte, majorRange(row.svelte)) && intersects(kit.peerDependencies.vite, majorRange(row.vite)), 'Combination is outside the Kit peer ranges');
+		const plugin = table.plugins.find(plugin => semver.major(plugin.version) === row.plugin);
+		assert.ok(plugin && semver.satisfies(plugin.version, kit.peerDependencies['@sveltejs/vite-plugin-svelte']) && intersects(plugin.svelte, majorRange(row.svelte)) && intersects(plugin.vite, majorRange(row.vite)), 'Combination uses an incompatible Vite plugin');
 	}
 	for (const [name, entry] of Object.entries(table.peers)) {
 		assert.ok(entry.source?.startsWith('https://') && entry.policy, name + ' needs an upstream policy');
@@ -90,8 +115,9 @@ function requiredCommand(job, command) {
 	assert.ok(step && !Object.hasOwn(step, 'if') && !Object.hasOwn(step, 'continue-on-error'), 'Missing unconditional CI command: ' + command);
 }
 
-function runtimeJob(job, expression = matrixExpression) {
-	assert.ok(job && !Object.hasOwn(job, 'if') && !Object.hasOwn(job, 'continue-on-error'), 'Runtime CI job must run unconditionally');
+function runtimeJob(job, expression = matrixExpression, condition) {
+	assert.ok(job && !Object.hasOwn(job, 'continue-on-error'), 'Runtime CI job must fail on errors');
+	assert.equal(job.if, condition, 'Runtime CI job has an unexpected execution condition');
 	assert.equal(job.needs, 'support', 'Runtime CI must depend on the support table');
 	assert.equal(job.strategy?.matrix, expression, 'CI matrix must come from the support table');
 	assert.equal(job.strategy?.['fail-fast'], false, 'All runtime results must be retained');
@@ -116,11 +142,11 @@ export function validateSupport(input, today) {
 		assert.equal(producer.steps.find(step => step.run === 'node scripts/check-ci-support.js --github-output').id, 'support');
 	}
 	for (const name of ['verify', 'smoke', 'kit']) runtimeJob(workflow.jobs[name]);
-	runtimeJob(workflow.jobs.peers, peersExpression);
-	assert.equal(workflow.jobs.peers.if, undefined, 'Peer coverage must not disappear from pull requests');
-	requiredCommand(workflow.jobs.peers, 'node scripts/run-peer-compat.js --combination "${{ matrix.combination }}" --edge "${{ matrix.edge }}"');
+	runtimeJob(workflow.jobs.peers, peersExpression, peerSchedule);
+	requiredCommand(workflow.jobs.peers, 'node scripts/run-peer-compat.js --combination "${{ matrix.combination }}" --target "${{ matrix.target }}" --edge "${{ matrix.edge }}"');
 	requiredCommand(workflow.jobs.verify, 'npm exec -- svelte-adapter-uws-preflight');
 	requiredCommand(workflow.jobs.verify, 'npm run verify:pr');
+	requiredCommand(workflow.jobs.verify, 'npm run verify:browser');
 	requiredCommand(workflow.jobs.verify, 'npm run test:smooth-stack');
 	requiredCommand(workflow.jobs.smoke, 'npm run smoke');
 	requiredCommand(workflow.jobs.kit, 'npm run test:kit');
@@ -140,12 +166,12 @@ export function renderSupport(input) {
 		'| Node leg | Upstream end of support |\n| --- | --- |\n' +
 		node.include.map(row => '| ' + row.node + ' | ' + table.node.lines.find(line => line.major === semver.major(row.node.replace('.x', '.0.0'))).end + ' |').join('\n') + '\n\n' +
 		'The exact patch is the baseline; `.x` selects the newest patch in each maintained major admitted by `engines.node` (`' + pkg.engines.node + '`). Every leg runs the unit, simulation, browser/DevTools, scaffold, native smooth-stack, smoke, locked Kit, production lifecycle and recovery-chaos checks. Native preflight is required before the unit suite. A missing native binary fails the leg.\n\n' +
-		'| SvelteKit major | Svelte major | Vite major | Vite plugin major |\n| --- | --- | --- | --- |\n' +
-		table.combinations.map(row => '| ' + [row.kit, row.svelte, row.vite, row.plugin].join(' | ') + ' |').join('\n') + '\n\n' +
-		'Each row runs at its lowest jointly valid peer versions and at its latest versions, crossed with every maintained Node major (' + peers.include.length + ' jobs). The adapter version is selected inside the declared `' + pkg.peerDependencies['svelte-adapter-uws'] + '` peer range. Registry metadata and peer/engine constraints determine the exact tuple at run time. A floor uses the lowest Kit, then plugin, Vite, Svelte and adapter versions that jointly satisfy every peer range; it never installs an invalid graph with `--force` or `--legacy-peer-deps`. A declared package floor below a companion peer minimum is therefore exercised at that effective minimum. Each job retains the exact requested and installed versions, logs and runtime reports.\n\n' +
+		'| SvelteKit major | Svelte major | Vite major | Vite plugin major | Adapter major |\n| --- | --- | --- | --- | --- |\n' +
+		table.combinations.map(row => '| ' + [row.kit, row.svelte, row.vite, row.plugin, row.adapter].join(' | ') + ' |').join('\n') + '\n\n' +
+		'On nightly schedules and explicit workflow dispatches, every row tests each of SvelteKit, Svelte, Vite and the adapter as a separate target, at its floor and latest version, crossed with every maintained Node major (' + peers.include.length + ' jobs). Pull requests retain all four runtime legs and their locked peer fixtures; the larger peer product runs nightly. The target boundary is selected first, then the newest compatible companions; testing the Kit floor does not replace testing the Svelte floor. For example, Svelte 4.0.0 runs with a newer Kit 2 that admits it, while Kit 2.0.0 runs with a newer Svelte 4 that satisfies its own minimum. The adapter stays inside `' + pkg.peerDependencies['svelte-adapter-uws'] + '`. Registry metadata, peer ranges and engines determine the exact tuple without `--force` or `--legacy-peer-deps`. Each job retains its target, exact requested and installed versions, logs and runtime reports. The complete combination set is checked independently against the locked Kit/adapter manifests and recorded Vite-plugin peer contracts.\n\n' +
 		'Svelte 5 rows run real production and development servers, cold WebSocket RPC, browser stores, shared HTTP/WebSocket state, DevTools and HMR. Kit 3 also tests wrapped and omitted adapter configurations. The existing adapter-version-specific runtime exceptions remain visible in the Kit reports. Svelte 4 rows build and type-check a production application, exercise store operations, and verify RPC and updates in two browsers plus reload.\n\n' +
 		'Upstream has no dated EOL schedule for Svelte, SvelteKit or the adapter, so their dates are null in the table. Vite uses a rolling policy: 6/7/8 receive updates as of the recorded date; Vite 5 is explicitly legacy compatibility coverage required by the supported Svelte 4 path. That legacy row does not claim upstream security support. Published package ranges remain unchanged.\n\n' +
-		'For one installed consumer, run `node scripts/run-peer-compat.js --combination kit2-svelte5-vite6 --edge floor` after installing root dependencies and Playwright Chromium. This creates an isolated application under `test-results`, resolves exact registry versions, installs with strict peer and engine checks, and retains its evidence there. Use `--edge latest` for the other boundary.\n';
+		'For one installed consumer, run `node scripts/run-peer-compat.js --combination kit2-svelte5-vite6-adapter0 --target svelte --edge floor` after installing root dependencies and Playwright Chromium. This creates an isolated application under `test-results`, resolves exact registry versions, installs with strict peer and engine checks, and retains its evidence there. Other targets are `kit`, `vite` and `adapter`; use `--edge latest` for the other boundary.\n';
 }
 
 if (isScriptEntry(import.meta.url)) {

@@ -53,6 +53,7 @@ jobs:
       - run: npm run verify:pr
         env:
           RELEASE_LEDGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - run: npm run verify:browser
       - run: npm run test:smooth-stack
   smoke:
     needs: support
@@ -107,6 +108,7 @@ jobs:
       - name: Exercise the SvelteKit 3 manual counter in a fresh app
         run: node scripts/check-manual-setup.js --fresh-install --kit 3
   peers:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     needs: support
     strategy:
       fail-fast: false
@@ -123,11 +125,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: node scripts/run-peer-compat.js --combination "${{ matrix.combination }}" --edge "${{ matrix.edge }}"
+      - run: node scripts/run-peer-compat.js --combination "${{ matrix.combination }}" --target "${{ matrix.target }}" --edge "${{ matrix.edge }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: peers-${{ matrix.node }}-${{ matrix.combination }}-${{ matrix.edge }}
+          name: peers-${{ matrix.node }}-${{ matrix.combination }}-${{ matrix.target }}-${{ matrix.edge }}
           path: |
             test-results/peer-compat-*/*.json
             test-results/peer-compat-*/*.log

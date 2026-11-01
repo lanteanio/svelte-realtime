@@ -846,6 +846,15 @@
       "job": "verify",
       "step": "7",
       "commands": [
+        "playwright test --config test/e2e/playwright.config.js"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "verify",
+      "step": "8",
+      "commands": [
         "node scripts/check-smooth-stack.js"
       ]
     },
@@ -954,18 +963,16 @@
       "job": "peers",
       "step": "5",
       "commands": [
-        "node scripts/run-peer-compat.js --combination \"${{ matrix.combination }}\" --edge \"${{ matrix.edge }}\""
+        "node scripts/run-peer-compat.js --combination \"${{ matrix.combination }}\" --target \"${{ matrix.target }}\" --edge \"${{ matrix.edge }}\""
       ]
     }
   ],
   "notFullyHosted": [
     "check:links:external",
     "test:chaos",
-    "test:e2e",
     "test:examples",
     "test:kit-scaffold",
     "test:watch",
-    "verify:browser",
     "verify:chaos",
     "verify:docs",
     "verify:full",

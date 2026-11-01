@@ -29,9 +29,9 @@ The [runtime and peer matrix](docs/ci-support.md) is generated from
 `docs/ci-support.v1.json` and checked by `npm run check:ci-support`. Linux runs
 the exact Node baseline plus the newest patch of each maintained Node major,
 including native, browser, lifecycle and recovery suites on every leg.
-Separate installed consumers cover each compatible Svelte/Kit/Vite major
-combination at its lowest jointly valid versions and latest versions on every
-maintained Node major. Each consumer records its resolved package versions.
+Nightly and explicitly dispatched consumers cover each compatible Svelte/Kit/Vite major
+combination with each package separately at its floor and latest version on
+every maintained Node major. Each consumer records its target and resolved versions.
 When changing supported ranges, update the lifecycle table and compatible
 combinations, then run `node scripts/check-ci-support.js --write`. An expired
 table or missing CI leg fails the check. Legacy Vite 5 coverage preserves the

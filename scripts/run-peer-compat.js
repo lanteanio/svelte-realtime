@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve, relative, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import semver from 'semver';
-import { readSupport, supportMatrices, validatePeerCoverage, combinationId } from './check-ci-support.js';
+import { readSupport, supportMatrices, validatePeerCoverage, combinationId, targetPackages } from './check-ci-support.js';
 import { isScriptEntry } from './script-entry.js';
 import { resolveNpmCli } from './npm-cli.js';
 
@@ -18,18 +18,21 @@ function inRange(version, range) {
 	return semver.satisfies(version, range);
 }
 
-// A declared floor is tested with the lowest compatible companion versions.
+// Select the target boundary first, then find compatible companion versions.
 // Reject unsatisfiable combinations instead of forcing npm's peer resolver.
-export function resolvePeerVersions(row, pkg, metadata, edge, nodeVersion) {
+export function resolvePeerVersions(row, pkg, metadata, edge, nodeVersion, target) {
 	assert.ok(['floor', 'latest'].includes(edge), 'Peer edge must be floor or latest');
-	const major = { '@sveltejs/kit': row.kit, '@sveltejs/vite-plugin-svelte': row.plugin, vite: row.vite, svelte: row.svelte };
+	assert.ok(Object.hasOwn(targetPackages, target), 'A supported target package is required');
+	const targetName = targetPackages[target];
+	const order = [targetName, ...names.filter(name => name !== targetName)];
+	const major = { '@sveltejs/kit': row.kit, '@sveltejs/vite-plugin-svelte': row.plugin, vite: row.vite, svelte: row.svelte, 'svelte-adapter-uws': row.adapter };
 	const choices = Object.fromEntries(names.map(name => {
 		const versions = Object.values(metadata[name].versions).filter(manifest =>
 			semver.valid(manifest.version) &&
 			(major[name] === undefined || semver.major(manifest.version) === major[name]) &&
 			(pkg.peerDependencies[name] ? inRange(manifest.version, pkg.peerDependencies[name]) : !semver.prerelease(manifest.version)) &&
 			(!manifest.engines?.node || inRange(nodeVersion, manifest.engines.node))
-		).sort((a, b) => edge === 'floor' ? semver.compare(a.version, b.version) : semver.rcompare(a.version, b.version));
+		).sort((a, b) => name === targetName && edge === 'floor' ? semver.compare(a.version, b.version) : semver.rcompare(a.version, b.version));
 		assert.ok(versions.length, name + ' has no admitted version on Node ' + nodeVersion);
 		return [name, versions];
 	}));
@@ -42,8 +45,8 @@ export function resolvePeerVersions(row, pkg, metadata, edge, nodeVersion) {
 		return Object.values(selected).every(other => !other.peerDependencies?.[name] || inRange(manifest.version, other.peerDependencies[name]));
 	}
 	function visit(index) {
-		if (index === names.length) return true;
-		const name = names[index];
+		if (index === order.length) return true;
+		const name = order[index];
 		for (const manifest of choices[name]) {
 			if (!compatible(name, manifest)) continue;
 			selected[name] = manifest;
@@ -81,15 +84,17 @@ async function run() {
 	validatePeerCoverage(input);
 	const args = process.argv.slice(2);
 	const option = name => args[args.indexOf(name) + 1];
-	assert.ok(args.includes('--combination') && args.includes('--edge'), '--combination and --edge are required');
+	assert.ok(args.includes('--combination') && args.includes('--target') && args.includes('--edge'), '--combination, --target and --edge are required');
 	const row = table.combinations.find(row => combinationId(row) === option('--combination'));
 	assert.ok(row, 'Unknown peer combination');
 	const edge = option('--edge');
+	const target = option('--target');
+	assert.ok(Object.hasOwn(targetPackages, target), 'Unknown target package');
 	assert.ok(['floor', 'latest'].includes(edge), 'Peer edge must be floor or latest');
-	const directory = resolve(root, 'test-results', 'peer-compat-' + combinationId(row) + '-' + edge + '-' + randomUUID());
+	const directory = resolve(root, 'test-results', 'peer-compat-' + combinationId(row) + '-' + target + '-' + edge + '-' + randomUUID());
 	await mkdir(directory, { recursive: true });
 	const reportPath = resolve(directory, 'result.json');
-	const report = { status: 'failed', node: process.versions.node, combination: row, edge, startedAt: new Date().toISOString() };
+	const report = { status: 'failed', node: process.versions.node, combination: row, target, edge, startedAt: new Date().toISOString() };
 	try {
 		const metadata = Object.fromEntries(await Promise.all(names.map(async name => {
 			const response = await fetch('https://registry.npmjs.org/' + encodeURIComponent(name), {
@@ -98,7 +103,8 @@ async function run() {
 			assert.ok(response.ok, 'Cannot read published versions of ' + name + ': ' + response.status);
 			return [name, await response.json()];
 		})));
-		report.versions = resolvePeerVersions(row, pkg, metadata, edge, process.versions.node);
+		report.versions = resolvePeerVersions(row, pkg, metadata, edge, process.versions.node, target);
+		report.targetVersion = report.versions[targetPackages[target]];
 		await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
 		console.log(JSON.stringify(report.versions));
 		const fixture = resolve(directory, 'app');
