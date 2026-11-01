@@ -1638,7 +1638,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			if (dep) /** @type {any} */ (_result).deprecation = dep;
 		}
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
-		_bindResponseFence(ctx, _result, requestId);
+		if (!msg.__volatile) _bindResponseFence(ctx, _result, requestId);
 		return _result;
 	} catch (err) {
 		// After an early middleware answer, the still-running chain releases its
