@@ -9,6 +9,7 @@ import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { diagnosticErrorMessage, emitOperationalEvent, formatDiagnostic } from '../shared/diagnostic.js';
 import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _bindResponseFence, _fenceResponse, _responseFenceFailure } from './response-fence.js';
 import { _subscribeTracked } from './membership.js';
 import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { _IS_DEV } from './env.js';
@@ -1637,6 +1638,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			if (dep) /** @type {any} */ (_result).deprecation = dep;
 		}
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
+		_bindResponseFence(ctx, _result, requestId);
 		return _result;
 	} catch (err) {
 		// After an early middleware answer, the still-running chain releases its
@@ -1822,6 +1824,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 			const _dep = _deprecationSignal(ws, path, fn);
 			if (_dep) answer = { ...answer, deprecation: _dep };
 		}
+		_bindResponseFence(ctx, answer, requestId);
 		_respond(ws, platform, id, answer, requestId, path);
 		_recordRpcMetrics(path, answer.ok === false ? (answer.code || 'UNKNOWN') : '', _metricsStart, ws);
 	} catch (err) {
@@ -1907,6 +1910,7 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 }
 
 function _respond(ws, platform, correlationId, payload, requestId, paths) {
+	const source = payload;
 	payload = requestId ? _withFailureRequestId(payload, requestId) : payload;
 	// The first response on a connection carries the upload frame cap, so a
 	// client that called anything before uploading sizes chunk 0 from it.
@@ -1937,6 +1941,7 @@ function _respond(ws, platform, correlationId, payload, requestId, paths) {
 	/** @type {'delivered' | 'backpressure' | 'closed' | 'exception'} */
 	let outcome = 'exception';
 	try {
+		payload = _fenceResponse(source, payload, requestId ?? correlationId);
 		const result = platform.send(ws, '__rpc', correlationId, payload);
 		if (trackDelivery) {
 			// Native sends return 1 on success, 0 for buffered backpressure,
@@ -2011,7 +2016,11 @@ export async function __directCall(path, args, platform, options) {
 
 	_enterInFlight();
 	try {
-		return await _runDirectCall(path, args, platform, options);
+		const execution = { ctx: null };
+		const result = await _runDirectCall(path, args, platform, options, execution);
+		const failure = _responseFenceFailure(execution.ctx);
+		if (failure) throw new LiveError(failure.code, failure.error);
+		return result;
 	} catch (err) {
 		if (!hasFallback) throw err;
 		emitOperationalEvent({
@@ -2032,7 +2041,7 @@ export async function __directCall(path, args, platform, options) {
 	}
 }
 
-async function _runDirectCall(path, args, platform, options) {
+async function _runDirectCall(path, args, platform, options, execution) {
 	if (_isShuttingDown()) {
 		// Reject new SSR loads during a drain. A caller that passed `fallback`
 		// gets it (the page renders degraded); otherwise the load throws
@@ -2053,6 +2062,7 @@ async function _runDirectCall(path, args, platform, options) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(userValue, null, platform, _h, null);
+	execution.ctx = ctx;
 
 	// Run global middleware chain, then guard, then execution
 	// A direct call answers with what the middleware returns, so redacting,
