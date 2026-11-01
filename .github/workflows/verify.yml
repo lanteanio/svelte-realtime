@@ -4,10 +4,32 @@ on:
   push:
     branches: [main, dev]
   workflow_dispatch:
+  schedule:
+    - cron: '15 3 * * *'
 permissions:
   contents: read
 jobs:
+  support:
+    runs-on: ubuntu-24.04
+    outputs:
+      node: ${{ steps.support.outputs.node }}
+      peers: ${{ steps.support.outputs.peers }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - run: npm ci
+      - id: support
+        run: node scripts/check-ci-support.js --github-output
   verify:
+    needs: support
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.support.outputs.node) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -17,7 +39,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22.12.0
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -27,11 +49,16 @@ jobs:
           npm ci
           npm ci --prefix test/fixture
       - run: npx playwright install --with-deps chromium
+      - run: npm exec -- svelte-adapter-uws-preflight
       - run: npm run verify:pr
         env:
           RELEASE_LEDGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       - run: npm run test:smooth-stack
   smoke:
+    needs: support
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.support.outputs.node) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -40,7 +67,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22.12.0
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -51,6 +78,10 @@ jobs:
       - name: Exercise the SvelteKit 2 manual counter in a fresh app
         run: node scripts/check-manual-setup.js --fresh-install --kit 2
   kit:
+    needs: support
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.support.outputs.node) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -59,7 +90,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -75,6 +106,32 @@ jobs:
       - run: npm run test:scaffold
       - name: Exercise the SvelteKit 3 manual counter in a fresh app
         run: node scripts/check-manual-setup.js --fresh-install --kit 3
+  peers:
+    needs: support
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.support.outputs.peers) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/run-peer-compat.js --combination "${{ matrix.combination }}" --edge "${{ matrix.edge }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: peers-${{ matrix.node }}-${{ matrix.combination }}-${{ matrix.edge }}
+          path: |
+            test-results/peer-compat-*/*.json
+            test-results/peer-compat-*/*.log
+          if-no-files-found: error
   svelte4:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

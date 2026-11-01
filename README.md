@@ -68,7 +68,7 @@ The scaffold validates Node and native-platform compatibility, installs the tupl
 
 ## Version compatibility
 
-The three ecosystem packages move together. Bump them as a group:
+The three ecosystem packages move together. Bump them as a group. The [CI support matrix](docs/ci-support.md) lists exact runtime lanes and floor/latest peer coverage:
 
 <!-- compatibility:start -->
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |

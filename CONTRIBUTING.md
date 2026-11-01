@@ -25,6 +25,18 @@ binary. State your Node version, OS, architecture, addon availability, exact
 commands and omitted checks in the pull request; a skipped native test is not
 evidence of native runtime coverage.
 
+The [runtime and peer matrix](docs/ci-support.md) is generated from
+`docs/ci-support.v1.json` and checked by `npm run check:ci-support`. Linux runs
+the exact Node baseline plus the newest patch of each maintained Node major,
+including native, browser, lifecycle and recovery suites on every leg.
+Separate installed consumers cover each compatible Svelte/Kit/Vite major
+combination at its lowest jointly valid versions and latest versions on every
+maintained Node major. Each consumer records its resolved package versions.
+When changing supported ranges, update the lifecycle table and compatible
+combinations, then run `node scripts/check-ci-support.js --write`. An expired
+table or missing CI leg fails the check. Legacy Vite 5 coverage preserves the
+Svelte 4 compatibility promise; it is not upstream security support.
+
 DevTools and generated counter browser checks share 320x568, 768x1024, and
 1440x900 viewports. `test:devtools` renders a real adapter smooth channel through
 `SmoothEntity` and waits for normal inspector refresh ticks after commands,

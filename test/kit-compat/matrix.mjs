@@ -8,7 +8,13 @@ import { entriesFor, matchKnown } from './known-failures.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runner = fileURLToPath(new URL('./run.mjs', import.meta.url));
-const reportDir = path.join(root, 'test-results');
+const args = process.argv.slice(2);
+const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
+const onlyKit = option('--kit');
+assert.ok(onlyKit === undefined || ['2', '3'].includes(onlyKit), '--kit must be 2 or 3');
+const customFixture = option('--fixture');
+assert.ok(!customFixture || onlyKit, '--fixture requires --kit');
+const reportDir = path.resolve(option('--report-dir', path.join(root, 'test-results')));
 await mkdir(reportDir, { recursive: true });
 const runs = [];
 const commonChecks = [
@@ -17,12 +23,12 @@ const commonChecks = [
 	'devtools runtime', 'browser has no runtime errors', 'no unsupported HTML hook warning'
 ];
 async function installedAdapter(fixtureName) {
-	const manifest = path.join(root, 'test', 'fixtures', fixtureName, 'node_modules', 'svelte-adapter-uws', 'package.json');
+	const manifest = path.join(customFixture || path.join(root, 'test', 'fixtures', fixtureName), 'node_modules', 'svelte-adapter-uws', 'package.json');
 	return JSON.parse(await readFile(manifest, 'utf8')).version;
 }
 
 // Kit 2 also runs on Vite 5, which its peer range still admits.
-for (const [kit, vite] of [['2', 'locked'], ['2', '5'], ['3', 'locked']]) {
+for (const [kit, vite] of onlyKit ? [[onlyKit, 'locked']] : [['2', 'locked'], ['2', '5'], ['3', 'locked']]) {
 	for (const variant of vite === '5' ? [
 		{ mode: 'production', args: [] },
 		{ mode: 'dev', args: ['--hmr'] }
@@ -49,6 +55,7 @@ for (const [kit, vite] of [['2', 'locked'], ['2', '5'], ['3', 'locked']]) {
 			});
 			const child = spawn(process.execPath, [
 				runner, '--kit', kit, '--vite', vite, '--mode', variant.mode, ...variant.args, '--report', reportPath,
+				...(customFixture ? ['--fixture', path.resolve(customFixture)] : []),
 				...(known.length ? ['--known-adapter-failures', JSON.stringify(known.map(({ checks, signature, restart }) => ({ checks, signature, restart })))] : [])
 			], { cwd: root, env: process.env, stdio: 'inherit', windowsHide: true });
 			const [code, signal] = await once(child, 'exit');

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "checkedOn": "2026-11-01",
+  "checkBy": "2027-01-01",
+  "node": {
+    "baseline": "22.23.2",
+    "source": "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json",
+    "lines": [
+      { "major": 20, "start": "2023-04-18", "lts": "2023-10-24", "end": "2026-04-30" },
+      { "major": 22, "start": "2024-04-24", "lts": "2024-10-29", "end": "2027-04-30" },
+      { "major": 24, "start": "2025-05-06", "lts": "2025-10-28", "end": "2028-04-30" },
+      { "major": 26, "start": "2026-05-05", "lts": "2026-10-28", "end": "2029-04-30" },
+      { "major": 27, "start": "2027-04-22", "lts": "2027-10-20", "end": "2030-04-30" }
+    ]
+  },
+  "peers": {
+    "svelte": {
+      "source": "https://svelte.dev/docs/svelte/v5-migration-guide",
+      "policy": "No dated upstream EOL schedule; retain the declared compatibility range.",
+      "lines": [{ "major": 4, "end": null }, { "major": 5, "end": null }]
+    },
+    "@sveltejs/kit": {
+      "source": "https://svelte.dev/docs/kit/migrating-to-sveltekit-3",
+      "policy": "No dated upstream EOL schedule; retain the declared compatibility range.",
+      "lines": [{ "major": 2, "end": null }, { "major": 3, "end": null }]
+    },
+    "svelte-adapter-uws": {
+      "source": "https://github.com/lanteanio/svelte-adapter-uws/blob/dev/package.json",
+      "policy": "The declared peer range selects the coordinated release train; no dated EOL schedule.",
+      "lines": [{ "major": 0, "end": null }]
+    },
+    "vite": {
+      "source": "https://vite.dev/releases",
+      "policy": "Current and preceding two majors receive updates on their latest minors. Vite 5 remains a legacy compatibility target for Svelte 4.",
+      "lines": [
+        { "major": 5, "end": null, "legacy": true },
+        { "major": 6, "end": null },
+        { "major": 7, "end": null },
+        { "major": 8, "end": null }
+      ]
+    }
+  },
+  "combinations": [
+    { "kit": 2, "svelte": 4, "vite": 5, "plugin": 3 },
+    { "kit": 2, "svelte": 5, "vite": 5, "plugin": 4 },
+    { "kit": 2, "svelte": 5, "vite": 6, "plugin": 5 },
+    { "kit": 2, "svelte": 5, "vite": 7, "plugin": 6 },
+    { "kit": 2, "svelte": 5, "vite": 8, "plugin": 7 },
+    { "kit": 3, "svelte": 5, "vite": 8, "plugin": 7 }
+  ]
+}

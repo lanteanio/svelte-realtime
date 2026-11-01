@@ -3,6 +3,7 @@
   "scripts": {
     "check": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -24,6 +25,9 @@
       "node scripts/check-release-notes.js",
       "node scripts/check-release-workflow.js",
       "node scripts/check-svelte-support.js"
+    ],
+    "check:ci-support": [
+      "node scripts/check-ci-support.js"
     ],
     "check:documentation": [
       "node scripts/check-documentation-contract.js"
@@ -78,6 +82,7 @@
     "prepublishOnly": [
       "node scripts/check-compatibility.js --release",
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -102,6 +107,7 @@
     ],
     "pretest": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -132,6 +138,7 @@
     ],
     "test": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -214,6 +221,7 @@
     ],
     "verify:fast": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -238,6 +246,7 @@
     ],
     "verify:full": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -269,6 +278,7 @@
     ],
     "verify:pr": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -298,6 +308,7 @@
     ],
     "verify:release": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -339,6 +350,7 @@
     ],
     "verify:unit": [
       "node scripts/check-lockfiles.js",
+      "node scripts/check-ci-support.js",
       "node scripts/check-compatibility.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -375,7 +387,10 @@
           "test/e2e/prod-server.js",
           "package.json",
           "package-lock.json",
-          ".github/workflows/chaos-recovery.yml"
+          ".github/workflows/chaos-recovery.yml",
+          ".github/workflows/verify.yml",
+          "scripts/check-ci-support.js",
+          "docs/ci-support.v1.json"
         ]
       },
       "push": {
@@ -384,7 +399,12 @@
           "dev"
         ]
       },
-      "workflow_dispatch": null
+      "workflow_dispatch": null,
+      "schedule": [
+        {
+          "cron": "45 3 * * *"
+        }
+      ]
     },
     "devtools.yml": {
       "pull_request": {
@@ -428,10 +448,33 @@
           "dev"
         ]
       },
-      "workflow_dispatch": null
+      "workflow_dispatch": null,
+      "schedule": [
+        {
+          "cron": "15 3 * * *"
+        }
+      ]
     }
   },
   "hosted": [
+    {
+      "workflow": "chaos-recovery.yml",
+      "automatic": true,
+      "job": "support",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "automatic": true,
+      "job": "support",
+      "step": "4",
+      "commands": [
+        "node scripts/check-ci-support.js --github-output"
+      ]
+    },
     {
       "workflow": "chaos-recovery.yml",
       "automatic": true,
@@ -583,6 +626,7 @@
       "step": "Run the complete release verification contract",
       "commands": [
         "node scripts/check-lockfiles.js",
+        "node scripts/check-ci-support.js",
         "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
@@ -624,6 +668,7 @@
       "commands": [
         "node scripts/check-compatibility.js --release",
         "node scripts/check-lockfiles.js",
+        "node scripts/check-ci-support.js",
         "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
@@ -717,6 +762,24 @@
     {
       "workflow": "verify.yml",
       "automatic": true,
+      "job": "support",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "support",
+      "step": "4",
+      "commands": [
+        "node scripts/check-ci-support.js --github-output"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
       "job": "verify",
       "step": "Install realtime and fixture dependencies",
       "commands": [
@@ -738,7 +801,17 @@
       "job": "verify",
       "step": "5",
       "commands": [
+        "npm exec -- svelte-adapter-uws-preflight"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "verify",
+      "step": "6",
+      "commands": [
         "node scripts/check-lockfiles.js",
+        "node scripts/check-ci-support.js",
         "node scripts/check-compatibility.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
@@ -771,7 +844,7 @@
       "workflow": "verify.yml",
       "automatic": true,
       "job": "verify",
-      "step": "6",
+      "step": "7",
       "commands": [
         "node scripts/check-smooth-stack.js"
       ]
@@ -855,6 +928,33 @@
       "step": "Exercise the SvelteKit 3 manual counter in a fresh app",
       "commands": [
         "node scripts/check-manual-setup.js --fresh-install --kit 3"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "peers",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "peers",
+      "step": "4",
+      "commands": [
+        "npx playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "peers",
+      "step": "5",
+      "commands": [
+        "node scripts/run-peer-compat.js --combination \"${{ matrix.combination }}\" --edge \"${{ matrix.edge }}\""
       ]
     }
   ],

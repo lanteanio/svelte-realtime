@@ -44,7 +44,7 @@ for (const entry of knownFailures) {
 const driveCase = option('--drive-case', 'as-invoked');
 assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
 assert.ok(driveCase === 'as-invoked' || (process.platform === 'win32' && kit === '3'), '--drive-case requires Windows and Kit 3');
-const fixture = path.join(root, 'test', 'fixtures', 'kit' + kit + (viteMajor === '5' ? '-vite5' : ''));
+const fixture = path.resolve(option('--fixture', path.join(root, 'test', 'fixtures', 'kit' + kit + (viteMajor === '5' ? '-vite5' : ''))));
 // Vite 8 realpaths its root, which on Windows upper-cases the drive letter,
 // while SvelteKit keeps the working directory as spelled.
 const workdir = driveCase === 'lower' ? fixture.replace(/^[A-Za-z]:/, drive => drive.toLowerCase()) : fixture;
