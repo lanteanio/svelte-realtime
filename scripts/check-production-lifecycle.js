@@ -16,7 +16,7 @@ const npm = process.env.npm_execpath || path.join(path.dirname(process.execPath)
 const temporary = mkdtempSync(path.join(tmpdir(), 'realtime-production-lifecycle-'));
 const fixture = path.join(temporary, 'fixture');
 const containers = new Set();
-const image = process.env.REALTIME_LIFECYCLE_NODE_IMAGE || 'node:24.13.1-trixie-slim';
+const image = process.env.REALTIME_LIFECYCLE_NODE_IMAGE || 'node:' + process.versions.node + '-trixie-slim';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function docker(...args) {
 	return execFileSync('docker', args, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -121,6 +121,9 @@ try {
 	docker('info');
 	try { docker('image', 'inspect', image); }
 	catch { execFileSync('docker', ['pull', image], { stdio: 'inherit', timeout: 180_000 }); }
+	const containerNode = docker('run', '--rm', image, 'node', '-p', 'process.versions.node');
+	assert.equal(containerNode, process.versions.node, 'Production lifecycle container must use the selected Node runtime');
+	console.log('Production lifecycle runtime: Node ' + containerNode + ' (' + image + ')');
 	const packed = JSON.parse(execFileSync(process.execPath, [npm, 'pack', '--json', '--pack-destination', temporary], {
 		cwd: repository, encoding: 'utf8', timeout: 120_000
 	}))[0];

@@ -91,7 +91,11 @@ async function run() {
 	const target = option('--target');
 	assert.ok(Object.hasOwn(targetPackages, target), 'Unknown target package');
 	assert.ok(['floor', 'latest'].includes(edge), 'Peer edge must be floor or latest');
-	const directory = resolve(root, 'test-results', 'peer-compat-' + combinationId(row) + '-' + target + '-' + edge + '-' + randomUUID());
+	const runId = 'peer-compat-' + combinationId(row) + '-' + target + '-' + edge + '-' + randomUUID();
+	const directory = resolve(root, 'test-results', runId);
+	// Vite ignores test-results when watching source files. Keep the app in
+	// the fixture tree so development reloads exercise real filesystem events.
+	const fixture = resolve(root, 'test', 'fixtures', runId);
 	await mkdir(directory, { recursive: true });
 	const reportPath = resolve(directory, 'result.json');
 	const report = { status: 'failed', node: process.versions.node, combination: row, target, edge, startedAt: new Date().toISOString() };
@@ -107,7 +111,6 @@ async function run() {
 		report.targetVersion = report.versions[targetPackages[target]];
 		await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
 		console.log(JSON.stringify(report.versions));
-		const fixture = resolve(directory, 'app');
 		const source = resolve(root, 'test', 'fixtures', row.svelte === 4 ? 'svelte4' : 'kit' + row.kit);
 		await cp(source, fixture, { recursive: true, filter: path => !/(?:^|[\\/])(?:node_modules|build|\.svelte-kit|package-lock\.json)(?:[\\/]|$)/.test(path) });
 		const manifest = JSON.parse(await readFile(resolve(fixture, 'package.json'), 'utf8'));

@@ -12,3 +12,5 @@ playwright-report
 test/**/src/live/$types.d.ts
 .chaos-ctx.json
 test/__*_rune__
+
+test/fixtures/peer-compat-*/
