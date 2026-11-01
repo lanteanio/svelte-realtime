@@ -607,6 +607,10 @@ function _createMappedStore(source, fn) {
 		return [];
 	};
 	const snapshot = (value) => {
+		// A prior subscriber can replace the source while Svelte is draining
+		// an older notification. Deliver that value without caching it under
+		// the newer snapshot token.
+		if (value !== _peekCurrent(source)) return project(value);
 		const version = _currentVersion(source);
 		if (!initialized || version !== sourceVersion) {
 			current = project(value);
