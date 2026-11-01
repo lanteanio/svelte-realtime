@@ -19,19 +19,23 @@ it('reads every client store through current with real Svelte effects and no col
 	try {
 		const rooms = resolve(dir, 'rooms.js');
 		writeFileSync(rooms, roomSource);
+		const basicRoom = resolve(dir, 'basic-room.js');
+		writeFileSync(basicRoom, roomSource.replace(/^export const multi = .*;$/m, ''));
 		const multiplayer = compileModule(readFileSync(resolve('src/client-multiplayer.svelte.js'), 'utf8'), { filename: 'multiplayer.svelte.js', generate: 'client' }).js.code;
 		writeFileSync(resolve(dir, 'multiplayer.js'), multiplayer.replaceAll("from './", "from '../../src/"));
-		writeFileSync(resolve(dir, 'rooms-client.js'), _generateClientStubs(rooms, 'current-rooms', 'src/live').replace("'svelte-realtime/multiplayer'", "'./multiplayer.js'"));
+		writeFileSync(resolve(dir, 'rooms-client.js'), _generateClientStubs(basicRoom, 'current-rooms', 'src/live'));
+		writeFileSync(resolve(dir, 'multiplayer-client.js'), _generateClientStubs(rooms, 'current-multiplayer', 'src/live').replace("'svelte-realtime/multiplayer'", "'./multiplayer.js'"));
 		writeFileSync(resolve(dir, 'watch.js'), compileModule(`
 			export class State {
 				store;
 				value = $derived(this.store.current);
 				constructor(store) { this.store = store; }
 			}
-			export function watch(read) {
+			export function watch(read, create) {
 				const values = [];
 				const stop = $effect.root(() => {
-					const value = $derived.by(read);
+					const input = create?.();
+					const value = $derived.by(() => read(input));
 					$effect.pre(() => { values.push(value); });
 				});
 				return { values, stop };
@@ -39,7 +43,9 @@ it('reads every client store through current with real Svelte effects and no col
 		`, { filename: 'watch.svelte.js', generate: 'client' }).js.code);
 		writeFileSync(resolve(dir, 'run.js'), `
 import assert from 'node:assert/strict';
-import { watch, State } from './watch.js';
+globalThis.requestAnimationFrame = callback => setTimeout(() => callback(performance.now()), 0);
+globalThis.cancelAnimationFrame = handle => clearTimeout(handle);
+const { watch, State } = await import('./watch.js');
 class Socket {
 	static sockets = [];
 	static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -84,8 +90,7 @@ assert.equal(client.quiescent.current, true);
 assert.equal(client.health.current, 'healthy');
 assert.equal(client.uploading.current, false);
 const observers = Object.fromEntries(Object.entries(stores).map(([name, store]) => [name, watch(() => store.current)]));
-const state = new State(stream);
-const classObserver = watch(() => state.value);
+const classObserver = watch(state => state.value, () => new State(stream));
 await tick(); await tick();
 assert.equal(Socket.sockets.length, 1);
 const ws = Socket.sockets[0];
@@ -137,6 +142,25 @@ foreign.set(3);
 await tick();
 assert.equal(foreignCombination.values.at(-1), 3, 'foreign snapshots do not suppress subscription updates');
 foreignCombination.stop();
+const betweenReads = client.__stream('current/between', { merge: 'set' });
+ownedStreams.push(betweenReads);
+const mutable = { value: 1 };
+betweenReads.hydrate(mutable);
+const mutableObserver = watch(() => betweenReads.current.value);
+assert.equal(mutableObserver.values.at(-1), 1);
+mutable.value = 2;
+betweenReads.hydrate(mutable);
+await tick();
+assert.equal(mutableObserver.values.at(-1), 2, 'an in-place update before subscription keeps its new version');
+mutableObserver.stop();
+const replacement = client.__stream('current/replacement', { merge: 'set' });
+ownedStreams.push(replacement);
+replacement.hydrate({ value: 1 });
+const replacedObserver = watch(() => replacement.current.value);
+replacement.hydrate({ value: 3 });
+await tick();
+assert.equal(replacedObserver.values.at(-1), 3, 'a replacement before subscription is delivered');
+replacedObserver.stop();
 const peekSource = client.__stream('current/peek', { merge: 'set' });
 ownedStreams.push(peekSource);
 peekSource.hydrate(1);
@@ -196,8 +220,11 @@ for (const kind of ['store', 'function']) {
 	assert.equal(gated.current, undefined);
 	stopDisabled();
 }
-const namespaces = await import('./rooms-client.js');
-for (const namespace of [namespaces.room, namespaces.multi]) {
+const namespaces = [(await import('./rooms-client.js')).room];
+const reactivity = await import('svelte/reactivity');
+if (typeof reactivity.createSubscriber === 'function') namespaces.push((await import('./multiplayer-client.js')).multi);
+else console.log('multiplayer store effects require Svelte 5.7');
+for (const namespace of namespaces) {
 	for (const member of ['data', 'presence', 'cursors', 'owner', 'reactions']) {
 		if (!namespace[member]) continue;
 		const child = namespace[member]('one');
@@ -257,7 +284,7 @@ adapter.connect().close();
 console.log('current store effects and lifetime passed');
 `);
 		const result = spawnSync(process.execPath, ['--conditions=browser', resolve(dir, 'run.js')], { encoding: 'utf8', timeout: 15000, windowsHide: true });
-		expect(result.error).toBeUndefined();
+		expect(result.error, result.stdout + result.stderr).toBeUndefined();
 		expect(result.status, result.stdout + result.stderr).toBe(0);
 		expect(result.stdout).toContain('current store effects and lifetime passed');
 	} finally {
@@ -379,7 +406,7 @@ assert.equal(multi.reactions('one').current, undefined);
 console.log('SSR current values passed');
 `);
 		const result = spawnSync(process.execPath, [resolve(dir, 'run.js')], { encoding: 'utf8', timeout: 15000, windowsHide: true });
-		expect(result.error).toBeUndefined();
+		expect(result.error, result.stdout + result.stderr).toBeUndefined();
 		expect(result.status, result.stdout + result.stderr).toBe(0);
 		expect(result.stdout).toContain('SSR current values passed');
 	} finally {

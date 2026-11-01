@@ -48,10 +48,18 @@ export function _withCurrent(store, read, version = read) {
 					subscribe(run) {
 						let active = true;
 						let stop;
-						run(read());
+						const initialValue = read();
+						const initialVersion = version();
+						run(initialValue);
 						microtask(() => {
 							if (!active) return;
-							stop = store.subscribe(run);
+							let first = true;
+							stop = store.subscribe(value => {
+								// Deferred setup must not deliver the same cached snapshot twice.
+								const duplicate = first && Object.is(value, initialValue) && Object.is(version(), initialVersion);
+								first = false;
+								if (!duplicate) run(value);
+							});
 							if (!active) stop();
 						});
 						return () => { active = false; stop?.(); };
