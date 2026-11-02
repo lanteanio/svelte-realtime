@@ -471,6 +471,9 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 			const msg = warn.mock.calls[0][0];
 			expect(msg).toContain('NO cluster-transient redaction coverage');
 			expect(msg).toContain('<dynamic>');
+			expect(msg).toContain('even on a single instance');
+			expect(msg).toContain('Only topics already resolved by a local subscription have exact-topic coverage.');
+			expect(msg).not.toContain('are unaffected');
 		} finally {
 			warn.mockRestore();
 		}

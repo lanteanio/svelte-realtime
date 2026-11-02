@@ -1813,8 +1813,9 @@ live.stream = function stream(topic, initFn, options) {
 						' (derived skeleton: "' + _pattern + '"). In a cluster, an instance that publishes to a resolved ' +
 						'topic it never subscribed to relays the RAW, un-redacted frame to the peer holding the subscriber, ' +
 						'which never re-redacts. Give the topic a leading literal namespace and single-segment args - e.g. ' +
-						"(ctx, roomId) => 'chat:' + roomId - not a ctx-derived or variable-first topic. Single-instance, and " +
-						'any topic a local subscriber has resolved, are unaffected.'
+						"(ctx, roomId) => 'chat:' + roomId - not a ctx-derived or variable-first topic. Publishing before " +
+						'a local subscription resolves the topic can send raw data, even on a single instance. ' +
+						'Only topics already resolved by a local subscription have exact-topic coverage.'
 					);
 				}
 			}

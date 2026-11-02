@@ -1451,6 +1451,12 @@ Plain `console.warn` and `console.error` lines, outside the structured event for
 - Message pattern: <code>[svelte-realtime] Topic '&lt;topic&gt;' is publishing &lt;value&gt; events/sec.\n  For high-frequency streams, consider one of:\n    live.stream(topic, loader, { coalesceBy: (data) =&gt; data.userId })  // latest-value-wins, queued per subscriber\n    live.stream(topic, loader, { volatile: true })                     // drop on backpressure, best-effort\n  See: https://svti.me/highfreq</code>
 - [src/server/dev-warnings.js](../src/server/dev-warnings.js): Development-only rate hint that shows the alternative stream options and a short link.
 
+<a id="diagnostic-console-5faa90c37058184e"></a>
+### <code>console-5faa90c37058184e</code>
+
+- Message pattern: <code>[svelte-realtime] a piiRedact factory topic has NO cluster-transient redaction coverage - &lt;value&gt; (derived skeleton: "&lt;value&gt;"). In a cluster, an instance that publishes to a resolved topic it never subscribed to relays the RAW, un-redacted frame to the peer holding the subscriber, which never re-redacts. Give the topic a leading literal namespace and single-segment args - e.g. (ctx, roomId) =&gt; 'chat:' + roomId - not a ctx-derived or variable-first topic. Publishing before a local subscription resolves the topic can send raw data, even on a single instance. Only topics already resolved by a local subscription have exact-topic coverage.</code>
+- [src/server.js](../src/server.js): Development-only declaration-time warning that states the cause, the single-instance and cluster consequences, and the topic shape that fixes it.
+
 <a id="diagnostic-console-608e723b70c5a292"></a>
 ### <code>console-608e723b70c5a292</code>
 
@@ -1558,12 +1564,6 @@ Plain `console.warn` and `console.error` lines, outside the structured event for
 
 - Message pattern: <code>[svelte-realtime] configureAlarm: the wired store has no due(nowMs); cross-restart alarm recovery is disabled.\n  In-memory timers still fire while the process lives, but alarms armed before a restart will not re-fire.\n  Provide due(nowMs) on the store for full durability.</code>
 - [src/server/alarm.js](../src/server/alarm.js): Development-only configuration warning that carries the consequence and the remedy of providing due(nowMs) inline.
-
-<a id="diagnostic-console-89eaf77243624b7b"></a>
-### <code>console-89eaf77243624b7b</code>
-
-- Message pattern: <code>[svelte-realtime] a piiRedact factory topic has NO cluster-transient redaction coverage - &lt;value&gt; (derived skeleton: "&lt;value&gt;"). In a cluster, an instance that publishes to a resolved topic it never subscribed to relays the RAW, un-redacted frame to the peer holding the subscriber, which never re-redacts. Give the topic a leading literal namespace and single-segment args - e.g. (ctx, roomId) =&gt; 'chat:' + roomId - not a ctx-derived or variable-first topic. Single-instance, and any topic a local subscriber has resolved, are unaffected.</code>
-- [src/server.js](../src/server.js): Development-only declaration-time warning that already states the cause, the cluster consequence and the exact topic shape that fixes it.
 
 <a id="diagnostic-console-91c8f3951c812ffb"></a>
 ### <code>console-91c8f3951c812ffb</code>
