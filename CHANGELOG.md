@@ -273,6 +273,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Versioned CRUD events that do not change client state emit no value notification outside the browser animation-frame path. Pending optimistic writes retain their normal confirmation and settlement behavior. Native I/O count gates pin batch entries, payload serialization, derived recomputation and cursor recovery independently of subscriber count.
 
+- The degradation notice fixture keeps an unavailable action focusable and refuses pointer, keyboard, and form submissions until recovery. Its guidance preserves focus when availability changes.
+
 - Smoothed topic owners stop accepting commands and emitting frames when their lease expires, including after event-loop stalls, slow application callbacks, and late renewal replies. Base and cell receivers share an epoch watermark, so older owners cannot reopen delivery by alternating instance identities.
 
 - Cold development starts leave Vite's client dependency crawl open until the first page loads. Eager generated-module warmup could finish that crawl before SvelteKit contributed its imports, forcing another optimization and reload that broke Svelte hydration on older supported Kit versions. Generated client dependencies remain included before navigation, and server-side live registration still completes before requests are served.

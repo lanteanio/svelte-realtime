@@ -20,6 +20,7 @@
 	let statusRegion;
 	let retryDeadline = null;
 	let announcements = [];
+	let submissions = 0;
 
 	function translate(value, selectedLocale) {
 		if (!value) return '';
@@ -62,7 +63,8 @@
 				retryDeadline = null;
 				if (transition) announcementText = translate(notice, locale);
 			},
-			announcements: () => announcements
+			announcements: () => announcements,
+			submissions: () => submissions
 		};
 		return () => {
 			observer.disconnect();
@@ -85,7 +87,9 @@
 	{#if unavailable}
 		<p id="degradation-reason">{noticeText}</p>
 	{/if}
-	<button id="update-action" disabled={unavailable} aria-disabled={unavailable} aria-describedby={unavailable ? 'degradation-reason' : undefined}>Submit update</button>
+	<form id="update-form" on:submit|preventDefault={() => { if (!unavailable) submissions += 1; }}>
+		<button id="update-action" type="submit" aria-disabled={unavailable} aria-describedby={unavailable ? 'degradation-reason' : undefined}>Submit update</button>
+	</form>
 	<button id="focus-target">Focus target</button>
 	{#if retryDeadline !== null}
 		<p id="retry-deadline">Retry at <time datetime={new Date(retryDeadline).toISOString()}>{new Date(retryDeadline).toISOString()}</time></p>

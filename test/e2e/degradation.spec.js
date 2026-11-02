@@ -29,7 +29,7 @@ test('gates actions, keeps a stable retry deadline, and recovers without moving 
 	await expect(action).toBeEnabled();
 	await page.locator('#focus-target').focus();
 	await page.evaluate(() => window.degradationHarness.degraded({ bannerCopy: 'Service unavailable.', retryAfterMs: 60000 }));
-	await expect(action).toBeDisabled();
+	expect(await action.evaluate(button => button.disabled)).toBe(false);
 	await expect(action).toHaveAttribute('aria-disabled', 'true');
 	await expect(action).toHaveAttribute('aria-describedby', 'degradation-reason');
 	const deadline = await page.locator('#retry-deadline time').getAttribute('datetime');
@@ -45,6 +45,26 @@ test('gates actions, keeps a stable retry deadline, and recovers without moving 
 	await expect(action).not.toHaveAttribute('aria-describedby');
 	await expect(page.locator('#retry-deadline')).toHaveCount(0);
 	await expect(page.locator('#focus-target')).toBeFocused();
+});
+
+test('keeps a focused unavailable action focusable and refuses every submission', async ({ page }) => {
+	const action = page.locator('#update-action');
+	await action.focus();
+	await page.evaluate(() => window.degradationHarness.degraded());
+	await expect(action).toBeFocused();
+	expect(await action.evaluate(button => button.disabled)).toBe(false);
+	await expect(action).toHaveAttribute('aria-disabled', 'true');
+	await action.click({ force: true });
+	await page.keyboard.press('Enter');
+	await page.keyboard.press('Space');
+	await page.locator('#update-form').evaluate(form => form.requestSubmit());
+	expect(await page.evaluate(() => window.degradationHarness.submissions())).toBe(0);
+	await expect(action).toBeFocused();
+	await page.evaluate(() => window.degradationHarness.recovered());
+	await expect(action).toBeFocused();
+	await expect(action).toHaveAttribute('aria-disabled', 'false');
+	await page.keyboard.press('Enter');
+	expect(await page.evaluate(() => window.degradationHarness.submissions())).toBe(1);
 });
 
 test('switches application catalogs and falls back safely for unknown keys', async ({ page }) => {
