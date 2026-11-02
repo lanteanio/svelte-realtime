@@ -17291,10 +17291,17 @@ describe('capacity caps', () => {
 			for (let i = 0; i < 5; i++) {
 				const stream = live.stream('feed/cap' + i, async () => [], {});
 				__register('feed/cap' + i, stream);
+			}
+			const sockets = [];
+			for (let i = 0; i < 5; i++) {
 				const ws = mockWs({ id: 'u' + i });
+				sockets.push(ws);
 				handleRpc(ws, toArrayBuffer({ rpc: 'feed/cap' + i, id: 's' + i, args: [], stream: true }), platform);
 			}
-			await new Promise((r) => setTimeout(r, 10));
+			await expect.poll(() => platform.sent.filter(frame => frame.topic === '__rpc' && frame.data.ok === true).length).toBe(5);
+			const { _topicWsCounts } = await import('../src/server/state.js');
+			expect(_topicWsCounts.size).toBe(5);
+			for (let i = 0; i < 5; i++) expect(_topicWsCounts.get('feed/cap' + i).has(sockets[i])).toBe(true);
 
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 			expect(warnSpy.mock.calls[0][0]).toContain('TOPIC_WS_COUNTS_WARN_THRESHOLD=3');
