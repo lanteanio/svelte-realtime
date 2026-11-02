@@ -32,6 +32,7 @@ export const DYNAMIC_SITE_REASONS = Object.freeze({
 	'src/server/dispatch.js::_executeSingleRpcInner()::error reply': { count: 1, reason: 'answers an RPC with the code and message of the LiveError the handler threw' },
 	'src/server/dispatch.js::_executeStreamRpcInner()::error reply': { count: 3, reason: 'answers a stream subscribe with an access denial (FORBIDDEN or UNAUTHENTICATED), a validation or loader message, or the code of the LiveError the stream threw' },
 	'src/server/dispatch.js::_protocolRejection()::error reply': { count: 1, reason: 'PROTOCOL_MISMATCH carries a message built from the mismatch reason by the protocol version policy' },
+	'src/server/dispatch.js::_rejectOversizedBatch()::error reply': { count: 1, reason: 'answers an oversized batch envelope with the code and message of the LiveError the application beforeExecute gate threw' },
 	'src/server/dispatch.js::_runDirectCall()::new LiveError': { count: 1, reason: 'a server-side direct call rethrows a middleware failure envelope or a validation message under the code it carried' },
 	'src/server/idempotency.js::lockedWrapper()::new LiveError': { count: 1, reason: 'LOCK_TIMEOUT keeps the message of the timeout a custom lock implementation threw' },
 	'src/server/push.js::_translatePushError()::new LiveError': { count: 1, reason: 'TIMEOUT keeps the message of the adapter request timeout it wraps' },
