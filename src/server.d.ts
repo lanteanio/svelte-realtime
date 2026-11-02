@@ -1179,10 +1179,11 @@ export interface HandleRpcOptions {
 	beforeExecute?(ws: WebSocket<RegisteredUser>, rpcPath: string, args: any[]): Promise<void> | void;
 
 	/**
-	 * Called when an RPC handler throws a non-LiveError.
-	 * Use for error reporting (Sentry, logging, etc.).
+	 * Called when an RPC handler throws a non-LiveError or context creation fails.
+	 * Context creation failures pass null because no LiveContext was admitted.
+	 * Use for server-side error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext): void;
+	onError?(path: string, error: unknown, ctx: LiveContext | null): void;
 
 	/**
 	 * Maximum nesting depth allowed in an inbound RPC envelope. Envelopes
@@ -1222,10 +1223,11 @@ export interface CreateMessageOptions {
 	beforeExecute?(ws: WebSocket<RegisteredUser>, rpcPath: string, args: any[]): Promise<void> | void;
 
 	/**
-	 * Called when an RPC handler throws a non-LiveError.
-	 * Use for error reporting (Sentry, logging, etc.).
+	 * Called when an RPC handler throws a non-LiveError or context creation fails.
+	 * Context creation failures pass null because no LiveContext was admitted.
+	 * Use for server-side error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext): void;
+	onError?(path: string, error: unknown, ctx: LiveContext | null): void;
 
 	/**
 	 * Called when a non-RPC text frame parses as a JSON object envelope.

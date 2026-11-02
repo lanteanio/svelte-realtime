@@ -36,6 +36,40 @@ import { RPC_ROUTE, rpcTick, _rpcRoute, _admitRpc, _releaseRpc } from './rpc-adm
 
 const textDecoder = new TextDecoder();
 
+// No application value from a failed context is safe to put on the wire or
+// in a diagnostic: tenant validation errors can contain the rejected id.
+function _contextFailure(path, requestId, err, options) {
+	if (options?.onError) {
+		try {
+			const pending = options.onError(path, err, null);
+			if (pending && typeof pending.then === 'function') Promise.resolve(pending).catch(() => {});
+		} catch {}
+	}
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.rpc',
+			event: 'rpc.context.failed', severity: 'error',
+			message: 'An RPC context could not be created; the call received an internal error.',
+			attributes: { path, requestId, help: 'https://svti.me/tenant' }
+		});
+	} catch {}
+	return { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' };
+}
+
+// Synchronous ingress launches async dispatch without awaiting its response.
+// Keep the final observer non-throwing, including when delivery or telemetry
+// fails after the dispatcher's ordinary request error handling has run.
+function _dispatchFailed() {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.rpc',
+			event: 'rpc.dispatch.failed', severity: 'error',
+			message: 'An RPC dispatch could not complete.',
+			attributes: { help: 'https://svti.me/errors' }
+		});
+	} catch {}
+}
+
 /**
  * Load failures already reported, keyed by path, each holding the error
  * messages seen. A module whose import fails keeps failing on every call, so
@@ -631,7 +665,7 @@ export function handleRpc(ws, data, platform, options) {
 				}
 				if (typeof header.rpc === 'string' && typeof header.id === 'string') {
 					const payload = data.slice(3 + headerLen);
-					_executeBinaryRpc(ws, header, payload, platform, options);
+					_executeBinaryRpc(ws, header, payload, platform, options).catch(_dispatchFailed);
 					return true;
 				}
 			} catch (err) {
@@ -692,7 +726,7 @@ export function handleRpc(ws, data, platform, options) {
 	// An invalid batch needs no element inspection, including the depth walk.
 	// JSON parsing is bounded by the transport's ingress byte limit.
 	if (Array.isArray(msg.batch) && msg.batch.length > MAX_RPC_BATCH_CALLS) {
-		_executeBatch(ws, msg, platform, options);
+		_executeBatch(ws, msg, platform, options).catch(_dispatchFailed);
 		return true;
 	}
 
@@ -708,7 +742,7 @@ export function handleRpc(ws, data, platform, options) {
 
 	// Batch request: {"batch": [...]}
 	if (Array.isArray(msg.batch)) {
-		_executeBatch(ws, msg, platform, options);
+		_executeBatch(ws, msg, platform, options).catch(_dispatchFailed);
 		return true;
 	}
 
@@ -721,7 +755,7 @@ export function handleRpc(ws, data, platform, options) {
 	// `live.volatile()` server-side marker.
 	if (msg.id === undefined) {
 		if (msg.rpc.length === 0) return false;
-		_executeVolatileRpc(ws, msg, platform, options);
+		_executeVolatileRpc(ws, msg, platform, options).catch(_dispatchFailed);
 		return true;
 	}
 
@@ -731,7 +765,7 @@ export function handleRpc(ws, data, platform, options) {
 	assert(msg.rpc.length > 0 && msg.id.length > 0, 'realtime/handleRpc.envelope.non-empty', { rpcLen: msg.rpc.length, idLen: msg.id.length });
 
 	// Validated as RPC - handle asynchronously, return true synchronously
-	_executeRpc(ws, msg, platform, options);
+	_executeRpc(ws, msg, platform, options).catch(_dispatchFailed);
 	return true;
 }
 
@@ -1182,7 +1216,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, !_subscribeDenial, _admission);
 	if (state.registrationRevision !== registrationRevision) {
 		if (!_subscribeDenial) {
-			subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+			subscribedRef.isActive = _trackStreamSub(ws, topic, fn, ctx);
 			subscribedRef.topic = topic;
 		}
 		_assertRegistrationRevision(registrationRevision);
@@ -1198,7 +1232,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	if (subscribedRef.cancelled) {
 		// Answered by a middleware while the adapter admitted the subscribe:
 		// record it so the chain's end releases it, and run no loader.
-		subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+		subscribedRef.isActive = _trackStreamSub(ws, topic, fn, ctx);
 		subscribedRef.topic = topic;
 		throw _CALL_ANSWERED;
 	}
@@ -1222,7 +1256,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	if (msg.attach === true && typeof topic === 'string') {
 		_respond(ws, platform, id, { attach: true, topic });
 	}
-	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+	subscribedRef.isActive = _trackStreamSub(ws, topic, fn, ctx);
 	subscribedRef.topic = topic;
 	subscribedRef.owner = subscribedRef.isActive.owner;
 
@@ -1621,9 +1655,9 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	try {
 		ctx = _buildCtx(user, ws, platform, _getCtxHelpers(platform), clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
 	} catch (err) {
-		// A tenant resolver can throw; the call then holds nothing.
 		_releaseRpc(route, conn, null);
-		throw err;
+		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart, ws);
+		return { id, ..._contextFailure(path, requestId, err, options) };
 	}
 	_startCall(ctx, conn, route.ticks === 0 ? -1 : arrived + route.ticks);
 	/** @type {{ topic: any, claimTopic: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} */
@@ -1898,7 +1932,9 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		ctx = _buildCtx(user, ws, platform, _getCtxHelpers(platform), null, null, requestId);
 	} catch (err) {
 		_releaseRpc(route, conn, null);
-		throw err;
+		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart, ws);
+		_respond(ws, platform, id, _contextFailure(path, requestId, err, options), requestId, path);
+		return;
 	}
 	_startCall(ctx, conn, route.ticks === 0 ? -1 : arrived + route.ticks);
 

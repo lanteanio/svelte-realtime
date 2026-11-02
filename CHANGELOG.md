@@ -276,6 +276,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Tenant resolver failures return sanitized `INTERNAL_ERROR` RPC responses and release admission without unhandled dispatch rejections. Stream unsubscribe and close hooks use their admitted tenant scope, and failed tenant resolution cannot interrupt upload, smooth, document or push cleanup. Diagnostic sink and console fallback failures remain contained.
+
 - Uploads with `reauthEvery` wait for required pending guard checks before exposing EOF or reporting success. A late denial aborts the upload, and cancellation or disconnect cannot turn into success after the check settles.
 
 - The warning for an uncompilable `piiRedact` topic factory now states that a publish before local topic resolution can send raw data on a single instance as well as in a cluster.

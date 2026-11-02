@@ -22,16 +22,18 @@ function defaultOperationalEventSink(record) {
 }
 
 function sinkFailureFallback(record) {
-	defaultOperationalEventSink(record);
-	defaultOperationalEventSink(createDiagnostic({
-		source: 'svelte-realtime',
-		component: 'runtime.observability',
-		event: 'operational.sink.failed',
-		severity: 'error',
-		message: 'The configured operational event sink failed; console fallback was restored for this event.',
-		occurredAt: wallIso(),
-		attributes: { originalSource: record.source, originalEvent: record.event }
-	}));
+	try {
+		defaultOperationalEventSink(record);
+		defaultOperationalEventSink(createDiagnostic({
+			source: 'svelte-realtime',
+			component: 'runtime.observability',
+			event: 'operational.sink.failed',
+			severity: 'error',
+			message: 'The configured operational event sink failed; console fallback was restored for this event.',
+			occurredAt: wallIso(),
+			attributes: { originalSource: record.source, originalEvent: record.event }
+		}));
+	} catch {}
 }
 
 // Define own slots so inherited setters cannot swallow shared registrations.

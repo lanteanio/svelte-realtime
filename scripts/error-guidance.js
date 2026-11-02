@@ -277,6 +277,24 @@ export const CODE_GUIDANCE = Object.freeze({
 
 /** @type {Readonly<Record<string, Readonly<Guidance>>>} */
 export const EVENT_GUIDANCE = Object.freeze({
+	'close.tenant.failed': Object.freeze({
+		cause: 'A socket closes with a manual subscription whose tenant resolver throws or returns an invalid tenant.',
+		consequence: 'Its untracked unsubscribe hook is skipped. Hooks for tracked RPC subscriptions use their admitted tenant and user, and essential connection cleanup continues.',
+		automaticRecovery: 'None for the skipped hook. Other connections continue normally.',
+		nextAction: 'Fix the tenant resolver so it returns a valid tenant for manual subscriptions during close. Use tracked stream subscriptions when cleanup must retain the tenant admitted at subscribe time.'
+	}),
+	'rpc.context.failed': Object.freeze({
+		cause: 'Building an RPC context fails, for example because the tenant resolver throws or returns an invalid tenant.',
+		consequence: 'The handler does not run and its admission permit is released. Calls with a response receive INTERNAL_ERROR with a generic message; volatile calls have no response. Tenant values and the resolver error are omitted from this diagnostic.',
+		automaticRecovery: 'The next call builds a new context and can succeed after the resolver is fixed.',
+		nextAction: 'Check the tenant resolver and the reported RPC path. The configured onError callback can inspect the original error on the server.'
+	}),
+	'rpc.dispatch.failed': Object.freeze({
+		cause: 'Asynchronous RPC dispatch rejects outside its ordinary request error handling, for example when response delivery throws.',
+		consequence: 'The dispatch did not complete. The calling client may receive no response and time out. The rejection is observed so it does not become an unhandled rejection.',
+		automaticRecovery: 'None for that call. Subsequent calls can still run.',
+		nextAction: 'Inspect the transport and server callbacks for thrown errors. Make delivery and telemetry callbacks safe to call during connection shutdown.'
+	}),
 	'alarm.execution.failed': Object.freeze({
 		cause: 'A room\'s `onAlarm` handler throws or rejects, or the alarm fires with no platform captured. The event is logged after `onError` observers run.',
 		consequence: 'That alarm\'s work did not finish, and anything it would have published is missing. With a durable store the execution is kept and marked failed. An in-memory alarm is used up.',

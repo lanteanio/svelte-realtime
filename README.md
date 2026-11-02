@@ -2205,7 +2205,7 @@ realtime({
 });
 ```
 
-The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars - a UUID fits). A resolver that returns a malformed id throws loudly rather than silently disabling scoping (a silently-dropped id would be a leak).
+The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars - a UUID fits). A resolver that throws or returns a malformed id fails the network RPC with `INTERNAL_ERROR` before its middleware, guard or handler runs. The response and framework diagnostic omit the rejected tenant value. A direct `.load()` call rejects or returns its configured fallback. See [tenant cleanup](docs/tenant-cleanup.md) for admitted subscription scope and connection cleanup.
 
 ### What you get
 

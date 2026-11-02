@@ -19,6 +19,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
 import { LiveError } from './server/live-error.js';
+import { emitOperationalEvent } from './shared/diagnostic.js';
 import { _subscribeTracked } from './server/membership.js';
 import { releaseSubscription } from 'svelte-adapter-uws/subscriptions';
 import { _runtimeRandom, _localHlc } from './server/runtime-fallbacks.js';
@@ -94,7 +95,7 @@ import { normalizeProtocolPolicy } from './server/protocol-policy.js';
 import { configureForget, _resetForget, installForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, _stopForgetTimers, _restartForgetTimers } from './server/forget.js';
 import { createForgetJobStore } from './server/forget-jobs.js';
 export { configureForget, _resetForget, listForgetJobs, resumeForgetJobs, abandonForgetJob, createForgetJobStore };
-import { configureRpc, _validateRouteConcurrent, _openRpcConnection, _closeRpcConnection, _rpcRoute, NEVER_ABORTED } from './server/rpc-admission.js';
+import { configureRpc, _validateRouteConcurrent, _openRpcConnection, _closeRpcConnection, _rpcRoute } from './server/rpc-admission.js';
 export { configureRpc };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
@@ -340,7 +341,7 @@ function _callTopicFn(fn, ctx, args) {
  * Per-socket stream ownership. Maps ws -> topic -> [{fn, count}].
  * Each entry tracks a logical stream subscription with its hook function and refcount.
  * Used for gauge tracking, onUnsubscribe dispatch, and rollback.
- * @type {WeakMap<object, Map<string, Array<{fn: Function, count: number}>>>}
+ * @type {WeakMap<object, Map<string, Array<{fn: Function, count: number, tenantId: string | null, user: any}>>>}
  */
 const _wsStreamOwners = new WeakMap();
 
@@ -976,15 +977,16 @@ installCtx({
  * @param {any} ws
  * @param {string} topic
  * @param {Function} fn
+ * @param {any} ctx
  */
-function _trackStreamSub(ws, topic, fn) {
+function _trackStreamSub(ws, topic, fn, ctx) {
 	let topicMap = _wsStreamOwners.get(ws);
 	if (!topicMap) { topicMap = new Map(); _wsStreamOwners.set(ws, topicMap); }
 	let owners = topicMap.get(topic);
 	const isFirstSubForTopic = !owners;
 	if (!owners) { owners = []; topicMap.set(topic, owners); }
 	let owner = owners.find(o => o.fn === fn);
-	if (owner) { owner.count++; } else { owner = { fn, count: 1 }; owners.push(owner); }
+	if (owner) { owner.count++; } else { owner = { fn, count: 1, tenantId: ctx.tenantId, user: ctx.user }; owners.push(owner); }
 	if (isFirstSubForTopic) {
 		// An explicit unsubscribe records the topic so close() does not drain
 		// its hooks a second time. A fresh subscribe makes the topic live again
@@ -4137,24 +4139,10 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 	const owners = topicMap.get(topic);
 	if (!owners || owners.length === 0) return;
 
-	let user, tenantId;
-	if (releasedDerived) {
-		// Scope revocation must drain ownership even when session/tenant lookup
-		// was the failure that revoked access in the first place.
-		try { user = ws.getUserData(); } catch { user = null; }
-		tenantId = releasedTenant;
-	} else {
-		user = ws.getUserData();
-		tenantId = _resolveTenant(user);
-	}
-	// The drain ctx carries the connection's server-trusted tenant so tenant-scoped
-	// unsubscribe drains (the room-enumeration roster release + its delta channel)
-	// target the right tenant; `_publishWire` is the raw, non-prefixing publish that
-	// framework code uses when it already holds a wire topic. `publish` stays the raw
-	// helper (the hook topics here are already wire topics). Both reduce to the
-	// originals with no tenant resolver configured (tenantId null, _publishWire === publish).
+	// Drains reuse admitted ownership even if user lookup or tenant resolution
+	// fails later. App publishers stay scoped; framework hooks use _publishWire
+	// for topics that already carry the admitted tenant prefix.
 	const _helpers = _getCtxHelpers(platform);
-	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId, _publishWire: _helpers.publish, _releasedDerived: releasedDerived, abortSignal: NEVER_ABORTED };
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing
@@ -4177,6 +4165,7 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 
 	// Drain every logical subscriber for this topic
 	for (const entry of owners) {
+		const unsubCtx = Object.assign(_buildCtx(entry.user, ws, platform, _helpers, null, undefined, undefined, entry.tenantId), { _releasedDerived: releasedDerived });
 		for (let i = 0; i < entry.count; i++) {
 			if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
@@ -4217,10 +4206,22 @@ const _firedUnsubscribes = new WeakMap();
 export function close(ws, { platform, subscriptions }) {
 	forgetDeliverySubscription(ws);
 	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
+	const topicMap = _wsStreamOwners.get(ws);
+	let user = null;
+	let userAvailable = false;
+	try { user = ws.getUserData(); userAvailable = true; } catch {
+		// The adapter may no longer expose a closed socket's data. Tracked
+		// stream ownership still carries the admitted user and tenant.
+		if (topicMap) {
+			for (const owners of topicMap.values()) {
+				if (owners.length > 0) { user = owners[0].user; break; }
+			}
+		}
+	}
 	// Refuse the socket's later calls, fire the signals its running calls read
 	// and drop its queued calls; running calls keep their permits until their
 	// handlers settle.
-	_closeRpcConnection(ws.getUserData(), ws);
+	_closeRpcConnection(user, ws);
 
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
@@ -4231,14 +4232,9 @@ export function close(ws, { platform, subscriptions }) {
 	// call must not acquire a replica reference no close can ever release.
 	_crdtClosedWs.add(ws);
 
-	const topicMap = _wsStreamOwners.get(ws);
 	const alreadyFired = _firedUnsubscribes.get(ws);
 
-	const user = ws.getUserData();
-	// Carries the connection's tenant + raw wire-publish for tenant-scoped close
-	// drains (room-enumeration roster release + delta), exactly like unsubscribe().
 	const _helpers = _getCtxHelpers(platform);
-	const closeCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish, abortSignal: NEVER_ABORTED };
 
 	// Drain tracked stream subscriptions (from the RPC subscribe path)
 	if (topicMap) {
@@ -4265,6 +4261,9 @@ export function close(ws, { platform, subscriptions }) {
 			}
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
+				// A drain releases admitted ownership. Re-running the resolver here
+				// can fail or select another tenant after the subscription was made.
+				const closeCtx = _buildCtx(entry.user, ws, platform, _helpers, null, undefined, undefined, entry.tenantId);
 				for (let i = 0; i < entry.count; i++) {
 					if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
@@ -4281,15 +4280,37 @@ export function close(ws, { platform, subscriptions }) {
 	}
 
 	// Also check static-topic streams for manually subscribed topics not tracked via RPC
-	const subscribedTopics = subscriptions || (typeof ws.getTopics === 'function' ? ws.getTopics() : null);
+	let subscribedTopics = subscriptions;
+	if (!subscribedTopics && typeof ws.getTopics === 'function') {
+		try { subscribedTopics = ws.getTopics(); } catch {}
+	}
 	if (subscribedTopics && _streamsWithUnsubscribe.size > 0) {
 		const subSet = subscribedTopics instanceof Set ? subscribedTopics : new Set(subscribedTopics);
+		let closeCtx;
 		for (const fn of [..._streamsWithUnsubscribe]) {
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
 			if (typeof rawTopic !== 'string') continue;
 			if (!subSet.has(rawTopic)) continue;
 			if (alreadyFired && alreadyFired.has(rawTopic)) continue;
 			if (topicMap && topicMap.has(rawTopic)) continue; // already handled above
+			if (!closeCtx) {
+				try {
+					if (!userAvailable) throw new Error('Closed socket user data is unavailable');
+					closeCtx = _buildCtx(user, ws, platform, _helpers, null, undefined, undefined, _resolveTenant(user));
+				} catch {
+					// There is no admitted tenant to reuse for manual subscriptions.
+					// Skip their hooks without interrupting the essential drains below.
+					try {
+						emitOperationalEvent({
+							source: 'svelte-realtime', component: 'server.close',
+							event: 'close.tenant.failed', severity: 'error',
+							message: 'A close hook was skipped because its tenant could not be resolved.',
+							attributes: { help: 'https://svti.me/tenant' }
+						});
+					} catch {}
+					break;
+				}
+			}
 			// Static-topic streams that fell outside the tracked-RPC path:
 			// the ws-set may not include them, so remaining defaults to 0.
 			const staticWsSet = _topicWsCounts.get(rawTopic);

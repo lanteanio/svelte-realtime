@@ -183,8 +183,12 @@ export const RPC_CONNECTION = Symbol.for('svelte-realtime.rpc.connection');
  * is a finite integer, so no call of it fits; decrements leave it unchanged.
  */
 const _CLOSED_COUNT = Infinity;
-/** Records of sockets whose user data cannot carry the slot (not an extensible object). @type {WeakMap<object, RpcConn>} */
-const _unslotted = new WeakMap();
+/**
+ * Socket ownership survives native user-data access becoming unavailable on
+ * close. Normal admission still reads the user-data slot without a map lookup.
+ * @type {WeakMap<object, RpcConn>}
+ */
+const _socketConnections = new WeakMap();
 let _active = 0;
 /** Signals created and not yet retired or fired, for tests and introspection. */
 let _openSignals = 0;
@@ -269,7 +273,9 @@ export function _rpcRoute(path, fn) {
 /** @returns {RpcConn} */
 /** @param {object} [ws] @returns {RpcConn} */
 function _newConn(ws) {
-	return { active: 0, queued: 0, closed: false, calls: null, ws };
+	const conn = { active: 0, queued: 0, closed: false, calls: null, ws };
+	if (ws) _socketConnections.set(ws, conn);
+	return conn;
 }
 
 /**
@@ -297,15 +303,12 @@ export function _openRpcConnection(user, ws, fresh = false) {
 			Object.defineProperty(user, RPC_CONNECTION, { value: conn, writable: true, enumerable: false, configurable: true });
 			return conn;
 		}
-		if (ws) _unslotted.set(ws, conn);
 		return conn;
 	}
-	if (fresh && ws) _unslotted.delete(ws);
 	if (!ws) return _newConn();
-	let conn = fresh ? undefined : _unslotted.get(ws);
+	let conn = fresh ? undefined : _socketConnections.get(ws);
 	if (conn === undefined) {
 		conn = _newConn(ws);
-		_unslotted.set(ws, conn);
 	}
 	return conn;
 }
@@ -317,8 +320,11 @@ export function _openRpcConnection(user, ws, fresh = false) {
  * @returns {RpcConn}
  */
 function _connOf(user, ws) {
-	if (user !== null && typeof user === 'object' && Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION)) return user[RPC_CONNECTION];
-	return _unslotted.get(ws) || _openRpcConnection(user, ws);
+	if (user !== null && typeof user === 'object' && Object.prototype.hasOwnProperty.call(user, RPC_CONNECTION)) {
+		const conn = user[RPC_CONNECTION];
+		if (conn.ws === undefined || conn.ws === ws) return conn;
+	}
+	return _socketConnections.get(ws) || _openRpcConnection(user, ws, true);
 }
 
 /**
@@ -351,6 +357,11 @@ function _blocked(conn, route) {
 export function _admitRpc(user, ws, route, arrived, opened) {
 	let conn = opened || user?.[RPC_CONNECTION];
 	if (conn === undefined) conn = _connOf(user, ws);
+	else if (conn.ws !== ws) {
+		// Another open can replace a shared user's slot. An older socket keeps
+		// its own admission lifetime, including its closed marker.
+		conn = _socketConnections.get(ws) || _openRpcConnection(user, ws, true);
+	}
 	if (conn.active < _connCap && route.active < route.cap && _active < _globalCap) {
 		conn.active++;
 		route.active++;
@@ -470,7 +481,7 @@ function _dropQueued(index, rejection) {
  * @param {object} ws
  */
 export function _closeRpcConnection(user, ws) {
-	const conn = _connOf(user, ws);
+	const conn = _socketConnections.get(ws) || _connOf(user, ws);
 	// A record another socket opened on the same user data is not this one's.
 	if (conn.closed || (conn.ws !== undefined && conn.ws !== ws)) return;
 	conn.closed = true;
