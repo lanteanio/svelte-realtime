@@ -229,6 +229,16 @@ export function ensureListener() {
 		}
 
 		// Batch response
+		if (correlationId === '__batch' && data?.ok === false && !data.batch) {
+			// A malformed envelope has no trusted per-call correlation. The
+			// server closes this connection after its bounded failure notice.
+			for (const [id, entry] of pending) {
+				pending.delete(id);
+				if (entry.timer) clearTimer(entry.timer);
+				entry.reject(new RpcError(data.code || 'INVALID_REQUEST', data.error || 'Batch rejected', data));
+			}
+			return;
+		}
 		if (correlationId === '__batch' && data?.batch) {
 			for (const result of data.batch) {
 				const entry = pending.get(result.id);

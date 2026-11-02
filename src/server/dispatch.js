@@ -871,10 +871,13 @@ async function _executeBatch(ws, msg, platform, options) {
 async function _rejectOversizedBatch(ws, platform, options, started) {
 	const path = '__batch__';
 	const requestId = randomUuid();
+	const close = () => { try { ws.end?.(1008, 'RPC batch limit exceeded'); } catch {} };
 	/** @param {any} result */
 	const respond = result => {
-		_recordRpcMetrics(path, result.code, started, ws);
-		_respond(ws, platform, '__batch', result, requestId, path);
+		// Metrics and delivery observers cannot keep this connection open.
+		try { _recordRpcMetrics(path, result.code, started, ws); } catch {}
+		try { _respond(ws, platform, '__batch', result, requestId, path); } catch {}
+		finally { close(); }
 	};
 	const protocol = _protocolRejection(ws, platform);
 	if (protocol) { respond(protocol); return; }
@@ -891,7 +894,8 @@ async function _rejectOversizedBatch(ws, platform, options, started) {
 		if (permit.active === undefined) {
 			if (permit.reason === undefined) permit = await permit;
 			if (permit.active === undefined) {
-				_respond(ws, platform, '__batch', _overloaded(path, permit, started, ws), requestId, path);
+				try { _respond(ws, platform, '__batch', _overloaded(path, permit, started, ws), requestId, path); } catch {}
+				finally { close(); }
 				return;
 			}
 		}

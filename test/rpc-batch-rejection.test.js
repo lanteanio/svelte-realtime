@@ -166,6 +166,8 @@ it('sends a bounded denial for a near-limit payload over a native socket', async
 	} });
 	socket = new WebSocket(server.wsUrl);
 	const received = [];
+	let closeCode;
+	socket.addEventListener('close', event => { closeCode = event.code; });
 	socket.addEventListener('message', event => {
 		const frame = JSON.parse(String(event.data));
 		if (frame.topic === '__rpc' && frame.event === '__batch') received.push(String(event.data));
@@ -175,4 +177,62 @@ it('sends a bounded denial for a near-limit payload over a native socket', async
 	await vi.waitFor(() => expect(received).toHaveLength(1));
 	expect(received[0].length).toBeLessThan(512);
 	expect(JSON.parse(received[0]).data.code).toBe('INVALID_REQUEST');
+	await vi.waitFor(() => expect(closeCode).toBe(1008));
+	api.__register('limits/healthy', api.live(() => 'ok'));
+	const healthy = new WebSocket(server.wsUrl);
+	let reply;
+	healthy.addEventListener('message', event => {
+		const frame = JSON.parse(String(event.data));
+		if (frame.event === 'healthy') reply = frame.data;
+	});
+	try {
+		await vi.waitFor(() => expect(healthy.readyState).toBe(WebSocket.OPEN));
+		healthy.send(JSON.stringify({ rpc: 'limits/healthy', id: 'healthy' }));
+		await vi.waitFor(() => expect(reply).toMatchObject({ ok: true, data: 'ok' }));
+	} finally { healthy.close(); }
+});
+
+it('closes a malformed connection even when its denial cannot be delivered', async () => {
+	const platform = mockPlatform();
+	platform.send = () => 2;
+	const ws = mockWs();
+	ws.end = vi.fn();
+	api.handleRpc(ws, toArrayBuffer({ batch: new Array(51).fill(null) }), platform);
+	await vi.waitFor(() => expect(ws.end).toHaveBeenCalledWith(1008, 'RPC batch limit exceeded'));
+	expect(admission._rpcAdmissionSnapshot().active).toBe(0);
+});
+
+it('closes a malformed connection despite throwing metrics observers', async () => {
+	api.live.metrics({
+		counter() { return { inc() { throw new Error('Metrics unavailable'); } }; },
+		histogram() { return { observe() {} }; },
+		gauge() { return { inc() {}, dec() {} }; }
+	});
+	const platform = mockPlatform();
+	const ws = mockWs();
+	ws.end = vi.fn();
+	api.handleRpc(ws, toArrayBuffer({ batch: new Array(51).fill(null) }), platform);
+	await vi.waitFor(() => expect(ws.end).toHaveBeenCalledWith(1008, 'RPC batch limit exceeded'));
+	expect(platform.sent).toHaveLength(1);
+	expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+	expect(admission._rpcAdmissionSnapshot().active).toBe(0);
+});
+
+it('a legacy adapter client ignoring the notice observes terminal closure', async () => {
+	server = await createTestServer({ handler: {
+		message(ws, ctx) { if (!ctx.isBinary && ctx.msg === undefined) api.handleRpc(ws, ctx.data, server.platform); },
+		close: api.close
+	} });
+	const { connect } = await import('svelte-adapter-uws/client');
+	const legacy = connect({ url: server.wsUrl, reconnectInterval: 5, maxReconnectInterval: 10 });
+	const states = [];
+	const off = legacy.status.subscribe(value => states.push(value));
+	try {
+		await vi.waitFor(() => expect(states.at(-1)).toBe('open'));
+		legacy.send({ batch: new Array(51).fill(null) });
+		await vi.waitFor(() => expect(states.at(-1)).toBe('failed'));
+		await new Promise(resolve => setTimeout(resolve, 30));
+		expect(states.filter(value => value === 'open')).toHaveLength(1);
+		expect(states.at(-1)).toBe('failed');
+	} finally { off(); legacy.close(); }
 });

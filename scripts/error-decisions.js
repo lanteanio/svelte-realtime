@@ -18,7 +18,7 @@
  */
 export const DYNAMIC_SITE_REASONS = Object.freeze({
 	'src/client/connection.js::ensureDenialsListener()::new RpcError': { count: 1, reason: 'the code is the denial reason the adapter sent for a refused topic subscribe, falling back to FORBIDDEN; the message names the topic and that code' },
-	'src/client/connection.js::ensureListener()::new RpcError': { count: 3, reason: 'forwards the code and message of a server error reply to the waiting call or stream; the server-side codes are indexed at their own emitters. A call or batch reply without a code becomes UNKNOWN, and a topic error without one becomes FORBIDDEN' },
+	'src/client/connection.js::ensureListener()::new RpcError': { count: 4, reason: 'forwards server reply codes and messages to waiting calls or streams; an uncorrelated malformed-batch refusal fails the connection requests with its code or INVALID_REQUEST. A call or batch result without a code becomes UNKNOWN, and a topic error without one becomes FORBIDDEN' },
 	'src/client/stream.js::reject()::new RpcError': { count: 2, reason: 'wraps a non-RpcError failure under a literal code (STREAM_ERROR or LOAD_MORE_ERROR) and keeps the original error message, with a literal fallback when it has none' },
 	'src/client/upload.js::_onServerResponse()::new RpcError': { count: 1, reason: 'forwards the code and message of the server upload reply; server upload codes are indexed at their own emitters, and a reply without a code becomes UNKNOWN' },
 	'src/client/upload.js::_start()::new RpcError': { count: 1, reason: 'SOURCE_ERROR keeps the message of the error the application\'s upload source threw' },

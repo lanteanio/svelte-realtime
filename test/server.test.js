@@ -1238,9 +1238,10 @@ describe('handleRpc() batch validation', () => {
 		await new Promise((r) => setTimeout(r, 20));
 
 		expect(platform.sent).toHaveLength(1);
-		expect(platform.sent[0].data.batch[0].ok).toBe(false);
-		expect(platform.sent[0].data.batch[0].code).toBe('INVALID_REQUEST');
-		expect(platform.sent[0].data.batch[0].error).toContain('50');
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+		expect(platform.sent[0].data.error).toContain('50');
+		expect(platform.sent[0].data.batch).toBeUndefined();
 	});
 
 	it('rejects malformed batch entries (missing rpc)', async () => {
