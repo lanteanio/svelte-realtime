@@ -145,7 +145,7 @@ async function until(predicate) {
 }
 
 const replyTo = (id, attach) => net.toClient.some((f) => f.topic === '__rpc' && (
-	f.event === '__batch'
+	f.event === '__batch' && Array.isArray(f.data.batch)
 		? !attach && f.data.batch.some((r) => r.id === id)
 		: f.event === id && (f.data && f.data.attach === true) === attach
 ));
@@ -1298,6 +1298,21 @@ it('an oversized incoming stream batch settles every client request without time
  for (const off of offs) off();
 });
 
+
+it('an opaque single-call id matching the batch channel does not reject unrelated work', async () => {
+ const { ensureListener } = await import('../src/client/connection.js');
+ ensureListener();
+ const denied = vi.fn(); const other = vi.fn();
+ pending.set('__batch', { resolve: vi.fn(), reject: denied });
+ pending.set('other', { resolve: vi.fn(), reject: other });
+ env.register('identifiers', { denied: live(() => { throw new LiveError('FORBIDDEN', 'Denied'); }) });
+ net.toServer.push({ rpc: 'identifiers/denied', id: '__batch', args: [] });
+ await deliverToServer(); await deliverToClient();
+ expect(denied).toHaveBeenCalledTimes(1);
+ expect(other).not.toHaveBeenCalled();
+ expect(pending.has('other')).toBe(true);
+ pending.delete('other');
+});
 
 describe('mapped stream lifecycle', () => {
  it('shares lazy activation and keeps another consumer alive after repeated cleanup', async () => {

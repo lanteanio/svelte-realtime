@@ -229,7 +229,7 @@ export function ensureListener() {
 		}
 
 		// Batch response
-		if (correlationId === '__batch' && data?.ok === false && !data.batch) {
+		if (correlationId === '__batch' && data?.ok === false && data.batchRejected === true) {
 			// A malformed envelope has no trusted per-call correlation. The
 			// server closes this connection after its bounded failure notice.
 			for (const [id, entry] of pending) {

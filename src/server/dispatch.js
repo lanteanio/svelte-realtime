@@ -876,7 +876,7 @@ async function _rejectOversizedBatch(ws, platform, options, started) {
 	const respond = result => {
 		// Metrics and delivery observers cannot keep this connection open.
 		try { _recordRpcMetrics(path, result.code, started, ws); } catch {}
-		try { _respond(ws, platform, '__batch', result, requestId, path); } catch {}
+		try { _respond(ws, platform, '__batch', { ...result, batchRejected: true }, requestId, path); } catch {}
 		finally { close(); }
 	};
 	const protocol = _protocolRejection(ws, platform);
@@ -894,7 +894,7 @@ async function _rejectOversizedBatch(ws, platform, options, started) {
 		if (permit.active === undefined) {
 			if (permit.reason === undefined) permit = await permit;
 			if (permit.active === undefined) {
-				try { _respond(ws, platform, '__batch', _overloaded(path, permit, started, ws), requestId, path); } catch {}
+				try { _respond(ws, platform, '__batch', { ..._overloaded(path, permit, started, ws), batchRejected: true }, requestId, path); } catch {}
 				finally { close(); }
 				return;
 			}

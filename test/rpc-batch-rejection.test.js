@@ -48,7 +48,7 @@ it.each([51, 85000])('rejects %i entries with one fixed-size response and no ele
 	expect(reads).toBe(0);
 	expect(beforeExecute).toHaveBeenCalledTimes(1);
 	expect(beforeExecute.mock.calls[0].slice(1)).toEqual(['__batch__', []]);
-	expect(platform.sent[0].data).toMatchObject({ ok: false, code: 'INVALID_REQUEST' });
+	expect(platform.sent[0].data).toMatchObject({ ok: false, code: 'INVALID_REQUEST', batchRejected: true });
 	expect(platform.sent[0].data.batch).toBeUndefined();
 	expect(JSON.stringify(platform.sent[0]).length).toBeLessThan(512);
 });
