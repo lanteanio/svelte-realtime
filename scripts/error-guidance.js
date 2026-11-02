@@ -94,16 +94,16 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Use a new idempotency key for each distinct request, and resend exactly the same payload when you retry one. Check any `keyFrom` function for keys that collide.'
 	}),
 	INTERNAL: Object.freeze({
-		cause: 'A server capability is missing or failed: the adapter lacks the CRDT or smooth plugin or a required feature, the plugin failed to load, a document load failed, or `live.tenant(...).publish` ran before the server platform was wired.',
+		cause: 'A server capability is missing: the adapter lacks the CRDT or smooth plugin or a required feature, or `live.tenant(...).publish` ran before the server platform was wired.',
 		consequence: 'The `live.doc`, `live.smooth` or tenant publish call throws an INTERNAL LiveError, and the client receives it as RpcError INTERNAL. The document or smooth topic does not attach.',
 		automaticRecovery: 'A failed plugin load is attempted again on the next call. Version and wiring errors persist until the deployment changes.',
-		nextAction: 'Upgrade svelte-adapter-uws to the version named in the message, check the document storage backend, or publish only after the realtime server is wired. Inside handlers, use `ctx.tenant(id).publish`.'
+		nextAction: 'Upgrade svelte-adapter-uws to the version named in the message, or publish only after the realtime server is wired. Inside handlers, use `ctx.tenant(id).publish`.'
 	}),
 	INTERNAL_ERROR: Object.freeze({
-		cause: 'An RPC, binary RPC or upload handler throws something that is not a LiveError.',
+		cause: 'An RPC, binary RPC or upload handler throws something that is not a LiveError, or a document load or unexpected adapter-plugin import fails.',
 		consequence: 'The client receives RpcError INTERNAL_ERROR with the message \'Internal server error\'. The original error is hidden from the client, passed to `onError` and reported in an operational event.',
 		automaticRecovery: 'None.',
-		nextAction: 'Find the operational event or `onError` log for the path and fix the handler. Throw a LiveError with a specific code for failures the client is expected to handle.'
+		nextAction: 'Correlate the operational event and `onError` log by request ID and path. For a document load or plugin failure, inspect the server error cause and fix the storage backend or deployment. Throw a LiveError with a specific code for application failures the client is expected to handle.'
 	}),
 	INVALID_ARG: Object.freeze({
 		cause: '`ctx.skip(key, ms)` received a key that is not a string, or an `ms` value that is not a positive finite number.',

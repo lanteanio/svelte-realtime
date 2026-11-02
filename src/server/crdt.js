@@ -66,22 +66,21 @@ function _loadCrdtRuntime() {
 
 /**
  * Classify a CRDT-plugin import failure. Only a missing module/subpath means
- * version skew; any other failure must surface as itself.
+ * version skew; unexpected failures keep their cause on the server.
  * @param {any} err
- * @returns {LiveError}
+ * @returns {Error}
  * @internal exported for tests
  */
 export function _crdtLoadError(err) {
-	if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED')) {
+	let code;
+	try { code = err?.code; } catch {}
+	if (code === 'ERR_MODULE_NOT_FOUND' || code === 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
 		return new LiveError(
 			'INTERNAL',
 			'live.doc() requires svelte-adapter-uws 0.6.0-next.25 or newer (the CRDT replica plugin is missing from the installed adapter)'
 		);
 	}
-	return new LiveError(
-		'INTERNAL',
-		'live.doc() failed to load the adapter CRDT plugin: ' + (err && err.message ? err.message : String(err))
-	);
+	return new Error('live.doc() failed to load the adapter CRDT plugin', { cause: err });
 }
 
 /**
@@ -702,10 +701,7 @@ export function _crdtRegister(kind, config) {
 					await rec.authority.acquire(name);
 					acquired = true;
 				} catch (err) {
-					throw new LiveError(
-						'INTERNAL',
-						'document load failed for "' + name + '": ' + (err && err.message ? err.message : String(err))
-					);
+					throw new Error('Document load failed', { cause: err });
 				}
 			}
 			assertCurrent();

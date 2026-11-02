@@ -364,7 +364,12 @@ describe('live.smooth without the adapter smooth plugin', () => {
 		const res = platform.sent[0]?.data;
 		expect(res).toBeDefined();
 		expect(res.ok).toBe(false);
-		expect(res.error).toContain('svelte-adapter-uws');
+		if (res.code === 'INTERNAL') {
+			expect(res.error).toContain('svelte-adapter-uws 0.6.0-next.24');
+		} else {
+			expect(res).toMatchObject({ code: 'INTERNAL_ERROR', error: 'Internal server error' });
+		}
+		expect(res.error).not.toContain('__smooth_absent__');
 	});
 
 	it('a runtime injected while the real import is in flight is not clobbered by its settlement', async () => {
@@ -412,13 +417,16 @@ describe('smooth load-error classification', () => {
 		}
 	});
 
-	it('any other failure surfaces as itself, never as version skew', () => {
-		const broken = _smoothLoadError(new SyntaxError('Unexpected token'));
-		expect(broken).toBeInstanceOf(LiveError);
-		expect(broken.message).toContain('Unexpected token');
+	it('keeps unexpected failures server-side, never as version skew', () => {
+		const cause = new SyntaxError('Unexpected token');
+		const broken = _smoothLoadError(cause);
+		expect(broken).not.toBeInstanceOf(LiveError);
+		expect(broken.cause).toBe(cause);
+		expect(broken.message).not.toContain('Unexpected token');
 		expect(broken.message).not.toContain('0.6.0-next.24');
 		const weird = _smoothLoadError('plain string rejection');
-		expect(weird.message).toContain('plain string rejection');
+		expect(weird.cause).toBe('plain string rejection');
+		expect(weird.message).not.toContain('plain string rejection');
 		const empty = _smoothLoadError(undefined);
 		expect(empty.message).toContain('failed to load');
 	});

@@ -129,23 +129,22 @@ function _loadSmoothRuntime() {
 /**
  * Classify a smooth-plugin import failure. Only a missing module means
  * version skew; any other failure (a syntax error inside the plugin, a
- * broken transitive import) must surface as itself, not masquerade as an
- * out-of-date adapter.
+ * broken transitive import) keeps its cause on the server rather than
+ * masquerading as an out-of-date adapter or a client-safe LiveError.
  * @param {any} err
- * @returns {LiveError}
+ * @returns {Error}
  * @internal exported for tests
  */
 export function _smoothLoadError(err) {
-	if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED')) {
+	let code;
+	try { code = err?.code; } catch {}
+	if (code === 'ERR_MODULE_NOT_FOUND' || code === 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
 		return new LiveError(
 			'INTERNAL',
 			'live.smooth() requires svelte-adapter-uws 0.6.0-next.24 or newer (the smooth plugin is missing from the installed adapter)'
 		);
 	}
-	return new LiveError(
-		'INTERNAL',
-		'live.smooth() failed to load the adapter smooth plugin: ' + (err && err.message ? err.message : String(err))
-	);
+	return new Error('live.smooth() failed to load the adapter smooth plugin', { cause: err });
 }
 
 /**

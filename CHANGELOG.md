@@ -276,6 +276,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Document persistence failures and unexpected document or smooth plugin import errors return generic internal RPC errors. Server error observers retain the original cause and request correlation without exposing backend exception text or metadata to callers.
+
 - Maintainer Docker lifecycle and chaos verification can select a published-service host with `REALTIME_TEST_DOCKER_SERVICE_HOST` when the test process runs in a separate container. The default remains loopback, actual service ports and shutdown/recovery checks are unchanged, and verification evidence records the selected endpoint.
 
 - Tenant resolver failures return sanitized `INTERNAL_ERROR` RPC responses and release admission without unhandled dispatch rejections. Stream unsubscribe and close hooks use their admitted tenant scope, and failed tenant resolution cannot interrupt upload, smooth, document or push cleanup. Diagnostic sink and console fallback failures remain contained.

@@ -113,7 +113,7 @@ export const REALTIME_ERROR_REGISTRY = Object.freeze([
 		event: 'doc.persist.failed',
 		messagePrefix: '[svelte-realtime] document persistence failed:',
 		cause: 'The `persist.load` or `persist.store` hook of a `live.doc` declaration threw or rejected, and the declaration has no `onError` handler. The line names the declaration, the operation (`load` or `store`) and the topic.',
-		consequence: 'A failed store leaves the document dirty in memory: it is not durable until a store succeeds, and the replica is not unloaded meanwhile. A failed load opens nothing: the replica forgets the topic, and every sync call waiting on that load rejects with an INTERNAL error whose message starts `document load failed for`.',
+		consequence: 'A failed store leaves the document dirty in memory: it is not durable until a store succeeds, and the replica is not unloaded meanwhile. A failed load opens nothing: the replica forgets the topic, and every waiting sync receives INTERNAL_ERROR with the generic message `Internal server error`. Backend details stay in server-side error observers.',
 		automaticRecovery: 'A failed store is retried on the `debounceMaxWait` cadence, printing this line on every failed attempt. A failed load is retried by the next sync call for that topic.',
 		nextAction: 'Fix the storage backend or the hook using the error printed with this line. Pass `onError` to the declaration to route these failures into your own logging or alerting.',
 		sources: Object.freeze(['src/server/crdt.js']),

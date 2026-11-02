@@ -310,15 +310,15 @@ describe('live.doc sync', () => {
 		expect(full.size).toBe(65536);
 	});
 
-	it('reports a failed replica load as an actionable INTERNAL error', async () => {
+	it('masks a failed replica load as an internal server error', async () => {
 		_resetCrdt();
 		const failing = fakeRuntime({ acquire: () => Promise.reject(new Error('db down')) });
 		_setCrdtRuntime(failing.mod);
 		const { name } = declareBoard();
 		const res = await call(mockWs({ id: 'u1' }), wirePlatform(), name + '/board/__doc/sync', ['r1', []]);
 		expect(res.ok).toBe(false);
-		expect(res.error).toContain('document load failed');
-		expect(res.error).toContain('db down');
+		expect(res).toMatchObject({ code: 'INTERNAL_ERROR', error: 'Internal server error' });
+		expect(JSON.stringify(res)).not.toContain('db down');
 	});
 
 	it('releases the reference when the socket closed mid-sync', async () => {
@@ -1068,9 +1068,12 @@ describe('crdt load-error classification', () => {
 		}
 	});
 
-	it('any other failure surfaces as itself', () => {
-		const e = _crdtLoadError(new Error('syntax error in plugin'));
-		expect(e.message).toContain('syntax error in plugin');
+	it('keeps an unexpected failure as a server-only cause', () => {
+		const cause = new Error('syntax error in plugin');
+		const e = _crdtLoadError(cause);
+		expect(e).not.toBeInstanceOf(LiveError);
+		expect(e.cause).toBe(cause);
+		expect(e.message).not.toContain('syntax error in plugin');
 		expect(e.message).not.toContain('0.6.0-next.25');
 	});
 });
