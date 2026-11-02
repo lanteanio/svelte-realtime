@@ -95,6 +95,8 @@ export function _setCrdtRuntime(mod) {
 	_crdtRuntimePromise = null;
 }
 
+/** @typedef {Map<string, { permissionVersion: number }> & { observationVersion?: number }} CrdtAccessMap */
+
 /**
  * Per-declaration document records, keyed by the declaration's topic (a
  * string topic, or the topic function's source text). DELIBERATELY not
@@ -104,7 +106,7 @@ export function _setCrdtRuntime(mod) {
  * re-attaches by key. The mutable `current` config is swapped on re-attach so
  * edited persist hooks and knobs take effect against the LIVE replicas (the
  * authority reads its hooks through a facade over `current`).
- * @type {Map<string, { key: string, authority: any, codec: any, prefix: string, platform: any, current: any, accessByWs: WeakMap<any, Map<string, any>> }>}
+ * @type {Map<string, { key: string, authority: any, codec: any, prefix: string, platform: any, current: any, accessByWs: WeakMap<any, CrdtAccessMap> }>}
  */
 export const _crdtDecls = new Map();
 
@@ -118,6 +120,59 @@ export const _crdtDecls = new Map();
  * @type {WeakMap<any, Map<string, { rec: any, name: string, mounts: Set<number> }>>}
  */
 const _crdtWsDocs = new WeakMap();
+/** @typedef {{ count: number, current: number, version: number, config: any }} CrdtSyncReservation */
+/** @type {WeakMap<any, Map<string, Map<number, CrdtSyncReservation>>>} */
+let _crdtPendingSyncs = new WeakMap();
+
+/**
+ * Keep a pending store's membership claim until its sync commits or fails.
+ * @param {any} ws @param {string} key @param {number} mountId @param {any} config
+ */
+function _claimCrdtSync(ws, key, mountId, config) {
+	const owner = _crdtPendingSyncs;
+	let docs = owner.get(ws);
+	if (!docs) { docs = new Map(); owner.set(ws, docs); }
+	let mounts = docs.get(key);
+	if (!mounts) { mounts = new Map(); docs.set(key, mounts); }
+	let entry = mounts.get(mountId);
+	if (!entry) { entry = { count: 0, current: 0, version: 0, config }; mounts.set(mountId, entry); }
+	if (entry.config !== config) { entry.version++; entry.current = 0; entry.config = config; }
+	entry.count++;
+	entry.current++;
+	const version = entry.version;
+	let released = false;
+	return {
+		valid() {
+			return !released && _crdtPendingSyncs === owner && owner.get(ws) === docs
+				&& docs.get(key) === mounts && mounts.get(mountId) === entry && entry.version === version;
+		},
+		release() {
+			if (released) return;
+			released = true;
+			entry.count--;
+			if (entry.version === version) entry.current--;
+			if (entry.count === 0 && mounts.get(mountId) === entry) mounts.delete(mountId);
+			if (mounts.size === 0 && docs.get(key) === mounts) docs.delete(key);
+			if (docs.size === 0 && owner.get(ws) === docs) owner.delete(ws);
+		}
+	};
+}
+
+/** @param {any} ws @param {string} key @param {any} config */
+function _hasCrdtSyncOwner(ws, key, config) {
+	const mounts = _crdtPendingSyncs.get(ws)?.get(key);
+	if (mounts) for (const entry of mounts.values()) if (entry.current > 0 && entry.config === config) return true;
+	return false;
+}
+
+/** @param {any} ctx @param {any} rec @param {string} name */
+function _unsubscribeCrdtTopic(ctx, rec, name) {
+	if (ctx.platform && typeof ctx.platform.unsubscribe === 'function') {
+		try { ctx.platform.unsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
+	} else if (typeof ctx.ws.unsubscribe === 'function') {
+		try { trackedUnsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
+	}
+}
 
 /**
  * Sockets whose close path has already run - the same ghost guard as smooth:
@@ -136,6 +191,8 @@ export const _crdtClosedWs = new WeakSet();
  * @type {Map<string, number>}
  */
 export const _crdtDeclRegistrations = new Map();
+/** Current declarations, snapshotted with the other HMR registration state. */
+export const _crdtCurrentConfigs = new Map();
 
 /** Test seam: destroy every document record (replicas included). */
 export function _resetCrdt() {
@@ -146,6 +203,8 @@ export function _resetCrdt() {
 	}
 	_crdtDecls.clear();
 	_crdtDeclRegistrations.clear();
+	_crdtCurrentConfigs.clear();
+	_crdtPendingSyncs = new WeakMap();
 }
 
 /** Release one socket's reference on one document and forget its access record. */
@@ -238,6 +297,7 @@ export function _purgeCrdtDocs(names, holders) {
  * @param {any} ws
  */
 export function _drainCrdtOnClose(ws) {
+	_crdtPendingSyncs.delete(ws);
 	const docs = _crdtWsDocs.get(ws);
 	if (!docs || docs.size === 0) return;
 	const entries = [...docs.values()];
@@ -388,6 +448,7 @@ export function _crdtRegister(kind, config) {
 		);
 	}
 	const cfg = {
+		guard,
 		persist: config.persist,
 		debounceWait: config.debounceWait,
 		debounceMaxWait: config.debounceMaxWait,
@@ -396,6 +457,7 @@ export function _crdtRegister(kind, config) {
 		gc: config.gc,
 		onError: config.onError
 	};
+	_crdtCurrentConfigs.set(declKey, cfg);
 
 	// Prefix the resolved name ONCE with the connection's tenant so the document's
 	// wire topic (rec.prefix + name), its record key, and every sub-stream / relay
@@ -524,6 +586,21 @@ export function _crdtRegister(kind, config) {
 		return rec;
 	}
 
+	/** @param {any} ctx @param {string} [name] */
+	function observeSyncRefusal(ctx, name) {
+		if (!ctx.ws || _crdtCurrentConfigs.get(declKey) !== cfg) return;
+		const access = _crdtDecls.get(declKey)?.accessByWs.get(ctx.ws);
+		if (!access) return;
+		if (name !== undefined) {
+			const permission = access.get(name);
+			if (permission) permission.permissionVersion++;
+		} else {
+			// A denied dynamic factory must not run to discover the document.
+			// Pending writes re-check their own policy after this observation.
+			access.observationVersion = (access.observationVersion || 0) + 1;
+		}
+	}
+
 	const docExport = /** @type {any} */ ({});
 	docExport.__isDoc = true;
 	docExport.__docKind = kind;
@@ -539,8 +616,13 @@ export function _crdtRegister(kind, config) {
 		const mountId = typeof rawMount === 'number' && Number.isFinite(rawMount) ? rawMount : 0;
 		let access;
 		if (guard) {
-			const rt0 = await _loadCrdtRuntime();
-			access = rt0.normalizeCrdtAccess(await guard(ctx, ...roomArgs));
+			try {
+				const rt0 = await _loadCrdtRuntime();
+				access = rt0.normalizeCrdtAccess(await guard(ctx, ...roomArgs));
+			} catch (error) {
+				observeSyncRefusal(ctx);
+				throw error;
+			}
 		} else {
 			if (!warnedNoGuard && process.env.NODE_ENV === 'production') {
 				warnedNoGuard = true;
@@ -549,6 +631,7 @@ export function _crdtRegister(kind, config) {
 			access = { read: true, write: true, comment: true };
 		}
 		if (!access.read) {
+			observeSyncRefusal(ctx);
 			// Same authenticated-identity classification the RPC/stream gates use:
 			// an anonymous connection gets UNAUTHENTICATED so a client can tell
 			// "log in" from "you may not have this", instead of always FORBIDDEN.
@@ -558,8 +641,16 @@ export function _crdtRegister(kind, config) {
 				authed ? 'document read denied' : 'Authentication required'
 			);
 		}
-		const name = resolveName(ctx, roomArgs);
+		let name;
+		try { name = resolveName(ctx, roomArgs); }
+		catch (error) {
+			if (!access.write) observeSyncRefusal(ctx);
+			throw error;
+		}
+		if (!access.write) observeSyncRefusal(ctx, name);
 		const rt = await _loadCrdtRuntime();
+		if (_crdtCurrentConfigs.get(declKey) !== cfg) throw new LiveError('UNAVAILABLE', 'Document declaration changed; retry sync');
+		if (ctx.ws && _crdtClosedWs.has(ctx.ws)) throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during document sync');
 		const rec = _record(rt);
 		// The record follows the caller's live platform (dev-server restarts
 		// and multi-platform test processes otherwise publish into a dead
@@ -567,100 +658,134 @@ export function _crdtRegister(kind, config) {
 		rec.platform = ctx.platform;
 		const wsKey = rec.key + '\u0000' + name;
 		const docs = ctx.ws ? _crdtWsDocs.get(ctx.ws) : undefined;
-		const alreadyHeld = !!(docs && docs.has(wsKey));
-		if (!alreadyHeld) {
-			try {
-				await rec.authority.acquire(name);
-			} catch (err) {
-				throw new LiveError(
-					'INTERNAL',
-					'document load failed for "' + name + '": ' + (err && err.message ? err.message : String(err))
-				);
-			}
-		}
+		const heldAtStart = docs?.get(wsKey);
+		const alreadyHeld = !!heldAtStart;
 		const wireTopic = rec.prefix + name;
-		// Walk-visible membership for the reserved wire topic, same as smooth:
-		// reserved-prefix topics never ride the client's own subscribe frames.
-		if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
-			const denial = await ctx.platform.subscribe(ctx.ws, wireTopic);
-			if (denial) {
-				if (!alreadyHeld) rec.authority.release(name);
-				throw new LiveError(
-					denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',
-					'document topic subscribe denied: ' + denial
-				);
+		function assertCurrent() {
+			if (_crdtCurrentConfigs.get(declKey) === cfg && _crdtDecls.get(declKey) === rec
+				&& (!claim || claim.valid()) && (!alreadyHeld || _crdtWsDocs.get(ctx.ws)?.get(wsKey) === heldAtStart)) return;
+			throw new LiveError('UNAVAILABLE', 'Document declaration changed; retry sync');
+		}
+		let acquired = false;
+		const claim = ctx.ws ? _claimCrdtSync(ctx.ws, wsKey, mountId, cfg) : null;
+		try {
+			if (!alreadyHeld) {
+				try {
+					await rec.authority.acquire(name);
+					acquired = true;
+				} catch (err) {
+					throw new LiveError(
+						'INTERNAL',
+						'document load failed for "' + name + '": ' + (err && err.message ? err.message : String(err))
+					);
+				}
 			}
-		} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
-			// A closed socket falls through to the liveness check below.
-			if (_subscribeTracked(ctx.ws, wireTopic) === 'RATE_LIMITED') {
-				if (!alreadyHeld) rec.authority.release(name);
-				throw new LiveError('FORBIDDEN', 'document topic subscribe denied: RATE_LIMITED');
+			assertCurrent();
+			// Walk-visible membership for the reserved wire topic, same as smooth:
+			// reserved-prefix topics never ride the client's own subscribe frames.
+			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
+				const denial = await ctx.platform.subscribe(ctx.ws, wireTopic);
+				if (denial) {
+					if (denial === 'FORBIDDEN' || denial === 'UNAUTHENTICATED') observeSyncRefusal(ctx, name);
+					throw new LiveError(
+						denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',
+						'document topic subscribe denied: ' + denial
+					);
+				}
+			} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
+				// A closed socket falls through to the liveness check below.
+				if (_subscribeTracked(ctx.ws, wireTopic) === 'RATE_LIMITED') {
+					throw new LiveError('FORBIDDEN', 'document topic subscribe denied: RATE_LIMITED');
+				}
+			}
+			assertCurrent();
+			// Loading and asynchronous subscription may outlive a role change.
+			// Resolve current read access at the final document admission boundary.
+			if (guard) {
+				try {
+					access = rt.normalizeCrdtAccess(await guard(ctx, ...roomArgs));
+					if (!access.read) {
+						const authed = _getAuthenticatedId(ctx) !== null;
+						throw new LiveError(authed ? 'FORBIDDEN' : 'UNAUTHENTICATED', authed ? 'document read denied' : 'Authentication required');
+					}
+				} catch (error) {
+					observeSyncRefusal(ctx, name);
+					throw error;
+				}
+				if (!access.write) observeSyncRefusal(ctx, name);
+				assertCurrent();
+			}
+			// Liveness re-check after the awaits: if the socket closed while the
+			// guard / load / subscribe was pending, its close drain already ran
+			// and acquiring now would leak a reference no close can release.
+			if (ctx.ws && _crdtClosedWs.has(ctx.ws)) {
+				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during document sync');
+			}
+			if (ctx.ws) {
+				let m = _crdtWsDocs.get(ctx.ws);
+				if (!m) {
+					m = new Map();
+					_crdtWsDocs.set(ctx.ws, m);
+				}
+				const held = m.get(wsKey);
+				if (held) {
+					// The slot already exists: either a re-sync of a known mount,
+					// or a CONCURRENT first-sync registered while this call's
+					// awaits were pending - in which case this call's acquire is
+					// surplus and is returned so the reference count stays one
+					// per slot.
+					if (acquired) { acquired = false; rec.authority.release(name); }
+					held.mounts.add(mountId);
+				} else {
+					// One slot per (connection, document), counting MOUNTS:
+					// several client stores on one connection can resolve to the
+					// same document, and one store's close must not sever the
+					// others' subscription or authorization.
+					m.set(wsKey, { rec, name, mounts: new Set([mountId]) });
+					acquired = false;
+				}
+				// A sync record proves this socket mounted this document. Writes
+				// also re-evaluate the current guard before changing the authority.
+				let acc = rec.accessByWs.get(ctx.ws);
+				if (!acc) {
+					acc = new Map();
+					rec.accessByWs.set(ctx.ws, acc);
+				}
+				acc.set(name, { permissionVersion: 0 });
+			}
+			const diff = rec.authority.diff(name, Array.isArray(stateVector) ? stateVector : null);
+			const sv = rec.authority.stateVector(name);
+			// Clustered: a cold-loaded replica is only as fresh as the last
+			// persisted snapshot, so wire the relay loop (once) and, on a cold
+			// load, ask peers for anything newer than what we just loaded. A peer
+			// holding the topic replies with the structs we lack; the reply
+			// applies on top of the snapshot and fans out to this socket as a
+			// normal update (idempotent merge, so applying both is safe).
+			const _crdtSync = ctx.platform && ctx.platform.crdt;
+			if (_crdtSync) {
+				_ensureCrdtCluster(_crdtSync);
+				if (!alreadyHeld && typeof _crdtSync.requestSync === 'function') {
+					_crdtSync.requestSync(rec.key, name, sv === null ? [] : Array.from(sv));
+				}
+			}
+			// Direct callers return the exchange; finally releases their temporary reference.
+			return {
+				topic: name,
+				access,
+				t: wallEpoch(),
+				diff: diff === null ? [] : Array.from(diff),
+				sv: sv === null ? [] : Array.from(sv)
+			};
+		} finally {
+			try {
+				if (acquired) { acquired = false; rec.authority.release(name); }
+			} finally {
+				claim?.release();
+				if (ctx.ws && !_crdtWsDocs.get(ctx.ws)?.has(wsKey) && !_hasCrdtSyncOwner(ctx.ws, wsKey, _crdtCurrentConfigs.get(declKey))) {
+					_unsubscribeCrdtTopic(ctx, rec, name);
+				}
 			}
 		}
-		// Liveness re-check after the awaits: if the socket closed while the
-		// guard / load / subscribe was pending, its close drain already ran
-		// and acquiring now would leak a reference no close can release.
-		if (ctx.ws && _crdtClosedWs.has(ctx.ws)) {
-			if (!alreadyHeld) rec.authority.release(name);
-			throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during document sync');
-		}
-		if (ctx.ws) {
-			let m = _crdtWsDocs.get(ctx.ws);
-			if (!m) {
-				m = new Map();
-				_crdtWsDocs.set(ctx.ws, m);
-			}
-			const held = m.get(wsKey);
-			if (held) {
-				// The slot already exists: either a re-sync of a known mount,
-				// or a CONCURRENT first-sync registered while this call's
-				// awaits were pending - in which case this call's acquire is
-				// surplus and is returned so the reference count stays one
-				// per slot.
-				if (!alreadyHeld) rec.authority.release(name);
-				held.mounts.add(mountId);
-			} else {
-				// One slot per (connection, document), counting MOUNTS:
-				// several client stores on one connection can resolve to the
-				// same document, and one store's close must not sever the
-				// others' subscription or authorization.
-				m.set(wsKey, { rec, name, mounts: new Set([mountId]) });
-			}
-			// Cache (or refresh - a re-sync re-runs the guard, so a downgrade
-			// takes effect here) the access record for the update path.
-			let acc = rec.accessByWs.get(ctx.ws);
-			if (!acc) {
-				acc = new Map();
-				rec.accessByWs.set(ctx.ws, acc);
-			}
-			acc.set(name, access);
-		}
-		const diff = rec.authority.diff(name, Array.isArray(stateVector) ? stateVector : null);
-		const sv = rec.authority.stateVector(name);
-		// Clustered: a cold-loaded replica is only as fresh as the last
-		// persisted snapshot, so wire the relay loop (once) and, on a cold
-		// load, ask peers for anything newer than what we just loaded. A peer
-		// holding the topic replies with the structs we lack; the reply
-		// applies on top of the snapshot and fans out to this socket as a
-		// normal update (idempotent merge, so applying both is safe).
-		const _crdtSync = ctx.platform && ctx.platform.crdt;
-		if (_crdtSync) {
-			_ensureCrdtCluster(_crdtSync);
-			if (!alreadyHeld && typeof _crdtSync.requestSync === 'function') {
-				_crdtSync.requestSync(rec.key, name, sv === null ? [] : Array.from(sv));
-			}
-		}
-		// A connection-less caller (a direct server-side invocation) gets the
-		// exchange snapshot but holds nothing: there is no close or disconnect
-		// to pair a reference with.
-		if (!ctx.ws && !alreadyHeld) rec.authority.release(name);
-		return {
-			topic: name,
-			access,
-			t: wallEpoch(),
-			diff: diff === null ? [] : Array.from(diff),
-			sv: sv === null ? [] : Array.from(sv)
-		};
 	});
 
 	docExport.__docUpdate = live.volatile(async (ctx, ...args) => {
@@ -671,13 +796,51 @@ export function _crdtRegister(kind, config) {
 		const rec = _crdtDecls.get(declKey);
 		if (!rec || !rec.authority) return; // no completed sync anywhere yet
 		const name = resolveName(ctx, roomArgs);
-		// The cached record is the authorization: it only exists when THIS
-		// connection passed the guard for THIS document at sync time. No
-		// record (never synced, or released) or no write right: drop - the
-		// client knows it is read-only up front via the sync reply.
+		// Only a mounted socket can write. The sync record is an identity
+		// fence across re-syncs, release/re-acquire and connection teardown.
 		const acc = rec.accessByWs.get(ctx.ws);
 		const access = acc ? acc.get(name) : undefined;
-		if (!access || !access.write) return;
+		if (!acc || !access) return;
+		const current = _crdtCurrentConfigs.get(declKey);
+		if (!current) return;
+		const permissionVersion = access.permissionVersion;
+		/** @type {AbortSignal | undefined} */
+		let signal;
+		for (;;) {
+			const observationVersion = acc.observationVersion || 0;
+			let allowed = true;
+			try {
+				if (current.guard) {
+					const result = current.guard(ctx, ...roomArgs);
+					let value = result;
+					if (result && typeof result.then === 'function') {
+						signal = ctx.abortSignal;
+						value = await result;
+					}
+					if (typeof value === 'boolean') allowed = value;
+					else {
+						let rt = _crdtRuntime;
+						if (!rt) {
+							signal = ctx.abortSignal;
+							rt = await _loadCrdtRuntime();
+						}
+						const permission = rt.normalizeCrdtAccess(value);
+						allowed = permission.read && permission.write;
+					}
+				}
+			} catch (error) {
+				if (_crdtCurrentConfigs.get(declKey) === current && acc.get(name) === access) access.permissionVersion++;
+				throw error;
+			}
+			if (signal?.aborted || _crdtClosedWs.has(ctx.ws) || _crdtDecls.get(declKey) !== rec || _crdtCurrentConfigs.get(declKey) !== current
+				|| acc.get(name) !== access || access.permissionVersion !== permissionVersion) return;
+			if (!allowed) {
+				// A newer refusal invalidates older permission checks still waiting.
+				access.permissionVersion++;
+				return;
+			}
+			if ((acc.observationVersion || 0) === observationVersion) break;
+		}
 		// Apply + fan-out is one synchronous unit from here (no awaits): an
 		// update arriving in the next task sees this one's applied state.
 		const out = rec.authority.applyUpdate(name, bytes);
@@ -703,18 +866,20 @@ export function _crdtRegister(kind, config) {
 		if (!rec) return;
 		const name = resolveName(ctx, roomArgs);
 		const docs = _crdtWsDocs.get(ctx.ws);
-		const held = docs ? docs.get(rec.key + '\u0000' + name) : undefined;
-		if (!held) return;
+		const key = rec.key + '\u0000' + name;
+		const pending = _crdtPendingSyncs.get(ctx.ws)?.get(key)?.get(mountId);
+		if (pending) { pending.version++; pending.current = 0; }
+		const held = docs ? docs.get(key) : undefined;
+		if (!held) {
+			if (pending && !_hasCrdtSyncOwner(ctx.ws, key, _crdtCurrentConfigs.get(declKey))) _unsubscribeCrdtTopic(ctx, rec, name);
+			return;
+		}
 		held.mounts.delete(mountId);
 		// Other stores on this connection still mount the document: keep the
 		// subscription, the authorization, and the reference.
 		if (held.mounts.size > 0) return;
 		_crdtRelease(rec, ctx.ws, name);
-		if (ctx.platform && typeof ctx.platform.unsubscribe === 'function') {
-			try { ctx.platform.unsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
-		} else if (typeof ctx.ws.unsubscribe === 'function') {
-			try { trackedUnsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
-		}
+		if (!_hasCrdtSyncOwner(ctx.ws, key, _crdtCurrentConfigs.get(declKey))) _unsubscribeCrdtTopic(ctx, rec, name);
 	});
 
 	return docExport;

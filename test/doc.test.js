@@ -1,6 +1,6 @@
 // CRDT documents: live.doc()/live.map()/live.array() registration, the
 // sync/update/close handlers, the {read, write, comment} access record
-// (boolean widening, caching, enforcement on the update path), the close
+// (boolean widening and enforcement on the update path), the close
 // drain, HMR record survival, and the vite codegen surfaces. The replica
 // authority and wire codec live in the adapter and are tested there; these
 // tests inject a scripted runtime through the _setCrdtRuntime seam and
@@ -380,7 +380,7 @@ describe('live.doc update path', () => {
 		expect(platform.wirePublished).toHaveLength(0);
 	});
 
-	it('drops an update from a read-only connection (the cached record gates it)', async () => {
+	it('drops an update from a read-only connection (the current guard gates it)', async () => {
 		const { name } = declareBoard({ guard: () => ({ read: true }) });
 		const ws = mockWs({ id: 'u1' });
 		const platform = wirePlatform();

@@ -4235,8 +4235,11 @@ export interface DocConfig {
 	 * Per-connection per-document access. Return a boolean (widened to all
 	 * three rights) or a `{read, write, comment}` record; a missing right is
 	 * `false`, so `{read: true}` means read-only. Throwing denies like any
-	 * guard. The record is cached for the life of the subscription and
-	 * re-resolved on every sync, so a downgrade applies at the next sync.
+	 * guard. Re-evaluated on every sync and before each inbound write, so
+	 * revoking write access does not depend on the client requesting a sync.
+	 * Asynchronous checks cannot write after their mount, declaration or
+	 * permission was superseded. The client's displayed access refreshes on sync.
+	 * Pending writes repeat their own policy after an intervening sync refusal.
 	 * `comment` is carried for the rich-text marks layer and grants nothing
 	 * extra yet.
 	 */

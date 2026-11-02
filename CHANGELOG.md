@@ -278,6 +278,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The warning for an uncompilable `piiRedact` topic factory now states that a publish before local topic resolution can send raw data on a single instance as well as in a cluster.
 
+- Document writes re-evaluate the current access guard, so revoking write rights takes effect without a client requesting another sync. Pending checks cannot write after a newer refusal, mount replacement, connection close or declaration reload. Failed or cancelled syncs release only their own reference and membership claim, preserving other pending mounts.
+
 - The demo scaffolder fetches an immutable source commit and verifies its detached identity before running installation, preflight or build commands. Moving the demo repository's default branch cannot change the template in an existing CLI release.
 
 - Oversized incoming RPC batches return one bounded envelope error and take one connection admission place before the configured `beforeExecute` rate gate. Rejection never walks or echoes their entries, then ends the malformed connection with policy close `1008`; its outstanding calls fail promptly even for clients that ignore batch-level notices. Valid batches retain per-call correlation. Custom transports must respect the 50-call bound.

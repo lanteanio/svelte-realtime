@@ -80,7 +80,7 @@ export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
 import { _getCtxHelpers, _buildCtx, _rerunCtx, installCtx } from './server/ctx.js';
 import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggregateState, _copyAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
-import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
+import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, _crdtCurrentConfigs, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, _snapshotLazyQueue, installLazy, _setAfterLazyResolve } from './server/lazy.js';
 import { validateFunctionTimeout } from './shared/function-timeout.js';
@@ -3832,6 +3832,7 @@ export function _prepareHmr() {
 		hadCron: _cronTimerActive(),
 		declaredCoalesce: new Map(_declaredCoalesce),
 		declaredCoalescePattern: new Map(_declaredCoalescePattern),
+		crdtConfigs: new Map(_crdtCurrentConfigs),
 	};
 
 	// Clear debounce timers
@@ -3896,6 +3897,7 @@ export function _prepareHmr() {
 	// re-imported declaration re-attaches without tripping the
 	// duplicate-topic warning.
 	_crdtDeclRegistrations.clear();
+	_crdtCurrentConfigs.clear();
 	_derivedBySource.clear();
 	_effectBySource.clear();
 	_aggregateBySource.clear();
@@ -3933,6 +3935,7 @@ export function _restoreHmr(snap) {
 	_declaredCoalescePattern.clear();
 	for (const [key, value] of snap.declaredCoalesce || []) _declaredCoalesce.set(key, value);
 	for (const [key, value] of snap.declaredCoalescePattern || []) _declaredCoalescePattern.set(key, value);
+	for (const [key, value] of snap.crdtConfigs || []) _crdtCurrentConfigs.set(key, value);
 	for (const [k, v] of snap.registry) {
 		registry.set(k, v);
 		if (/** @type {any} */ (v).__isStream && /** @type {any} */ (v).__onUnsubscribe) {
