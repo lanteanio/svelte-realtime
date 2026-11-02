@@ -4,11 +4,13 @@
 	const catalogs = {
 		en: {
 			generic: 'Real-time updates are temporarily unavailable.',
+			restored: 'Real-time updates are available again.',
 			'realtime.unavailable': 'Updates paused for {service}.',
 			'realtime.restored': 'Updates restored.'
 		},
 		de: {
 			generic: 'Echtzeit-Updates sind vorübergehend nicht verfügbar.',
+			restored: 'Echtzeit-Updates sind wieder verfügbar.',
 			'realtime.unavailable': 'Updates pausiert für {service}.',
 			'realtime.restored': 'Updates wiederhergestellt.'
 		}
@@ -22,9 +24,9 @@
 	let announcements = [];
 	let submissions = 0;
 
-	function translate(value, selectedLocale) {
-		if (!value) return '';
+	function translate(value, selectedLocale, fallbackKey = 'generic') {
 		const catalog = catalogs[selectedLocale];
+		if (!value) return catalog[fallbackKey];
 		const template = value.messageKey && Object.hasOwn(catalog, value.messageKey) && typeof catalog[value.messageKey] === 'string'
 			? catalog[value.messageKey]
 			: null;
@@ -33,11 +35,11 @@
 				Object.hasOwn(value.messageParams || {}, key) ? String(value.messageParams[key]) : match
 			);
 		}
-		return value.bannerCopy || catalog.generic;
+		return value.bannerCopy || catalog[fallbackKey];
 	}
 
 	let unavailable = false;
-	$: noticeText = translate(notice, locale);
+	$: noticeText = translate(notice, locale, unavailable ? 'generic' : 'restored');
 
 	onMount(() => {
 		const observer = new MutationObserver(() => {
@@ -61,7 +63,7 @@
 				notice = recovery;
 				unavailable = false;
 				retryDeadline = null;
-				if (transition) announcementText = translate(notice, locale);
+				if (transition) announcementText = translate(notice, locale, 'restored');
 			},
 			announcements: () => announcements,
 			submissions: () => submissions

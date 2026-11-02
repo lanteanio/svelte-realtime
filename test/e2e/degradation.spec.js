@@ -98,3 +98,43 @@ test('has no detectable accessibility violations while degraded or recovered', a
 	const recovered = await new AxeBuilder({ page }).analyze();
 	expect(recovered.violations).toEqual([]);
 });
+
+for (const [locale, paused, restored, known] of [
+	['en', 'Updates paused for Redis.', 'Real-time updates are available again.', 'Updates restored.'],
+	['de', 'Updates pausiert für Redis.', 'Echtzeit-Updates sind wieder verfügbar.', 'Updates wiederhergestellt.']
+]) {
+	test(`recovers with accessible fallbacks and stable focus in ${locale}`, async ({ page }) => {
+		await page.locator('#notice-locale').selectOption(locale);
+		const action = page.locator('#update-action');
+		const status = page.getByRole('status');
+		const announced = [];
+		const recoveries = [
+			[null, restored],
+			[{ messageKey: 'unknown.recovery' }, restored],
+			[{ messageKey: '__proto__' }, restored],
+			[{ messageKey: 'constructor' }, restored],
+			[{ messageKey: 'toString' }, restored],
+			[{ messageKey: 'unknown.recovery', bannerCopy: 'Source English recovery fallback.' }, 'Source English recovery fallback.'],
+			[{ messageKey: 'realtime.restored', bannerCopy: 'Unused source fallback.' }, known]
+		];
+		for (const [index, [notice, text]] of recoveries.entries()) {
+			await action.focus();
+			await page.evaluate(() => window.degradationHarness.degraded());
+			await expect(status).toHaveText(paused);
+			await expect(action).toHaveAttribute('aria-disabled', 'true');
+			await expect(action).toBeFocused();
+			await page.evaluate(value => window.degradationHarness.recovered(value), notice);
+			await expect(status).toHaveText(text);
+			await expect(action).toHaveAttribute('aria-disabled', 'false');
+			await expect(action).not.toHaveAttribute('aria-describedby');
+			await expect(action).toBeFocused();
+			await expect(page.locator('#retry-deadline')).toHaveCount(0);
+			announced.push(paused, text);
+			await page.evaluate(() => window.degradationHarness.recovered({ messageKey: 'unknown.recovery', bannerCopy: 'Repeated recovery must stay silent.' }));
+			expect(await page.evaluate(() => window.degradationHarness.announcements())).toEqual(announced);
+			await page.keyboard.press('Enter');
+			expect(await page.evaluate(() => window.degradationHarness.submissions())).toBe(index + 1);
+			await expect(action).toBeFocused();
+		}
+	});
+}

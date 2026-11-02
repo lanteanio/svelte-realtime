@@ -296,7 +296,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Versioned CRUD events that do not change client state emit no value notification outside the browser animation-frame path. Pending optimistic writes retain their normal confirmation and settlement behavior. Native I/O count gates pin batch entries, payload serialization, derived recomputation and cursor recovery independently of subscriber count.
 
-- The degradation notice fixture keeps an unavailable action focusable and refuses pointer, keyboard, and form submissions until recovery. Its guidance preserves focus when availability changes.
+- The degradation notice fixture keeps an unavailable action focusable and refuses pointer, keyboard, and form submissions until recovery. Its guidance preserves focus when availability changes. Missing or unknown recovery metadata uses a restored fallback from the selected application catalog.
 
 - Development SSR reloads re-register live handlers when route changes replace the module graph. Deleted live files stay unregistered, and guards added during reload are enforced before handlers run. Calls that cross a handler or guard change fail with `UNAVAILABLE` before stale subscription work or results can escape. A completed batch stream whose result is refused releases its subscription ownership while keeping independently accepted subscriptions to the same topic. Failed live-file saves restore pending background declarations along with loaded handlers, and a broken module after a full SSR reload refuses calls until repaired.
 
