@@ -338,3 +338,26 @@ it('prevents an asynchronous hit from injecting into or emitting from a replacem
 	expect(_smoothTopics.get(topic).authority.get('victim').queue).toEqual([]);
 	expect(frames().some(frame => frame.data.type === 'old-hit')).toBe(false);
 });
+
+it('revokes custom projectile capabilities across an awaiting ownership change', async () => {
+	let resume, accepted;
+	declare({ interest: { radius: 100, position: state => state }, hitTest: {
+		async resolveShot(ctx) {
+			await new Promise(done => { resume = done; });
+			accepted = ctx.applyTo(ctx.identity, { dx: 999 });
+			ctx.emitEvent('old-projectile', {});
+		}
+	} });
+	await rpc('sync');
+	const pending = rpc('shoot', [{ cmd: {}, rt: 100000 }]);
+	for (let count = 0; count < 100 && !resume; count++) await settle();
+	expect(resume).toBeTypeOf('function');
+	handlers.onBroadcast('__smooth:' + topic, 'event', { type: 'handoff' }, undefined, 0, 'other', '2');
+	grant = { epoch: '3', leaseMs: 10000 };
+	await rpc('sync');
+	resume();
+	await pending;
+	expect(accepted).toBe(false);
+	expect(_smoothTopics.get(topic).authority.get('player').queue).toEqual([]);
+	expect(frames().some(frame => frame.data.type === 'old-projectile')).toBe(false);
+});

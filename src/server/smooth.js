@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer, setImmediateTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _setResponseFence } from './response-fence.js';
 import { _subscribeTracked, releaseSubscription } from './membership.js';
 import { _getIdentityKey } from './identity.js';
@@ -2288,7 +2289,7 @@ function _ensureSmoothCluster(smooth) {
 			if (shooterEntity === undefined) return; // no entity here: this shooter cannot aim
 			const ht = rec.cfg.hitTest;
 			const reach = typeof payload.reach === 'number' && Number.isFinite(payload.reach)
-				? Math.min(payload.reach, ht.maxRewindMs)
+				? Math.max(0, Math.min(payload.reach, ht.maxRewindMs))
 				: ht.maxRewindMs;
 			const rewindAge =
 				typeof payload.rewindAge === 'number' && Number.isFinite(payload.rewindAge) && payload.rewindAge >= 0
@@ -2307,7 +2308,7 @@ function _ensureSmoothCluster(smooth) {
 			}
 			const nowMono = rec.monoClock.mono(wallEpoch());
 			const rewindAt = _smoothRewindAt(nowMono, reach, rewindAge);
-			_smoothResolveShot(rec, rec.name, identity, shooterEntity, rec.platform, payload.cmd, rewindAt, nowMono).catch(() => {});
+			_smoothResolveShot(rec, rec.name, identity, shooterEntity, rec.platform, payload.cmd, rewindAt, nowMono, { reach, detect: payload.detect }).catch(() => {});
 		}
 	});
 }
@@ -2413,12 +2414,14 @@ function _validateInterest(it) {
  * shooter), so a hitTest without an interest set has no candidate gate and is
  * rejected at registration. Either interest mode provides the gate: per-client
  * relevancy membership, or - under `interest.cells` - the shooter's cell
- * subscription. The shot ray (`shot`) is always required - it
- * defines the geometry the framework rewinds around and hands to the narrowphase.
+ * subscription. In ray mode, `shot` defines the geometry the framework rewinds
+ * around and hands to the narrowphase.
  * The narrowphase is either the declarative `hitbox` (circle/aabb, framework-
  * owned) or the `resolve` escape hatch (app-owned custom geometry); at least one
  * is required. `onHit` (the consequence - usually ctx.applyTo + ctx.emitEvent)
- * is always required. `position` defaults to interest.position.
+ * is required in ray mode. `resolveShot` replaces the whole geometry path for
+ * application-owned projectiles; it still uses interest for measured cadence.
+ * `position` defaults to interest.position.
  *
  * @param {any} ht
  * @param {{ position: Function } | undefined} interest the already-validated interest config
@@ -2432,17 +2435,24 @@ function _validateHitTest(ht, interest) {
 			'[svelte-realtime] live.smooth() hitTest requires interest - the relevancy set is the lag-compensation security gate (you cannot hit what was never replicated to the shooter)\n  See: https://svti.me/smooth'
 		);
 	}
-	if (typeof ht.onHit !== 'function') {
+	const custom = ht.resolveShot !== undefined;
+	if (custom && typeof ht.resolveShot !== 'function') {
+		throw new Error(realtimeErrorMessage(REALTIME_ERROR_IDS.SMOOTH_CUSTOM_SHOT_CONFIG, ' must be a function (ctx, command, timing) => ...'));
+	}
+	if (custom && ['shot', 'hitbox', 'resolve', 'onHit', 'broadphase', 'defenderAllowance'].some(key => ht[key] !== undefined)) {
+		throw new Error(realtimeErrorMessage(REALTIME_ERROR_IDS.SMOOTH_CUSTOM_SHOT_CONFIG, ' cannot be combined with ray geometry or onHit'));
+	}
+	if (!custom && typeof ht.onHit !== 'function') {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.onHit must be a function (ctx, target, info) => ...');
 	}
 	const shot = ht.shot;
-	if (!shot || typeof shot !== 'object' || shot.type !== 'ray') {
+	if (!custom && (!shot || typeof shot !== 'object' || shot.type !== 'ray')) {
 		throw new Error("[svelte-realtime] live.smooth() hitTest.shot must be a { type: 'ray', origin, dir, maxDist } object");
 	}
-	if (typeof shot.origin !== 'function' || typeof shot.dir !== 'function') {
+	if (!custom && (typeof shot.origin !== 'function' || typeof shot.dir !== 'function')) {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.shot.origin and shot.dir must be functions');
 	}
-	if (!(typeof shot.maxDist === 'number' && Number.isFinite(shot.maxDist) && shot.maxDist > 0)) {
+	if (!custom && !(typeof shot.maxDist === 'number' && Number.isFinite(shot.maxDist) && shot.maxDist > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.shot.maxDist must be a positive number');
 	}
 	const hasResolve = typeof ht.resolve === 'function';
@@ -2465,7 +2475,7 @@ function _validateHitTest(ht, interest) {
 			throw new Error("[svelte-realtime] live.smooth() hitTest.hitbox.shape must be 'circle' or 'aabb'");
 		}
 	}
-	if (!hitbox && !hasResolve) {
+	if (!custom && !hitbox && !hasResolve) {
 		throw new Error('[svelte-realtime] live.smooth() hitTest needs a hitbox (declarative) or a resolve function (custom narrowphase)');
 	}
 	let broadphase;
@@ -2528,7 +2538,8 @@ function _validateHitTest(ht, interest) {
 	}
 	return {
 		hitbox,
-		shot: { type: 'ray', origin: shot.origin, dir: shot.dir, maxDist: shot.maxDist },
+		shot: custom ? undefined : { type: 'ray', origin: shot.origin, dir: shot.dir, maxDist: shot.maxDist },
+		resolveShot: custom ? ht.resolveShot : undefined,
 		onHit: ht.onHit,
 		resolve: hasResolve ? ht.resolve : undefined,
 		broadphase,
@@ -2881,7 +2892,7 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 		// The rewind age is a pure duration the owner applies to its own present.
 		rewindAge = Math.max(0, now - rtStamp);
 		if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtMono, nowMono));
-		if (ht.detectionHook !== undefined && st) {
+		if ((ht.detectionHook !== undefined || ht.resolveShot !== undefined) && st) {
 			const minUp = st.tracker.minUplink();
 			detect = {
 				minUplink: minUp,
@@ -2896,6 +2907,74 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 }
 
 /**
+ * Run an application-owned projectile resolver after timing admission. Its
+ * command/event capabilities end with this callback, socket entity or tenure.
+ * @param {any} rec @param {string} name @param {string} shooterKey
+ * @param {any} shooterEntity @param {any} platform @param {any} command
+ * @param {number} rewindAt @param {number} nowMono @param {any} measurement
+ */
+async function _smoothResolveCustomShot(rec, name, shooterKey, shooterEntity, platform, command, rewindAt, nowMono, measurement) {
+	const ht = rec.cfg.hitTest;
+	const cluster = platform && platform.smooth;
+	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
+	const shooterSocket = shooterEntity.ws;
+	const valid = () => _smoothTopics.get(name) === rec && rec.authority.get(shooterKey) === shooterEntity && shooterEntity.ws === shooterSocket
+		&& (!cluster || (generation === rec.ownerGeneration && _smoothOwnerValid(rec, epoch)));
+	if (!valid()) return;
+	const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+	const reach = Math.min(ht.maxRewindMs, finite(measurement?.reach) ?? ht.maxRewindMs);
+	const detect = measurement?.detect;
+	const timing = Object.freeze({
+		rewindMs: Math.min(reach, Math.max(0, finite(nowMono - rewindAt) ?? 0)),
+		reach,
+		maxRewindMs: ht.maxRewindMs,
+		minUplink: finite(detect?.minUplink),
+		maxUplink: finite(detect?.maxUplink),
+		interpDelay: finite(detect?.interpDelay)
+	});
+	let active = true, armed = false;
+	const events = [];
+	const context = Object.freeze({
+		identity: shooterKey,
+		platform,
+		state: shooterEntity.state,
+		applyTo(key, cmd) {
+			if (!active || !valid() || typeof key !== 'string') return false;
+			if (!rec.authority.inject(key, cmd)) return false;
+			armed = true;
+			return true;
+		},
+		emitEvent(type, data, options) {
+			if (active && valid() && typeof type === 'string') events.push({ type, data, options });
+		}
+	});
+	try {
+		const result = ht.resolveShot(context, command, timing);
+		// A void callback ends its capability lifetime on return, before queued
+		// microtasks run. Await only an actual asynchronous result.
+		if (result && typeof result.then === 'function') await result;
+		active = false;
+		for (const event of events) {
+			if (!valid()) return;
+			const wire = {
+				type: event.type,
+				key: typeof event.options?.key === 'string' ? event.options.key : shooterKey,
+				data: event.data,
+				id: ++rec.shootEventSeq
+			};
+			_smoothPublish(rec, 'event', wire, undefined);
+			if (cluster && typeof cluster.relayBroadcast === 'function' && valid()) {
+				cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++, epoch);
+			}
+		}
+	} finally {
+		active = false;
+		// Injections already accepted before an application error still drain.
+		if (armed && valid()) _armSmoothTick(rec);
+	}
+}
+
+/**
  * Resolve a shot against the rewound world: gate candidates at `rewindAt`, run
  * the shot geometry from the shooter's CURRENT state, the broadphase + per-
  * candidate narrowphase, the nearest-first `onHit` consequence, and the hit-
@@ -2905,9 +2984,13 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
  * and supplies the platform whose `smooth` coordinator relays the hit events.
  * @param {any} rec @param {string} name @param {string} shooterKey
  * @param {any} shooterEntity @param {any} ctxPlatform @param {any} cmd @param {number} rewindAt @param {number} nowMono
+ * @param {{ reach: number, detect?: any }} [measurement]
  */
-export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono) {
+export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono, measurement) {
 	const ht = rec.cfg.hitTest;
+	if (ht.resolveShot !== undefined) {
+		return _smoothResolveCustomShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono, measurement);
+	}
 	const cluster = ctxPlatform && ctxPlatform.smooth;
 	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
 	const valid = () => _smoothTopics.get(name) === rec && (!cluster || (generation === rec.ownerGeneration && _smoothOwnerValid(rec, epoch)));
@@ -3661,7 +3744,7 @@ export const _smoothRegister = function smooth(config) {
 			}
 		}
 		const rewindAt = _smoothRewindAt(m.nowMono, m.reach, m.rewindAge);
-		await _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctx.platform, m.cmd, rewindAt, m.nowMono);
+		await _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctx.platform, m.cmd, rewindAt, m.nowMono, m);
 	});
 
 	return smoothExport;

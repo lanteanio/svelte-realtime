@@ -3875,7 +3875,7 @@ export interface SmoothConfig {
 	 * under `interest.cells`) is the candidate-security gate: you cannot hit what
 	 * was never replicated to the shooter. Off by default.
 	 */
-	hitTest?: SmoothHitTestConfig;
+	hitTest?: SmoothHitTestConfig | SmoothCustomShotConfig;
 	/**
 	 * Opt-in server logic hook, run on the ticking instance (the topic owner on a
 	 * cluster) once per authoritative tick, after the command drain and before the
@@ -4081,6 +4081,8 @@ export interface SmoothHitTarget {
  * security gate. Provide exactly one narrowphase (`hitbox` or `resolve`).
  */
 export interface SmoothHitTestConfig {
+	/** Full-shot custom resolution is a separate, mutually exclusive mode. */
+	resolveShot?: never;
 	/** The shot ray, resolved from the shooter's command and current state. */
 	shot: {
 		type: 'ray';
@@ -4171,6 +4173,45 @@ export interface SmoothHitTestConfig {
 		exposure: (shooterState: any, targetState: any) => boolean;
 		allowanceMs: number;
 	};
+}
+
+/** Durations admitted for one shot; never raw client timestamps. All values are milliseconds. */
+export interface SmoothShotTiming {
+	/** Requested view age clamped to reach and maxRewindMs; zero for missing/future/cold timing. */
+	readonly rewindMs: number;
+	/** Server-measured recent half-RTT plus interpolation, capped by maxRewindMs. */
+	readonly reach: number;
+	/** The configured defender-protection cap. */
+	readonly maxRewindMs: number;
+	/** Recent minimum half-round-trip sample, or null before measurement. */
+	readonly minUplink: number | null;
+	/** Recent maximum half-round-trip sample, or null before measurement. */
+	readonly maxUplink: number | null;
+	/** Server-observed interpolation allowance, or null when timing is unavailable. */
+	readonly interpDelay: number | null;
+}
+
+/** Custom resolver context. Read state; write through applyTo instead of mutating it. */
+export interface SmoothCustomShotCtx extends SmoothShotCtx {
+	readonly state: any;
+}
+
+/** Application-owned projectile resolution instead of the built-in ray/hit path. */
+export interface SmoothCustomShotConfig extends Pick<SmoothHitTestConfig, 'position' | 'maxRewindMs' | 'teleportThreshold' | 'detectionHook'> {
+	/**
+	 * Called once per admitted shoot(), including when there are no ray targets.
+	 * Own projectile travel, history and contact geometry here. applyTo/emitEvent
+	 * work only until this callback settles and while its entity/owner is current.
+	 * Timing is a frozen snapshot; normal apply/onMissing and injected commands do
+	 * not inherit it. May be async. Interest remains required for observed cadence.
+	 */
+	resolveShot: (ctx: SmoothCustomShotCtx, command: any, timing: SmoothShotTiming) => void | Promise<void>;
+	shot?: never;
+	hitbox?: never;
+	resolve?: never;
+	onHit?: never;
+	broadphase?: never;
+	defenderAllowance?: never;
 }
 
 /**

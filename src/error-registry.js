@@ -23,11 +23,25 @@ export const REALTIME_ERROR_IDS = Object.freeze({
 	ROOM_HISTORY_CAPTURE: 'REALTIME-ERR-ROOM-HISTORY-CAPTURE',
 	DOC_PERSIST: 'REALTIME-ERR-DOC-PERSIST',
 	LAZY_REGISTRATION: 'REALTIME-ERR-LAZY-REGISTRATION',
-	ADAPTER_VERSION_SKEW: 'REALTIME-ERR-ADAPTER-VERSION-SKEW'
+	ADAPTER_VERSION_SKEW: 'REALTIME-ERR-ADAPTER-VERSION-SKEW',
+	SMOOTH_CUSTOM_SHOT_CONFIG: 'REALTIME-ERR-SMOOTH-CUSTOM-SHOT-CONFIG'
 });
 
 /** @type {ReadonlyArray<Readonly<RealtimeErrorDefinition>>} */
 export const REALTIME_ERROR_REGISTRY = Object.freeze([
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.SMOOTH_CUSTOM_SHOT_CONFIG,
+		code: null,
+		event: 'smooth.custom-shot.invalid-config',
+		messagePrefix: '[svelte-realtime] live.smooth() hitTest.resolveShot',
+		cause: 'The custom shot resolver is not a function, or its declaration also contains built-in ray geometry or onHit.',
+		consequence: 'The smooth declaration throws during registration; no malformed resolver is installed.',
+		automaticRecovery: 'None; changing or retrying incoming shots cannot repair a declaration.',
+		nextAction: 'Provide resolveShot(ctx, command, timing) for application-owned projectiles, or use shot, hitbox/resolve and onHit for built-in ray resolution. Do not combine both modes.',
+		sources: Object.freeze(['src/server/smooth.js']),
+		anchor: 'realtime-err-smooth-custom-shot-config',
+		help: 'docs/errors.md#realtime-err-smooth-custom-shot-config'
+	}),
 	Object.freeze({
 		id: REALTIME_ERROR_IDS.INVALID_USER_ID,
 		code: 'INVALID_USER_ID',

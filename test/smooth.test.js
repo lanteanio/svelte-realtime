@@ -4139,4 +4139,48 @@ describe('live.smooth forwarded shot (cluster relayShoot / onShoot)', () => {
 		expect(sc.calls.relayShoot).toHaveLength(0);
 		expect(rt.calls.inject).toEqual([]);
 	});
+	it('forwards custom projectile measurements without resolving at the edge', async () => {
+		const resolveShot = vi.fn();
+		const { name } = declareShape({ tickMs: 20, interest: { radius: 1000, position: state => state }, hitTest: { resolveShot } });
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await edgeSync(sc, platform, ws, p);
+		await call(ws, platform, p.shoot, ['r1', { cmd: { id: 'cold' }, rt: Date.now() - 20 }]);
+		expect(sc.calls.relayShoot[0][3]).toMatchObject({ rewindAge: null });
+		const ownerT = Date.now();
+		sc.emit.ack(WT, 'u1', { id: 1, state: { x: 0, y: 0 }, t: ownerT });
+		await vi.advanceTimersByTimeAsync(40);
+		await call(ws, platform, p.shoot, ['r1', { cmd: { id: 'warm' }, rt: Date.now() - 30, ackT: ownerT }]);
+		const payload = sc.calls.relayShoot[1][3];
+		expect(Object.keys(payload).sort()).toEqual(['cmd', 'detect', 'reach', 'rewindAge']);
+		expect(payload).toMatchObject({ rewindAge: 30, detect: { minUplink: 20, maxUplink: 20, interpDelay: 40 } });
+		expect(resolveShot).not.toHaveBeenCalled();
+	});
+
+	it('keeps a forwarded custom projectile inside the narrower edge budget', async () => {
+		const resolveShot = vi.fn();
+		const { name } = declareShape({ tickMs: 20, interest: { radius: 1000, position: state => state }, hitTest: { resolveShot } });
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		sc.emit.shoot(WT, 'u1', 'B', { cmd: { projectile: true }, reach: 25, rewindAge: 80, detect: { minUplink: 9999, maxUplink: 9999, interpDelay: 9999 } });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(resolveShot).toHaveBeenCalledTimes(1);
+		expect(resolveShot.mock.calls[0][2]).toMatchObject({ rewindMs: 25, reach: 25, maxRewindMs: 100 });
+	});
+
+	it('rebases custom projectile durations on the owner and clamps forwarded reach', async () => {
+		const resolveShot = vi.fn();
+		const { name } = declareShape({ tickMs: 20, interest: { radius: 1000, position: state => state }, hitTest: { resolveShot } });
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		sc.emit.shoot(WT, 'u1', 'B', { cmd: { projectile: true }, reach: 9999, rewindAge: 9999, detect: { minUplink: 30, maxUplink: 40, interpDelay: 50 } });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(resolveShot).toHaveBeenCalledTimes(1);
+		expect(resolveShot.mock.calls[0][2]).toEqual({ rewindMs: 100, reach: 100, maxRewindMs: 100, minUplink: 30, maxUplink: 40, interpDelay: 50 });
+	});
+
 });

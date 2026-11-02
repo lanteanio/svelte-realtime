@@ -146,6 +146,41 @@ live.derived(() => ['source'], () => 1, { scopeKey: () => 7 });
 live.derived(() => ['source'], () => 1, { scopeKey: async () => 'scope' });
 // @ts-expect-error object scope keys are not supported
 live.derived(() => ['source'], () => 1, { scopeKey: () => ({ id: 'scope' }) });
+import type { SmoothCustomShotConfig, SmoothHitTestConfig, SmoothShotTiming } from '../src/server.js';
+const customProjectile: SmoothCustomShotConfig = {
+  maxRewindMs: 100,
+  resolveShot(ctx, command, timing) {
+    const identity: string = ctx.identity;
+    const bounded: SmoothShotTiming = timing;
+    const rewind: number = bounded.rewindMs;
+    const sample: number | null = bounded.maxUplink;
+    const accepted: boolean = ctx.applyTo(identity, command);
+    ctx.emitEvent('projectile', { rewind, sample, accepted });
+    // @ts-expect-error admitted timing snapshots are readonly
+    timing.reach = 999;
+  }
+};
+const customConfig: SmoothConfig = { ...config, hitTest: customProjectile };
+void customConfig;
+// @ts-expect-error custom and built-in ray consequences cannot be combined
+const mixedShot: SmoothCustomShotConfig = { resolveShot() {}, onHit() {} };
+// @ts-expect-error custom resolvers must be functions
+const invalidResolver: SmoothCustomShotConfig = { resolveShot: 5 };
+void mixedShot; void invalidResolver;
+const validRay: SmoothHitTestConfig = {
+  shot: { type: 'ray', origin: (_command, state) => state, dir: () => 0, maxDist: 100 },
+  hitbox: { shape: 'circle', radius: 5 },
+  onHit() {}
+};
+const mixedProjectileVariable = { ...validRay, resolveShot() {} };
+// @ts-expect-error predeclared ray configurations cannot carry a custom resolver
+const mixedRayVariable: SmoothHitTestConfig = mixedProjectileVariable;
+// @ts-expect-error union assignment rejects mixed modes beyond fresh object literals
+const mixedConfigVariable: SmoothConfig = { ...config, hitTest: mixedProjectileVariable };
+// @ts-expect-error public declaration rejects the same predeclared mixed configuration
+live.smooth({ ...config, hitTest: mixedProjectileVariable });
+void mixedRayVariable; void mixedConfigVariable;
+
 `;
 	const options = {
 		noEmit: true, strict: true, skipLibCheck: true,

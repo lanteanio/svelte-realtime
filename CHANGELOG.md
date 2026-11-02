@@ -137,6 +137,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `runCrdtConvergence` from `svelte-realtime/sim` executes genuine concurrent Yjs map, array and text edits through production `live.doc` handlers and native loopback WebSockets. It checks the authoritative server and each client against an independent operation ledger and each other under seeded reorder/duplicate delivery, with lost/corrupt-update controls, actual work counts and file/version provenance. The runner loads lazily and Yjs is a runtime dependency. See [CRDT convergence checks](docs/crdt-convergence.md) for the supported isolated-process composition.
 
+- `live.smooth({ hitTest: { resolveShot } })` supplies bounded shot timing to application-owned projectile simulation through the existing `shoot()` path. Callback-scoped command and event methods expire when the callback or ownership ends.
+
 - Aggregate erasure resets change keyed-noise generations. Optional `realtime({ aggregateGenerationStore })` restores shared durable generations before publication and uses one store-issued `live.forget(..., { aggregateErasure })` token across workers and retries, with bounded concurrent reset state and stale hydration/output fences.
 - Every client store exposes a readonly `.current` value. Svelte 5 reactions subscribe automatically, including state classes, mapped and combined stores, connection indicators and room sub-streams. Plain reads use cached state without wire subscription churn; the Svelte store contract and `rune()` alias remain available.
 
