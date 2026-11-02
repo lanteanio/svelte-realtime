@@ -59,10 +59,10 @@ cd my-app
 npm run dev
 ```
 
-For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command. The demo uses the immutable revision embedded in this CLI release, verified before installation or build; see [template provenance](docs/releasing.md#demo-template-provenance).
+For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
 <!-- compatibility-cli:end -->
 
-The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`. The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning.
+The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`. The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning. The demo uses the immutable revision embedded in this CLI release, verified before installation or build; see [template provenance](docs/releasing.md#demo-template-provenance).
 
 ---
 
