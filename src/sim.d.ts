@@ -1,6 +1,60 @@
 // Type declarations for the realtime deterministic simulation
 // (svelte-realtime/sim).
 
+export type CrdtConvergenceFault = 'ordered' | 'reorder-duplicate' | 'drop-update' | 'corrupt-update';
+
+export interface CrdtConvergenceOptions {
+	/** Reproduces transactions and delivery order. Default realtime-crdt-0. */
+	seed?: string | number;
+	/** Native peers, from 2 to 8. Default 3. */
+	replicas?: number;
+	/** Actual transactions, from replicas to 512. Default 48. */
+	operations?: number;
+	/** The final two modes deliberately break convergence and must return ok:false. */
+	fault?: CrdtConvergenceFault;
+}
+
+export interface CrdtConvergenceState {
+	map: Record<string, number>;
+	array: string[];
+	text: string;
+}
+
+export interface CrdtConvergenceResult {
+	ok: boolean;
+	seed: string;
+	fault: CrdtConvergenceFault;
+	executed: number;
+	replicas: number;
+	generatedUpdates: number;
+	updateRequests: number;
+	faulted: number;
+	/** Received server update frames before local duplicate/reorder injection. */
+	deliveries: number;
+	failures: Array<{ replica: number; invariant: 'map-state' | 'array-state' | 'text-state' | 'replica-equality' }>;
+	expected: CrdtConvergenceState;
+	/** The authoritative server first, then each client replica. */
+	actual: CrdtConvergenceState[];
+	trace: Array<{ index: number; outcome: 'sent' | 'dropped' | 'corrupted' }>;
+	digest: string;
+	provenance: {
+		node: string;
+		realtime: { name: string; version: string };
+		adapter: { name: string; version: string; entrySha256: string };
+		yjs: { name: string; version: string; entrySha256: string };
+		sources: Record<string, string>;
+	};
+}
+
+/**
+ * Run in an isolated Node >=22 process with the installed native adapter.
+ * Accepts only loopback WebSocket peers at a random per-run path; needs no external service.
+ * Executes genuine Yjs map, array and text edits through live.doc handlers.
+ * Checks each state against an independent operation ledger as well as peers.
+ * Await runs sequentially. Infrastructure failures reject, never count as a pass.
+ */
+export function runCrdtConvergence(config?: CrdtConvergenceOptions): Promise<CrdtConvergenceResult>;
+
 /** A connected sim client (a thin wrapper over the testing harness client). */
 export interface LiveSimClient {
 	call(path: string, ...args: any[]): Promise<any>;

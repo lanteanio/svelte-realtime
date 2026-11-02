@@ -27,6 +27,12 @@ import { isStaleRow } from './shared/merge.js';
 // here so the whole realtime DST surface is one import (svelte-realtime/sim).
 export { runSmoothSim, replaySmoothSim, runSmoothSimSwarm, DEFAULT_SMOOTH_SEED } from './server/sim-smooth.js';
 
+/** Run the native CRDT convergence oracle without loading its dependencies for other simulations. */
+export async function runCrdtConvergence(config) {
+	const runner = await import('./server/sim-crdt.js');
+	return runner.runCrdtConvergence(config);
+}
+
 /** A fixed default seed so the zero-config run is itself reproducible. */
 export const DEFAULT_LIVE_SEED = 'svti-live-sim-0';
 

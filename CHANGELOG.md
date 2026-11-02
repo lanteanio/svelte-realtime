@@ -14,6 +14,13 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: public CRDT convergence checks.** `runCrdtConvergence` drives concurrent Yjs documents through native document RPCs and checks their complete map, array and text state against an independent ledger under seeded ordered or duplicated delivery, while deliberate loss or corruption must fail, with actual execution counts and source provenance reported for every completed run.
+  - **Affects:** Maintainers and correctness-ledger consumers.
+  - **Action:** Run in an isolated Node process with the native adapter installed; see [CRDT convergence checks](docs/crdt-convergence.md).
+  - **Requires:** The `svelte-realtime/sim` export from this release.
+  - **Compatibility:** Additive API; drop/corrupt modes deliberately fail.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Added: structured error parameters.** `LiveError` and `RpcError` carry bounded JSON `params` and `details` through RPC calls, uploads, SSR hydration and the `createTestEnv` harness, so an application can render localized error text from the code and its parameters while every existing caller keeps reading the same source-English `message` it reads today.
   - **Affects:** Applications that show server errors to users or map error codes to their own messages.
   - **Action:** None; pass `params` or `details` when throwing to use them.
@@ -117,7 +124,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Compatibility:** Unchanged contract; metric totals now include refused calls.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: unchanged client rows stay silent.** A versioned CRUD row that the client already holds no longer notifies Node subscribers again. Native count gates also pin batching, encoding and replay work.
+- **Fixed: unchanged client rows stay silent.** A versioned CRUD row that the client already holds no longer notifies Node subscribers again, so repeated stale events avoid downstream work, while optimistic confirmations and accepted or refused queued writes still settle and native count gates pin batching, encoding and replay work.
   - **Affects:** Node subscribers to versioned streams and package maintainers.
   - **Action:** None.
   - **Requires:** The client from this release.
@@ -127,6 +134,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- `runCrdtConvergence` from `svelte-realtime/sim` executes genuine concurrent Yjs map, array and text edits through production `live.doc` handlers and native loopback WebSockets. It checks the authoritative server and each client against an independent operation ledger and each other under seeded reorder/duplicate delivery, with lost/corrupt-update controls, actual work counts and file/version provenance. The runner loads lazily and Yjs is a runtime dependency. See [CRDT convergence checks](docs/crdt-convergence.md) for the supported isolated-process composition.
 
 - Aggregate erasure resets change keyed-noise generations. Optional `realtime({ aggregateGenerationStore })` restores shared durable generations before publication and uses one store-issued `live.forget(..., { aggregateErasure })` token across workers and retries, with bounded concurrent reset state and stale hydration/output fences.
 - Every client store exposes a readonly `.current` value. Svelte 5 reactions subscribe automatically, including state classes, mapped and combined stores, connection indicators and room sub-streams. Plain reads use cached state without wire subscription churn; the Svelte store contract and `rune()` alias remain available.

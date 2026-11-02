@@ -5348,7 +5348,7 @@ Runtime control via `env.chaos`:
 | `env.chaos.dropped` | Running count of `platform.publish` drops. |
 | `env.chaos.resetCounter()` | Zero the counter without changing config. |
 
-Currently models the `drop-outbound` scenario only - `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior.
+Currently models the `drop-outbound` scenario only - `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior. For genuine concurrent Yjs map, array and text operations over native document RPCs, use [`runCrdtConvergence`](docs/crdt-convergence.md) from `svelte-realtime/sim` in an isolated Node process. Its seeded reorder/duplicate schedule checks an independent final-state ledger and reports actual execution counts and source provenance; drop/corrupt modes must fail.
 
 ### Direct ctx unit tests
 
