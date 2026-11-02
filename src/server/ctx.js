@@ -378,14 +378,7 @@ export function _getCtxHelpers(platform) {
 				try {
 					wireData = r.redact(wireData);
 				} catch (err) {
-					// A pattern-registry match is a heuristic: a throw signals the
-					// topic is likely not this stream's, so pass the (un-redacted)
-					// data through raw rather than dropping an unrelated publish -
-					// raw is the pre-registry cluster-transient baseline. Exact /
-					// subscribed / static matches stay strictly fail-closed.
-					if (r.failOpen) {
-						// wireData is unchanged (the throwing assignment did not land).
-					} else if (r.onError) {
+					if (r.onError) {
 						try { r.onError(err, null, topic); } catch {}
 						return false;
 					} else {
@@ -416,10 +409,10 @@ export function _getCtxHelpers(platform) {
 			// other instance answers an explicit false (a relay that predates the
 			// boolean answer returns nothing, and has relayed).
 			if ((c.ws.size ?? c.ws.length) === 0) {
-				// No local subscriber: the relay is the only delivery. Without one,
-				// publish as if no stream declared the topic, with the original data.
+				// No local subscriber: fall back to ordinary publish when the relay
+				// cannot deliver, preserving the transformed and redacted wire data.
 				if (platform.relayCoalesced && platform.relayCoalesced(topic, event, wireData, coalesceKey) !== false) return true;
-				return _plainPublish(topic, event, data, finalOptions);
+				return _plainPublish(topic, event, wireData, finalOptions);
 			}
 			const fullKey = topic + '\0' + (coalesceKey == null ? '' : coalesceKey);
 			let last = true;

@@ -1467,11 +1467,9 @@ const _REDACT_SEGMENT = '[^/:]+';
  * neighbour: `chat/typing` still matches `^chat/[^/:]+$`. That collateral is
  * prevented not by the regex but by the resolver: `_matchRedactPattern` skips
  * any topic another stream/channel declared explicitly (the OWNERSHIP guard over
- * `_declaredStreamTopic`), and a pattern match is FAIL-OPEN, so even an
- * UNDECLARED co-located publish is passed through raw (not dropped) when the
- * redactor throws on its foreign shape. So the regex bounds the match to one
- * segment; the resolver guarantees a matched-but-foreign topic is never
- * corrupted or dropped.
+ * `_declaredStreamTopic`). Other matching topics use the factory's redaction
+ * policy, including dropping data when its redactor throws. Unrelated factories
+ * must use distinct topic shapes; singleton siblings declare a string topic.
  *
  * Residuals (documented, narrow): (a) if a resolved id itself contains `/` or
  * `:` (`chat/a/b`), the never-subscribed cluster-transient publish to it is not
@@ -1480,8 +1478,7 @@ const _REDACT_SEGMENT = '[^/:]+';
  * in the pattern's namespace under a fields redactor has that field omitted
  * (non-destructive - the message is still delivered); (c) separators other than
  * `/` and `:` (e.g. `-`) are not segment boundaries, so a `chat-{room}` factory
- * beside a `chat-typing-5` topic relies on the ownership guard / fail-open, not
- * the regex, if that neighbour is declared / throws.
+ * beside a `chat-typing-5` topic relies on explicit ownership, not the regex.
  *
  * Adjacent placeholders collapse to one segment so the regex never contains a
  * quadratic `[^/:]+[^/:]+` (a long non-matching topic would otherwise burn CPU
@@ -1792,7 +1789,7 @@ live.stream = function stream(topic, initFn, options) {
 						'them distinct topic shapes. (A dev HMR reload of one stream also triggers this and is harmless.)'
 					);
 				}
-				_declaredRedactPattern.set(_pattern, { regex: _compiled.regex, prefix: _compiled.prefix, redact: _piiRedactor, onError: streamOnError || null, failOpen: true });
+				_declaredRedactPattern.set(_pattern, { regex: _compiled.regex, prefix: _compiled.prefix, redact: _piiRedactor, onError: streamOnError || null });
 			} else if (_IS_DEV) {
 				// The derived skeleton could not be compiled to a safe matcher: a
 				// ctx-reading or destructuring factory ('<dynamic>'), a constant, or a

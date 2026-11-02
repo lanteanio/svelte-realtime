@@ -72,12 +72,11 @@ export function _resolveCoalesce(topic) {
  * subscribed to still redacts (the cluster-transient case). The exact maps win
  * so a subscribed or static topic never pays the scan; the scan itself is over
  * the number of declared piiRedact factory streams (a handful), each gated by a
- * literal-prefix `startsWith` before the regex. A pattern entry carries
- * `failOpen: true` so a publish chokepoint knows the match was a heuristic and
- * must pass through raw (not drop) if the redactor throws.
+ * literal-prefix `startsWith` before the regex. Pattern matches enforce the
+ * same fail-closed policy as exact topic matches.
  *
  * @param {string} topic
- * @returns {{ redact: Function, onError: Function | null, failOpen?: boolean } | null}
+ * @returns {{ redact: Function, onError: Function | null } | null}
  */
 export function _resolveRedactor(topic) {
 	let e = _topicRedact.get(topic) || _declaredRedact.get(topic);
@@ -108,7 +107,7 @@ export function _resolveRedactor(topic) {
  * declaration wins: that topic keeps its own redaction contract (or none).
  *
  * @param {string} topic
- * @returns {{ redact: Function, onError: Function | null, failOpen?: boolean } | null}
+ * @returns {{ redact: Function, onError: Function | null } | null}
  */
 function _matchRedactPattern(topic) {
 	if (_declaredStreamTopic.has(topic)) return null;
@@ -128,12 +127,6 @@ function _matchRedactPattern(topic) {
  * set). Returns the redacted data, the original data (no redactor registered),
  * or `REDACT_DROP`.
  *
- * A pattern-registry match (`e.failOpen`) is the exception: the topic only
- * HEURISTICALLY belongs to the stream, so a throw there means the data is likely
- * not this stream's shape. Dropping it would silently lose an unrelated
- * publish, so the fail-open path passes the original data through raw - which is
- * exactly the pre-registry cluster-transient baseline, never worse.
- *
  * @param {string} topic
  * @param {any} data
  * @returns {any}
@@ -144,7 +137,6 @@ export function _redactOrDrop(topic, data) {
 	try {
 		return e.redact(data);
 	} catch (err) {
-		if (e.failOpen) return data;
 		if (e.onError) { try { e.onError(err, null, topic); } catch {} }
 		return REDACT_DROP;
 	}

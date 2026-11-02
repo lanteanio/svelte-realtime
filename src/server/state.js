@@ -160,22 +160,12 @@ export const _declaredRedact = new Map();
  * `^.+:.+$` matcher would redact unrelated streams app-wide), and each
  * placeholder matches ONE `/`- or `:`-delimited segment (`[^/:]+`).
  *
- * A pattern match is a HEURISTIC - it guesses a resolved topic belongs to this
- * factory stream. Two guards keep that guess from harming a co-located stream:
- * (1) the OWNERSHIP guard - a topic another stream/channel declared explicitly
- * (`_declaredStreamTopic`) is never pattern-matched, so a static `chat/typing`
- * beside a `chat/{room}` factory is untouched; and (2) the match is FAIL-OPEN
- * (`failOpen: true`) - if the redactor throws on a pattern-matched topic (a
- * strong signal the data is not this stream's shape), the publish passes through
- * RAW instead of being dropped. Raw is exactly the pre-fix cluster-transient
- * baseline, so enabling this registry never DROPS a publish that would otherwise
- * have been delivered. The narrow residual is an UNDECLARED ad-hoc publish to a
- * topic inside the pattern's namespace under a fields redactor (its field is
- * omitted - non-destructive, message still delivered), and two distinct factory
- * streams that derive the SAME skeleton (`chat/{room}` vs `chat/{thread}` -> both
- * `chat/{arg1}`: later-declared wins, dev-warned); give those distinct shapes.
+ * An explicitly declared static stream/channel topic takes precedence over a
+ * factory pattern. Other matching topics enforce the factory redactor, including
+ * fail-closed errors. Distinct dynamic streams need distinct topic shapes;
+ * singleton siblings declare string topics to establish their ownership.
  *
- * @type {Map<string, { regex: RegExp, prefix: string, redact: Function, onError: Function | null, failOpen: boolean }>}
+ * @type {Map<string, { regex: RegExp, prefix: string, redact: Function, onError: Function | null }>}
  */
 export const _declaredRedactPattern = new Map();
 
@@ -193,10 +183,8 @@ export const _declaredRedactPattern = new Map();
  * Only STRING topics are indexed: a topic factory is deliberately never invoked
  * at declaration (the framework calls it only at subscribe, with validated args),
  * so a co-located sibling written as a rare constant-returning factory
- * (`(ctx) => 'chat/typing'`) is a documented residual - its fields-redactor field
- * is omitted (non-destructive; message delivered), and a throwing redactor is
- * passed through raw by the fail-open path. Declare a co-located topic as a
- * string to get ownership protection.
+ * (`(ctx) => 'chat/typing'`) is subject to a matching factory redactor. Declare a
+ * co-located singleton topic as a string to establish ownership.
  *
  * @type {Set<string>}
  */

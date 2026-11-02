@@ -352,10 +352,11 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 		};
 	};
 
-	let savedCron;
-	beforeEach(() => { savedCron = state.cronPlatform; });
+	let savedCron, savedDerived;
+	beforeEach(() => { savedCron = state.cronPlatform; savedDerived = state.derivedPlatform; state.derivedPlatform = null; });
 	afterEach(() => {
 		state.cronPlatform = savedCron;
+		state.derivedPlatform = savedDerived;
 		setBus(null);
 		_resetRedactRegistry();
 		_resetReplayRouting();
@@ -544,8 +545,7 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 		expect(JSON.stringify(local.data)).not.toContain('111-22-3333');
 	});
 
-	// --- OWNERSHIP guard + FAIL-OPEN: a pattern match is a heuristic and must
-	// never strip or drop a co-located stream. ---
+	// Explicit topic ownership takes precedence over protected factory patterns.
 
 	const publishVia = (platform, topic, event, data) =>
 		_buildCtx(null, null, platform, _getCtxHelpers(platform), null).publish(topic, event, data);
@@ -586,24 +586,99 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 		expect(_resolveRedactor('room:42')).toBeTruthy();      // resolved dynamic instance -> covered
 	});
 
-	it('fail-open (ctx.publish): an UNDECLARED matching topic whose redactor throws passes through raw, not dropped', () => {
+	it('a throwing pattern redactor rejects ctx.publish before any egress', () => {
 		__register('pii/chat3', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ author: d.author.name }) }));
 		expect(_declaredStreamTopic.has('chat/adhoc')).toBe(false);   // not a declared stream
 		const entry = _resolveRedactor('chat/adhoc');
 		expect(entry).toBeTruthy();
-		expect(entry.failOpen).toBe(true);
 		const platform = mockPlatform();
-		const ok = publishVia(platform, 'chat/adhoc', 'set', { note: 'hi' });   // redactor throws on this shape
-		expect(ok).not.toBe(false);                                   // NOT dropped (fail-open)
-		expect(platform.published).toHaveLength(1);
-		expect(platform.published[0].data).toEqual({ note: 'hi' });   // raw pass-through, = pre-fix baseline
+		expect(() => publishVia(platform, 'chat/adhoc', 'set', { note: 'hi' })).toThrow();
+		expect(platform.published).toEqual([]);
 	});
 
-	it('fail-open (_redactOrDrop / deferred path): a throwing pattern match returns the data, not REDACT_DROP', () => {
+	it('a throwing pattern redactor drops deferred data', () => {
 		__register('pii/chat4', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ author: d.author.name }) }));
 		const out = _redactOrDrop('chat/adhoc', { note: 'hi' });
-		expect(out).not.toBe(REDACT_DROP);
-		expect(out).toEqual({ note: 'hi' });
+		expect(out).toBe(REDACT_DROP);
+	});
+
+	it.each(['publish', 'publishThrottled', 'publishDebounced', 'batch', 'out-of-band'])('fails closed through %s without losing a declared sibling', async method => {
+		const observed = vi.fn(() => { throw new Error('Observer failed'); });
+		__register('pii/closed', live.stream((ctx, room) => 'closed:' + room, async () => ({}), {
+			piiRedact: data => ({ text: data.author.text }), onError: observed
+		}));
+		__register('pii/sibling', live.channel('closed:typing'));
+		const platform = mockPlatform();
+		const writes = [];
+		platform.replay = { publish: (_p, topic, event, data) => { writes.push({ topic, event, data }); return true; } };
+		_registerReplayTopic('closed:private');
+		state.cronPlatform = platform;
+		const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+		const send = (topic, data) => {
+			if (method === 'batch') ctx.batch([{ topic, event: 'set', data }]);
+			else if (method === 'out-of-band') publish(topic, 'set', data);
+			else ctx[method](topic, 'set', data, 5);
+		};
+		send('closed:private', { ssn: 'NEVER-SEND' });
+		send('closed:typing', { typing: true });
+		await new Promise(resolve => setTimeout(resolve, 15));
+		expect(observed).toHaveBeenCalledTimes(1);
+		expect(writes).toEqual([]);
+		expect(platform.published.map(p => ({ topic: p.topic, data: p.data }))).toEqual([
+			{ topic: 'closed:typing', data: { typing: true } }
+		]);
+	});
+
+	it.each([false, true])('keeps tenant-scoped static stream ownership (declared first=%s)', declaredFirst => {
+		const sibling = () => __register('pii/static-owner', live.stream('owned:typing', async () => ({})));
+		if (declaredFirst) sibling();
+		__register('pii/tenant-pattern', live.stream((ctx, room) => 'owned:' + room, async () => ({}), {
+			piiRedact: () => { throw new Error('Wrong owner'); }
+		}));
+		if (!declaredFirst) sibling();
+		const platform = mockPlatform();
+		publishVia(platform, '@t/acme/owned:typing', 'set', { typing: true });
+		expect(platform.published[0].data).toEqual({ typing: true });
+	});
+
+	it.each(['absent', 'refused', 'plain'])('retains redaction when a coalesced relay is %s', relay => {
+		__register('pii/coalesced', live.stream('private-coalesced', async () => ({}), {
+			coalesceBy: data => data.id, piiRedact: data => ({ id: data.id })
+		}));
+		const platform = mockPlatform();
+		if (relay === 'refused') platform.relayCoalesced = () => false;
+		if (relay === 'plain') delete platform.sendCoalesced;
+		publishVia(platform, 'private-coalesced', 'set', { id: 1, ssn: 'NEVER-SEND' });
+		expect(platform.published[0].data).toEqual({ id: 1 });
+	});
+
+	it.each([false, true])('drops a failed member of a mixed batch (native=%s)', native => {
+		__register('pii/mixed', live.stream((ctx, id) => 'mixed:' + id, async () => null, {
+			piiRedact: () => { throw new Error('No projection'); }, onError() {}
+		}));
+		__register('pii/mixed-sibling', live.channel('mixed:typing'));
+		const platform = mockPlatform();
+		if (!native) delete platform.batch;
+		const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+		ctx.batch([
+			{ topic: 'mixed:room', event: 'set', data: { ssn: 'NEVER-SEND' } },
+			{ topic: 'mixed:typing', event: 'set', data: { typing: true } }
+		]);
+		expect(platform.published.map(p => p.data)).toEqual([{ typing: true }]);
+	});
+
+	it.each(['publishThrottled', 'publishDebounced'])('a failed %s does not replace a pending safe value', async method => {
+		__register('pii/pending', live.stream((ctx, id) => 'pending:' + id, async () => null, {
+			piiRedact: data => ({ text: data.author.text }), onError() {}
+		}));
+		const platform = mockPlatform();
+		const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+		ctx[method]('pending:room', 'set', { author: { text: 'first' } }, 5);
+		ctx[method]('pending:room', 'set', { author: { text: 'last' } }, 5);
+		ctx[method]('pending:room', 'set', { ssn: 'NEVER-SEND' }, 5);
+		await new Promise(resolve => setTimeout(resolve, 15));
+		expect(platform.published.map(p => p.data)).toEqual(method === 'publishThrottled'
+			? [{ text: 'first' }, { text: 'last' }] : [{ text: 'last' }]);
 	});
 
 	it('still redacts a real resolved instance when the redactor SUCCEEDS (the fix keeps working)', () => {
