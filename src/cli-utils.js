@@ -1,5 +1,6 @@
 // @ts-check
-import { win32 } from 'path';
+import { win32, join } from 'path';
+import { readFileSync } from 'fs';
 
 export const VALID_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const VALID_TEMPLATES = ['minimal', 'example', 'demo'];
@@ -15,6 +16,19 @@ export const SCAFFOLD_UWS_SPEC =
 // Pinned so generated configuration stays on the SvelteKit 3 scaffold this
 // release was verified against.
 export const SCAFFOLD_SV_SPEC = 'sv@1.1.1';
+
+/**
+ * Fetch one immutable template without checking out the remote default branch.
+ * No package-manager or template code runs until the detached identity matches.
+ * @param {{ repository: string, revision: string, dest: string, run: (file: string, args: string[], cwd?: string) => void, readHead?: (dest: string) => string }} input
+ */
+export function checkoutDemoTemplate({ repository, revision, dest, run, readHead = directory => readFileSync(join(directory, '.git', 'HEAD'), 'utf8').trim() }) {
+	if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('The demo template requires a full immutable commit ID');
+	run('git', ['clone', '--no-checkout', '--no-recurse-submodules', '--filter=blob:none', '--no-tags', repository, dest]);
+	run('git', ['fetch', '--no-tags', '--no-recurse-submodules', '--depth=1', 'origin', revision], dest);
+	run('git', ['checkout', '--detach', '--no-recurse-submodules', revision], dest);
+	if (readHead(dest) !== revision) throw new Error('The demo template checkout does not match its pinned commit');
+}
 
 // Owned once and embedded into the generated hooks file. Documentation and
 // transcript generation consume these fields instead of maintaining a second

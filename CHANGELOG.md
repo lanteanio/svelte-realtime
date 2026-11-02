@@ -258,6 +258,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- The demo scaffolder fetches an immutable source commit and verifies its detached identity before running installation, preflight or build commands. Moving the demo repository's default branch cannot change the template in an existing CLI release.
+
 - Oversized incoming RPC batches return one bounded envelope error and take one connection admission place before the configured `beforeExecute` rate gate. Rejection never walks or echoes their entries; valid batches retain per-call correlation.
 
 - Dynamic `piiRedact` pattern matches fail closed when a custom projection throws, before replay storage or cluster relay. Explicit string-topic siblings retain their own policy; unrelated factories and ad-hoc publishers must use non-overlapping namespaces. Coalesced publishes retain redacted data when the relay falls back to ordinary publication.

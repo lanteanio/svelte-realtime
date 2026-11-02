@@ -46,6 +46,23 @@ This evidence is collected for the release decision; the existence of these
 instructions does not establish that the current candidate is ready for
 `latest`. Keep the evidence linked to the immutable candidate identity.
 
+## Demo template provenance
+
+The CLI's `DEMO_REPO` and full 40-character `DEMO_COMMIT` in `src/cli.js` bind
+the demo source to the npm artifact. Its current source is
+[796a3152286cedb96af228cbc58cbe1e26370415](https://github.com/lanteanio/svelte-realtime-demo/commit/796a3152286cedb96af228cbc58cbe1e26370415).
+The fetch performs no default-branch checkout, detaches at that exact commit,
+and compares the resulting HEAD before any package-manager lifecycle, preflight,
+or build code runs. A missing or mismatched commit stops scaffolding.
+
+For each release, retain the pin or choose a publicly fetchable full commit ID
+whose template supports the scaffold dependency tuple. Review its changes, update
+`DEMO_COMMIT` and this source link together, run `test/demo-template.test.js` and
+the CLI tests, then create a fresh `--template demo` app and complete its native
+preflight and production build. Record that exact template identity with the
+release evidence. A branch or movable tag cannot replace the commit ID, and
+fetch failure must never fall back to the remote default branch.
+
 ## Branch roles and freeze
 
 - `dev` integrates work and supplies `next` prereleases.

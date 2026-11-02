@@ -26,6 +26,7 @@ import {
 
 const _here = dirname(fileURLToPath(import.meta.url));
 const _cliSrc = readFileSync(resolve(_here, '..', 'src', 'cli.js'), 'utf8');
+const _cliUtilsSrc = readFileSync(resolve(_here, '..', 'src', 'cli-utils.js'), 'utf8');
 
 // - parseArgs (in-process) ---------------------------------------------------
 
@@ -251,7 +252,7 @@ describe('newcomer scaffold contract', () => {
 		expect(success).toBeGreaterThan(verify);
 	});
 
-	it('does not install the mutable demo manifest before pinning the audited tuple', () => {
+	it('verifies the immutable demo template before installing its dependency tuple', () => {
 		const demo = _cliSrc.slice(
 			_cliSrc.indexOf("if (template === 'demo')"),
 			_cliSrc.indexOf("if (template !== 'demo')")
@@ -259,6 +260,9 @@ describe('newcomer scaffold contract', () => {
 		expect(demo).not.toContain("run(agent, ['install'], dest)");
 		expect(demo.indexOf('SCAFFOLD_ADAPTER_SPEC')).toBeGreaterThan(0);
 		expect(demo.indexOf('SCAFFOLD_UWS_SPEC')).toBeGreaterThan(0);
+		expect(demo.indexOf('checkoutDemoTemplate({')).toBeLessThan(demo.indexOf('SCAFFOLD_ADAPTER_SPEC'));
+		expect(demo).toContain('revision: DEMO_COMMIT');
+		expect(_cliSrc).toMatch(/const DEMO_COMMIT = '[a-f0-9]{40}';/);
 	});
 });
 
@@ -369,7 +373,7 @@ describe('run() helper', () => {
 	});
 
 	it('git clone is invoked with arg array, not interpolated template', () => {
-		expect(_cliSrc).toMatch(/run\(\s*'git'\s*,\s*\[\s*'clone'/);
+		expect(_cliUtilsSrc).toMatch(/run\(\s*'git'\s*,\s*\[\s*'clone'/);
 	});
 
 	it('sv create is invoked with arg array including the validated name as a separate element', () => {
@@ -482,7 +486,7 @@ describe('Windows command resolution', () => {
 	});
 
 	it('accepts every literal and scaffold spec run() is given in cli.js', () => {
-		const calls = _cliSrc.split('\n').filter((line) => /\brun\(/.test(line) && !/function\s+run\s*\(/.test(line));
+		const calls = (_cliSrc + '\n' + _cliUtilsSrc).split('\n').filter((line) => /\brun\(/.test(line) && !/function\s+run\s*\(/.test(line));
 		const literals = calls.flatMap((line) => [...line.matchAll(/'([^']*)'/g)].map((m) => m[1]));
 		const demo = /const DEMO_REPO = '([^']+)'/.exec(_cliSrc)[1];
 		const specs = [SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC, SCAFFOLD_UWS_SPEC, SCAFFOLD_SV_SPEC];

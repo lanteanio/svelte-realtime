@@ -18,6 +18,7 @@ const {
 	renderScaffoldAuthWarningStatement,
 	renderViteConfig,
 	runScaffoldVerification,
+	checkoutDemoTemplate,
 	SCAFFOLD_ADAPTER_SPEC,
 	SCAFFOLD_REALTIME_SPEC,
 	SCAFFOLD_SV_SPEC,
@@ -30,6 +31,7 @@ const {
 const IS_WIN = process.platform === 'win32';
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
+const DEMO_COMMIT = '796a3152286cedb96af228cbc58cbe1e26370415';
 const DEFAULT_PROJECT_NAME = 'my-app';
 
 // The scaffolded upgrade() hook is intentionally permissive so the first
@@ -151,8 +153,14 @@ const agent = detectAgent(process.env.npm_config_user_agent);
 const add = agent === 'npm' ? 'install' : 'add';
 
 if (template === 'demo') {
-	p.log.step('Cloning demo repository');
-	run('git', ['clone', DEMO_REPO, name]);
+	p.log.step('Fetching demo template');
+	try {
+		checkoutDemoTemplate({ repository: DEMO_REPO, revision: DEMO_COMMIT, dest, run });
+	} catch (error) {
+		p.cancel('Demo template verification failed: ' + (error instanceof Error ? error.message : String(error)));
+		process.exit(1);
+	}
+	p.log.info('Demo template revision: ' + DEMO_COMMIT);
 
 	p.log.step('Installing the audited dependency tuple');
 	run(agent, [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
