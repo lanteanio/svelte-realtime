@@ -1357,9 +1357,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * callers handle the publish.
 	 *
 	 * @param {{ event: string, data: any, seq?: number }} envelope
-	 * @returns {boolean} true if currentValue was replaced with a fresh
+	 * @returns {boolean | null} null when neither the value nor queue changed;
+	 *   true if currentValue was replaced with a fresh
 	 *   reference (caller can skip the defensive `.slice()` before
-	 *   publish). Always false in queue mode - caller should recompute
+	 *   publish). False when queue display may have changed - recompute
 	 *   the display via `_recomputeDisplay()` instead.
 	 */
 	function _applyMerge(envelope) {
@@ -1385,12 +1386,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			if (result.modified) _dirty = true;
 			// A crud row dropped as stale is not the write a pending change
 			// is waiting for, nor one that supersedes it.
-			if (result.modified || merge !== 'crud') _absorbCheck(envelope);
+			else if (merge === 'crud') return null;
+			_absorbCheck(envelope);
 			return false;
 		}
 		const result = _applyMergeFn(currentValue, _index, envelope);
 		currentValue = result.value;
-		if (result.modified) _dirty = true;
+		if (!result.modified) return null;
+		_dirty = true;
 		return result.replaced;
 	}
 
@@ -1745,6 +1748,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			}
 		} else {
 			const replaced = _applyMerge(envelope);
+			if (replaced === null) return;
 			if (_optimisticQueue.length > 0) {
 				_recomputeDisplay();
 			} else {

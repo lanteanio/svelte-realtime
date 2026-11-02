@@ -94,6 +94,28 @@ Cursor merge and `live.smooth` prediction are outside it: cursor frames are
 last-sample telemetry with no optimistic path, and smooth prediction reconciles
 against authoritative ticks rather than this queue (`test/client-smooth.test.js`).
 
+## Deterministic I/O budgets
+
+The deterministic I/O gates run with `npx vitest run test/io-budget.adapter.test.js`.
+They drive real RPC handlers and native WebSocket subscribers through the adapter,
+counting native batch calls, entries, payload `toJSON` calls, recipient frames,
+derived recomputations, client value notifications and replayed mutations.
+One or six explicit publishes in a turn use one batch, with one entry and payload
+serialization per publish. Six subscribers keep the same serialization count;
+recipient deliveries grow with the subscriber count. Derived recomputation costs
+one call per sequential source change, independent of subscribers. A client row
+with an unchanged `rowVersion` emits no value notification, while replay returns
+only entries after the held cursor. The detector rejects zero-work fixtures and
+deliberately split batches, per-recipient encoding and disabled row ordering.
+
+These are event and value boundaries: an explicit `publish` or `flag.set` still
+sends its event even if its payload equals a worker's cached value. A cached
+worker cannot prove that another worker holds the same state, and a caller may
+mutate an object before publishing its existing reference.
+
+> lowering a budget is welcome any time; RAISING one is a design decision that
+> needs a recorded reason, not a number edit.
+
 ## Formatting
 
 `.editorconfig` is the formatting contract. Preserve the surrounding indentation

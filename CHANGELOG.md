@@ -117,6 +117,13 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Compatibility:** Unchanged contract; metric totals now include refused calls.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: unchanged client rows stay silent.** A versioned CRUD row that the client already holds no longer notifies Node subscribers again. Native count gates also pin batching, encoding and replay work.
+  - **Affects:** Node subscribers to versioned streams and package maintainers.
+  - **Action:** None.
+  - **Requires:** The client from this release.
+  - **Compatibility:** Matches browser behavior; optimistic settlement is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -263,6 +270,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Oversized incoming RPC batches return one bounded envelope error and take one connection admission place before the configured `beforeExecute` rate gate. Rejection never walks or echoes their entries, then ends the malformed connection with policy close `1008`; its outstanding calls fail promptly even for clients that ignore batch-level notices. Valid batches retain per-call correlation. Custom transports must respect the 50-call bound.
 
 - Dynamic `piiRedact` pattern matches fail closed when a custom projection throws, before replay storage or cluster relay. Explicit string-topic siblings retain their own policy; unrelated factories and ad-hoc publishers must use non-overlapping namespaces. Coalesced publishes retain redacted data when the relay falls back to ordinary publication.
+
+- Versioned CRUD events that do not change client state emit no value notification outside the browser animation-frame path. Pending optimistic writes retain their normal confirmation and settlement behavior. Native I/O count gates pin batch entries, payload serialization, derived recomputation and cursor recovery independently of subscriber count.
 
 - Smoothed topic owners stop accepting commands and emitting frames when their lease expires, including after event-loop stalls, slow application callbacks, and late renewal replies. Base and cell receivers share an epoch watermark, so older owners cannot reopen delivery by alternating instance identities.
 
