@@ -286,6 +286,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The degradation notice fixture keeps an unavailable action focusable and refuses pointer, keyboard, and form submissions until recovery. Its guidance preserves focus when availability changes.
 
+- Development SSR reloads re-register live handlers when route changes replace the module graph. Deleted live files stay unregistered, and guards added during reload are enforced before handlers run. Calls that cross a handler or guard change fail with `UNAVAILABLE` before stale subscription work or results can escape. A completed batch stream whose result is refused releases its subscription ownership while keeping independently accepted subscriptions to the same topic. Failed live-file saves restore pending background declarations along with loaded handlers, and a broken module after a full SSR reload refuses calls until repaired.
+
 - Smoothed topic owners stop accepting commands and emitting frames when their lease expires, including after event-loop stalls, slow application callbacks, and late renewal replies. Base and cell receivers share an epoch watermark, so older owners cannot reopen delivery by alternating instance identities.
 
 - Live-module reloads use Vite's settled source read before claiming the edit, generating declarations or clearing handlers. Watcher additions give an empty write a bounded chance to finish, and the registry and client stubs share that source, so a save observed during truncation no longer reports success with missing handlers. Deliberately empty files still remove their exports; unreadable files leave the previous registry intact and can be retried.

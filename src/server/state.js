@@ -327,6 +327,8 @@ export const _watchedTopics = new Set();
  * -------------------------------------------------------------------------- */
 
 export const state = {
+	/** Revision of the handler and guard registrations used by in-flight calls. */
+	registrationRevision: 0,
 	/**
 	 * Global handler for server-side errors (cron, effects, derived, webhook
 	 * delivery, dispatch). Set via onError(); null until configured.

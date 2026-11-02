@@ -2,6 +2,7 @@
 import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { monotonicNow } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _assertRegistrationRevision } from './registration.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
 import { state } from './state.js';
@@ -867,6 +868,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		await _resolveAllLazy();
 		if (upload.phase === 'settled') return;
 
+		const registrationRevision = state.registrationRevision;
 		const fn = await _resolveRegistryEntry(path);
 		if (upload.phase === 'settled') return;
 
@@ -908,6 +910,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
+			_assertRegistrationRevision(registrationRevision);
 
 			if (upload.phase === 'settled') return;
 			// Keep pending caps active while authorization is unresolved. Handler
@@ -984,8 +987,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				if (upload.phase === 'settled') return;
 			}
 
+			_assertRegistrationRevision(registrationRevision);
 			handlerStarted = true;
 			const result = await fn(ctx, ...args);
+			_assertRegistrationRevision(registrationRevision);
 			if (upload.phase !== 'settled') {
 				upload.phase = 'settled';
 				answeredByServer = true;

@@ -82,7 +82,7 @@ import { _getCtxHelpers, _buildCtx, _rerunCtx, installCtx } from './server/ctx.j
 import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggregateState, _copyAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
-import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
+import { _resolveAllLazy, _isLazyResolved, _resetLazy, _snapshotLazyQueue, installLazy, _setAfterLazyResolve } from './server/lazy.js';
 import { validateFunctionTimeout } from './shared/function-timeout.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
@@ -1112,6 +1112,9 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 	// A scope revoke can drain this pending subscription while its loader is
 	// awaiting. Its eventual failure must not unsubscribe or decrement twice.
 	if (!topicMap?.get(topic)?.some((owner) => owner.fn === fn && owner.count > 0)) return;
+	// Keep the owner after its last reference is removed from the map so a
+	// public subscribe hook that already attached receives its final cleanup.
+	const publicOwner = topicMap.get(topic).find((owner) => owner.fn === fn);
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 	let removedFromTopic = false;
 	if (topicMap) {
@@ -1184,7 +1187,6 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 				});
 		}).catch(() => {});
 	}
-	const publicOwner = _wsStreamOwners.get(ws)?.get(topic)?.find((owner) => owner.fn === fn);
 	if (publicOwner?.count === 0 && publicOwner.publicAttached > 0 && /** @type {any} */ (fn).__onUnsubscribePublic && ctx) {
 		publicOwner.publicAttached--;
 		_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (fn).__onUnsubscribePublic(ctx, topic, current ?? remainingSubscribers)).catch(() => {});
@@ -1217,6 +1219,7 @@ function _propagateWrapperPath(fn, path) {
  * @param {string} [modulePath] - Explicit module path for guard resolution (used by room sub-handlers)
  */
 export function __register(path, fn, modulePath) {
+	state.registrationRevision++;
 	if (/** @type {any} */ (fn).__lazy) _keepLoaded(registry.get(path), fn);
 	registry.set(path, fn);
 	if (/** @type {any} */ (fn).__lazy) {
@@ -1273,6 +1276,7 @@ async function _resolveRegistryEntry(path) {
 	if (!/** @type {any} */ (entry).__lazy) return entry;
 	const hint = /** @type {any} */ (entry).__modulePathHint;
 	const { fn, fallback } = await _loadLazy(entry);
+	if (registry.get(path) !== entry) return _resolveRegistryEntry(path);
 	// The module still fails to load: serve the loaded entry, keep the loader.
 	if (fallback) return fn;
 	if (!fn) {
@@ -1297,9 +1301,15 @@ async function _resolveRegistryEntry(path) {
  * @param {Function} fn
  */
 export function __registerGuard(modulePath, fn) {
+	state.registrationRevision++;
 	if (/** @type {any} */ (fn).__lazy) _keepLoaded(guards.get(modulePath), fn);
 	guards.set(modulePath, fn);
 }
+
+// Resolved guard absence is part of a loaded module's binding. Retain it so
+// a later failed development import can fall back with that module's handler.
+// Callers still receive null and run no extra guard on the loaded path.
+const _noModuleGuard = () => {};
 
 /**
  * Resolve a lazy guard entry.
@@ -1308,12 +1318,16 @@ export function __registerGuard(modulePath, fn) {
  */
 async function _resolveGuard(modulePath) {
 	const entry = guards.get(modulePath);
-	if (!entry) return null;
+	if (!entry || entry === _noModuleGuard) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
+	const registrationRevision = state.registrationRevision;
 	const { fn, fallback } = await _loadLazy(entry);
-	if (fallback) return fn;
+	// Another call can resolve this same lazy guard while we await it. Only
+	// a changed registration invalidates the binding held by this call.
+	if (guards.get(modulePath) !== entry && state.registrationRevision !== registrationRevision) throw new LiveError('UNAVAILABLE', 'Live handlers changed; retry the request');
+	if (fallback) return fn === _noModuleGuard ? null : fn;
 	if (!fn) {
-		guards.delete(modulePath);
+		guards.set(modulePath, _noModuleGuard);
 		return null;
 	}
 	guards.set(modulePath, fn);
@@ -3792,6 +3806,8 @@ export function __registerRoomActions(basePath, loader) {
 	_lazyQueue.push({ type: 'room-actions', path: basePath, loader });
 }
 
+let _hmrGeneration = 0;
+
 /**
  * Snapshot and clear all registries for HMR. Returns a snapshot that can be
  * passed to `_restoreHmr()` if the re-import fails, so old handlers survive
@@ -3799,7 +3815,12 @@ export function __registerRoomActions(basePath, loader) {
  * @returns {object}
  */
 export function _prepareHmr() {
+	state.registrationRevision++;
 	const snap = {
+		lazyQueue: _snapshotLazyQueue(),
+		hasLazyReactive: _hasLazyReactive,
+		hasDynamicDerived: _hasDynamicDerived,
+		generation: ++_hmrGeneration,
 		registry: new Map(registry),
 		guards: new Map(guards),
 		cron: new Map(cronRegistry),
@@ -3903,7 +3924,11 @@ export function _prepareHmr() {
  * @param {object} snap
  */
 export function _restoreHmr(snap) {
+	if (snap.generation !== undefined && snap.generation !== _hmrGeneration) return;
 	_prepareHmr();
+	_lazyQueue.push(...(snap.lazyQueue || []));
+	_hasLazyReactive = snap.hasLazyReactive || false;
+	_hasDynamicDerived = snap.hasDynamicDerived || false;
 	_declaredCoalesce.clear();
 	_declaredCoalescePattern.clear();
 	for (const [key, value] of snap.declaredCoalesce || []) _declaredCoalesce.set(key, value);
@@ -3918,7 +3943,7 @@ export function _restoreHmr(snap) {
 
 	// Restore cron
 	for (const [k, v] of snap.cron) cronRegistry.set(k, v);
-	if (snap.hadCron && cronRegistry.size > 0) _ensureCronInterval();
+	if (snap.hadCron && (cronRegistry.size > 0 || _lazyQueue.some(entry => entry.type === 'cron'))) _ensureCronInterval();
 
 	// Restore derived (rebuild source maps from entries)
 	for (const [k, v] of snap.derived) {

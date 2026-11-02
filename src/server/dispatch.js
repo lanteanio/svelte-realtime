@@ -9,6 +9,7 @@ import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { diagnosticErrorMessage, emitOperationalEvent, formatDiagnostic } from '../shared/diagnostic.js';
 import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _assertRegistrationRevision } from './registration.js';
 import { _bindResponseFence, _fenceResponse, _responseFenceFailure } from './response-fence.js';
 import { _subscribeTracked } from './membership.js';
 import { copyErrorMetadata } from '../shared/error-metadata.js';
@@ -833,9 +834,12 @@ async function _executeBatch(ws, msg, platform, options) {
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
+	const registrationRevision = state.registrationRevision;
 
 	/** @type {Array<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>} */
 	let results;
+	/** @type {Array<{ rollbackStream?: () => void }> | undefined} */
+	let streamTracks;
 
 	if (sequential) {
 		results = new Array(batch.length);
@@ -848,21 +852,33 @@ async function _executeBatch(ws, msg, platform, options) {
 			}
 			// An entry a middleware answered early may still be running; the
 			// next entry starts only after it ends.
-			/** @type {{ pending?: Promise<void> }} */
+			/** @type {{ pending?: Promise<void>, rollbackStream?: () => void }} */
 			const track = {};
+			if (call.stream) (streamTracks ||= [])[i] = track;
 			results[i] = await _executeSingleRpc(ws, call, platform, options, track);
 			if (track.pending) await track.pending;
 		}
 	} else {
-		results = await Promise.all(batch.map((call) => {
+		results = await Promise.all(batch.map((call, i) => {
 			if (!call || typeof call.rpc !== 'string' || typeof call.id !== 'string') {
 				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _batchMetricsStart);
 				return { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id', requestId: _operationRequestId(call?.id) };
 			}
-			return _executeSingleRpc(ws, call, platform, options);
+			const track = call.stream ? {} : undefined;
+			if (track) (streamTracks ||= [])[i] = track;
+			return _executeSingleRpc(ws, call, platform, options, track);
 		}));
 	}
 
+	if (state.registrationRevision !== registrationRevision) {
+		results = results.map((result, i) => {
+			if (result.ok !== true) return result;
+			// The client never accepts this stream result. Give up only the
+			// ownership this entry admitted; another call can keep the topic.
+			streamTracks?.[i]?.rollbackStream?.();
+			return { id: result.id, ok: false, code: 'UNAVAILABLE', error: 'Live handlers changed; retry the request', requestId: result.requestId };
+		});
+	}
 	_respond(ws, platform, '__batch', { batch: results }, undefined,
 		state.metricsInstruments ? batch.map(call => typeof call?.id === 'string' ? call.rpc : null) : undefined);
 }
@@ -980,13 +996,15 @@ function _replayFilledTo(missed, clientSeq, currentSeq, merge) {
  * @param {{ topic: any, claimTopic?: any, cancelled?: boolean, validate?: () => void, isActive?: () => boolean }} subscribedRef
  * @returns {Promise<any>}
  */
-async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
-	const result = await _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef);
+async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef, registrationRevision) {
+	const result = await _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef, registrationRevision);
+	_assertRegistrationRevision(registrationRevision);
 	subscribedRef.loaded = result?.ok === true && result.gated !== true;
 	return result;
 }
 
-async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef) {
+async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscribedRef, registrationRevision) {
+	_assertRegistrationRevision(registrationRevision);
 	const { id, seq: clientSeq, schemaVersion: clientSchemaVersion } = msg;
 
 	// Validate args BEFORE topic resolution - prevents topic injection
@@ -1016,6 +1034,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		}
 	}
 
+	_assertRegistrationRevision(registrationRevision);
 	const rawTopic = /** @type {any} */ (fn).__streamTopic;
 	let topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
 	// The reserved-prefix guard runs on the LOGICAL topic (an app cannot subscribe
@@ -1102,6 +1121,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
 
+	_assertRegistrationRevision(registrationRevision);
 	const classOfService = /** @type {any} */ (fn).__classOfService;
 	if (classOfService && state.admissionConfig) {
 		try {
@@ -1149,7 +1169,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 			for (;;) {
 				const releases = _streamReleaseGeneration(ws);
 				_subscribeDenial = await platform.subscribe(ws, topic);
-				if (_subscribeDenial || _streamReleaseGeneration(ws) === releases) break;
+				if (_subscribeDenial || _streamReleaseGeneration(ws) === releases || state.registrationRevision !== registrationRevision) break;
 			}
 		} else {
 			_subscribeDenial = _subscribeTracked(ws, topic);
@@ -1160,6 +1180,13 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
 	endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, !_subscribeDenial, _admission);
+	if (state.registrationRevision !== registrationRevision) {
+		if (!_subscribeDenial) {
+			subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
+			subscribedRef.topic = topic;
+		}
+		_assertRegistrationRevision(registrationRevision);
+	}
 	if (_subscribeDenial === 'CONNECTION_CLOSED') {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
@@ -1191,6 +1218,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	// the adapter's subscribe hook denies from ever learning the resolved
 	// (possibly tenant-scoped) topic. Sent only when the request opts in, so an
 	// older client never sees a non-ok frame.
+	_assertRegistrationRevision(registrationRevision);
 	if (msg.attach === true && typeof topic === 'string') {
 		_respond(ws, platform, id, { attach: true, topic });
 	}
@@ -1241,6 +1269,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		_declaredRedact.set(topic, { redact: _dynRedactor, onError: /** @type {any} */ (fn).__streamOnError || null });
 	}
 
+	_assertRegistrationRevision(registrationRevision);
 	if (/** @type {any} */ (fn).__onSubscribe) {
 		// `streamArgs` (3rd arg) lets a room enumeration registry capture the
 		// room-identifying args of the topic that just gained a subscriber; the
@@ -1265,6 +1294,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 			}
 		}
 	}
+	_assertRegistrationRevision(registrationRevision);
 	// Settle both claim barriers this subscribe opened on the happy path: a no-op
 	// when the data-join already resolved with the claimed owner / roster entry,
 	// otherwise a null resolution so the paired :owner / :presence loader (a
@@ -1295,6 +1325,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	// subscribe, so a reload can run under any current subscriber, including
 	// one that resumed from a replay or a delta without running the loader.
 	const armReloads = () => {
+		_assertRegistrationRevision(registrationRevision);
 		// A close, unsubscribe or revoke during a resume await already drained
 		// this subscription; binding it now would arm reloads for a dead socket.
 		if ((subscribedRef.isActive && !subscribedRef.isActive()) || !_topicWsCounts.get(topic)?.has(ws)) return;
@@ -1308,11 +1339,13 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
 		try {
 			const currentVersion = await deltaOpts.version();
+			_assertRegistrationRevision(registrationRevision);
 			if (currentVersion === clientVersion) {
 				armReloads();
 				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
 			}
 			let diff = await deltaOpts.diff(clientVersion);
+			_assertRegistrationRevision(registrationRevision);
 			if (diff !== null && diff !== undefined) {
 				// piiRedact on the user-bridged delta egress (this diff is computed
 				// fresh by the app, not served from the redacted replay buffer). A
@@ -1335,7 +1368,9 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 			// The current sequence is read first: everything published up to it
 			// has to come back from the buffer for the replay to fill the gap.
 			const currentSeq = await platform.replay.seq(topic);
+			_assertRegistrationRevision(registrationRevision);
 			const missed = await platform.replay.since(topic, clientSeq);
+			_assertRegistrationRevision(registrationRevision);
 			const filledTo = _replayFilledTo(missed, clientSeq, currentSeq, streamOpts.merge);
 			if (filledTo !== null) {
 				armReloads();
@@ -1358,8 +1393,10 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	if (replayOpts && platform.replay && typeof clientSeq === 'undefined' && /** @type {any} */ (fn).__isFlag) {
 		try {
 			const missed = await platform.replay.since(topic, 0);
+			_assertRegistrationRevision(registrationRevision);
 			if (Array.isArray(missed) && missed.length > 0) {
 				const currentSeq = await platform.replay.seq(topic);
+			_assertRegistrationRevision(registrationRevision);
 				armReloads();
 				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}
@@ -1370,6 +1407,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	if (!resumesFromBuffer && deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
 		try {
 			let events = await deltaOpts.fromSeq(clientSeq);
+			_assertRegistrationRevision(registrationRevision);
 			if (Array.isArray(events)) {
 				// piiRedact on the user-bridged seq-delta egress (these events come
 				// from the app's fromSeq bridge, not the redacted replay buffer).
@@ -1402,6 +1440,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 
 	let result;
 	try {
+		_assertRegistrationRevision(registrationRevision);
 		result = await fn(ctx, ...streamArgs);
 	} catch (err) {
 		const streamOnError = /** @type {any} */ (fn).__streamOnError;
@@ -1538,6 +1577,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
+	const registrationRevision = state.registrationRevision;
 
 	const args = rawArgs || [];
 	let fn = registry.get(path);
@@ -1622,7 +1662,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 		}
 
 		if (isStreamEntry) {
-			return await _executeStreamRpc(ws, platform, fn, ctx, args, msg, _subscribedRef);
+			return await _executeStreamRpc(ws, platform, fn, ctx, args, msg, _subscribedRef, registrationRevision);
 		} else {
 			// Registry-level rate limit. Per-handler `live.rateLimit(...)`
 			// wraps fn directly and runs its own check inside the wrapper, so
@@ -1642,10 +1682,12 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 					}
 				}
 			}
+			_assertRegistrationRevision(registrationRevision);
 			const result = await fn(ctx, ...args);
 			return { id, ok: true, data: result };
 		}
 		}, _hooks); // end middleware chain
+		_assertRegistrationRevision(registrationRevision);
 		// A middleware's own envelope answers for this call id.
 		if (_result.id !== id) _result = { ..._result, id };
 		if (_subscribedRef.topic && !_subscribedRef.cancelled) {
@@ -1676,6 +1718,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 				}
 			}
 		}
+		_assertRegistrationRevision(registrationRevision);
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/
 		// stream-subscribe (all flow through here); binary RPC attaches its own.
@@ -1686,7 +1729,17 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 			if (dep) /** @type {any} */ (_result).deprecation = dep;
 		}
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
+		_assertRegistrationRevision(registrationRevision);
 		if (!msg.__volatile) _bindResponseFence(ctx, _result, requestId);
+		// A stream can finish before its batch siblings. Keep its cleanup
+		// until the batch decides whether this successful result may be sent.
+		if (track && _result.ok === true && _subscribedRef.topic && !_subscribedRef.cancelled) {
+			track.rollbackStream = () => {
+				track.rollbackStream = undefined;
+				_rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
+				if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
+			};
+		}
 		return _result;
 	} catch (err) {
 		// After an early middleware answer, the still-running chain releases its
@@ -1803,6 +1856,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
+	const registrationRevision = state.registrationRevision;
 	let fn = registry.get(path);
 	if (fn === undefined || /** @type {any} */ (fn).__lazy) {
 		const resolved = await _resolveForCall(path, requestId);
@@ -1863,9 +1917,11 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 				await options.beforeExecute(ws, path, [payload, ...(extraArgs || [])]);
 			}
 
+			_assertRegistrationRevision(registrationRevision);
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			return { ok: true, data: result };
 		}, _hasMiddleware() ? { path, cancel() { detached = true; }, settled() { _releaseRpc(route, conn, _endCall(ctx)); } } : undefined);
+		_assertRegistrationRevision(registrationRevision);
 		// Consumed only by an answer that succeeds, so a middleware refusal
 		// leaves the one-shot deprecation signal for a later call.
 		if (answer.ok !== false) {
@@ -2097,6 +2153,7 @@ async function _runDirectCall(path, args, platform, options, execution) {
 		throw new LiveError('UNAVAILABLE', 'Server is shutting down');
 	}
 	if (!_isLazyResolved()) await _resolveAllLazy();
+	const registrationRevision = state.registrationRevision;
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		throw new LiveError('NOT_FOUND', `Live function '${path}' not found`);
@@ -2125,6 +2182,7 @@ async function _runDirectCall(path, args, platform, options, execution) {
 		_chainReturned = true;
 		return value;
 	});
+	_assertRegistrationRevision(registrationRevision);
 	if (_chainReturned && _answer === _chainValue) return _answer;
 	if (_isEnvelope(_answer)) {
 		if (_answer.ok === true) return _answer.data;
@@ -2185,6 +2243,7 @@ async function _runDirectCall(path, args, platform, options, execution) {
 		} catch {}
 		let result;
 		try {
+			_assertRegistrationRevision(registrationRevision);
 			result = await fn(ctx, ...args);
 		} catch (err) {
 			const streamOnError = /** @type {any} */ (fn).__streamOnError;
@@ -2223,6 +2282,7 @@ async function _runDirectCall(path, args, platform, options, execution) {
 		return result;
 	}
 
+	_assertRegistrationRevision(registrationRevision);
 	return fn(ctx, ...args);
 	}
 }

@@ -20,6 +20,9 @@ let _lazyInitPromise = null;
 
 /** @type {boolean} Set to true once all lazy entries have been resolved */
 let _lazyResolved = false;
+let _lazyGeneration = 0;
+/** @type {{ queue: any[], index: number, promise: Promise<any> | null } | null} */
+let _activeQueue = null;
 
 /**
  * Resolve all deferred (lazy) cron/derived/effect/aggregate/room-action registrations.
@@ -28,13 +31,28 @@ let _lazyResolved = false;
  */
 export async function _resolveAllLazy() {
 	if (_lazyResolved) return;
-	if (_lazyInitPromise) return _lazyInitPromise;
+	if (_lazyInitPromise) {
+		const generation = _lazyGeneration;
+		await _lazyInitPromise;
+		if (generation !== _lazyGeneration) return _resolveAllLazy();
+		return;
+	}
 	if (_lazyQueue.length === 0) { _lazyResolved = true; return; }
-	_lazyInitPromise = (async () => {
+	const generation = _lazyGeneration;
+	const loading = Promise.resolve().then(async () => {
+		if (generation !== _lazyGeneration) return;
 		const queue = _lazyQueue.splice(0);
-		for (const { type, path, loader } of queue) {
+		/** @type {{ queue: any[], index: number, promise: Promise<any> | null }} */
+		const active = { queue, index: 0, promise: null };
+		_activeQueue = active;
+		for (; active.index < queue.length || _lazyQueue.length > 0; active.index++) {
+			if (generation !== _lazyGeneration) return;
+			if (active.index === queue.length) queue.push(..._lazyQueue.splice(0));
+			const { type, path, loader } = queue[active.index];
 			try {
-				const fn = await loader();
+				active.promise = Promise.resolve(loader());
+				const fn = await active.promise;
+				if (generation !== _lazyGeneration) return;
 				if (!fn) continue;
 				switch (type) {
 					case 'cron':
@@ -73,9 +91,12 @@ export async function _resolveAllLazy() {
 					}
 				}
 			} catch (err) {
+				if (generation !== _lazyGeneration) return;
 				console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.LAZY_REGISTRATION, " '" + path + "'"), err);
-			}
+			} finally { active.promise = null; }
 		}
+		if (generation !== _lazyGeneration) return;
+		if (_activeQueue === active) _activeQueue = null;
 		_lazyResolved = true;
 		// Config assertions that need the FULL registration set have to re-run
 		// here: the Vite codegen registers every aggregate lazily, so at
@@ -93,11 +114,14 @@ export async function _resolveAllLazy() {
 			try {
 				_afterResolve();
 			} catch (err) {
+				if (generation !== _lazyGeneration) return;
 				console.error('[svelte-realtime] configuration error found after lazy registration:\n', err);
 			}
 		}
-	})();
-	return _lazyInitPromise;
+	});
+	_lazyInitPromise = loading;
+	await loading;
+	if (generation !== _lazyGeneration) return _resolveAllLazy();
 }
 
 /** @type {(() => void) | null} Hook run once the lazy queue has fully drained. */
@@ -114,8 +138,21 @@ export function _setAfterLazyResolve(fn) {
 /** Live read of the lazy-resolved flag - the staying RPC / cron paths gate on it. */
 export function _isLazyResolved() { return _lazyResolved; }
 
+/** Capture queued declarations and the uncommitted tail of an active drain. */
+export function _snapshotLazyQueue() {
+	const active = _activeQueue;
+	const pending = active ? active.queue.slice(active.index) : [];
+	if (active?.promise && pending.length) {
+		const promise = active.promise;
+		pending[0] = { ...pending[0], loader: () => promise };
+	}
+	return [...pending, ..._lazyQueue];
+}
+
 /** Reset lazy init state for HMR teardown (staying _prepareHmr cannot assign imported bindings). */
 export function _resetLazy() {
+	_lazyGeneration++;
+	_activeQueue = null;
 	_lazyResolved = false;
 	_lazyInitPromise = null;
 }

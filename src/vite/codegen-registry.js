@@ -212,9 +212,10 @@ export function _resolveFile(liveDir, modulePath) {
  * Generate the registry module that imports all live functions.
  * @param {string} liveDir
  * @param {string} dir
+ * @param {boolean} [development]
  * @returns {string}
  */
-export function _generateRegistry(liveDir, dir, topicsRegistry) {
+export function _generateRegistry(liveDir, dir, topicsRegistry, development = false) {
 	if (!existsSync(liveDir)) return '// No live modules found\n';
 
 	const files = _findLiveFiles(liveDir);
@@ -254,6 +255,10 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		const _importPath = JSON.stringify(normalizedPath);
 		/** @param {string} name */
 		const _lazy = (name) => `__L(() => import(${_importPath}).then(m => m.${name}))`;
+		// A cached development registry can run before Vite clears its SSR
+		// graph, after an unlink has already completed. Omit only absent files;
+		// a present module whose import fails must still fail as a load error.
+		if (development) lines.push(`if (__present(${_importPath})) {`);
 
 		// Register live() exports
 		/** @type {Set<string>} */
@@ -303,7 +308,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 		// Register guard
 		GUARD_EXPORT_RE.lastIndex = 0;
-		if (GUARD_EXPORT_RE.exec(scan) !== null) {
+		if (GUARD_EXPORT_RE.exec(scan) !== null || development) {
 			lines.push(`__registerGuard(${JSON.stringify(rel)}, ${_lazy('_guard')});`);
 		}
 
@@ -532,9 +537,22 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Warn about exports with non-path-safe names (pass registered to avoid
 		// double-warning for names already handled above)
 		_warnUnsafeExports(scan, `${dir}/${rel}`, registered);
+		if (development) lines.push('}');
 	}
 
-	return lines.join('\n') + '\n';
+	// A runnable SSR environment clears every evaluated module on a route
+	// reload, even when the registry is not an affected entry point. Rebind
+	// the native handlers before the next request resolves fresh modules.
+	if (!development) return lines.join('\n') + '\n';
+	return [
+		"import { statSync as __statSync } from 'node:fs';",
+		"import { _prepareHmr, _restoreHmr } from 'svelte-realtime/server';",
+		...lines.slice(0, 2),
+		"const __present = file => { try { __statSync(file); return true; } catch (error) { if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return false; throw error; } };",
+		'const __registerAll = () => {', ...lines.slice(2), '};',
+		'__registerAll();',
+		"if (import.meta.hot) import.meta.hot.on('vite:beforeFullReload', () => { const previous = _prepareHmr(); try { __registerAll(); } catch (error) { _restoreHmr(previous); throw error; } });"
+	].join('\n') + '\n';
 }
 
 /**

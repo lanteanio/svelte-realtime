@@ -216,7 +216,7 @@ export default function svelteRealtime(options) {
 				if (!ssr) return null;
 				const srcDir = resolve(root, 'src');
 				const topicsRegistry = _buildTopicsRegistry(srcDir, liveDir);
-				return _generateRegistry(liveDir, dir, topicsRegistry);
+				return _generateRegistry(liveDir, dir, topicsRegistry, isDev);
 			}
 
 			// $live/ virtual module
