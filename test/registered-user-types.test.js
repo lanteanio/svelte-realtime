@@ -69,7 +69,9 @@ if (testContext.user) socketCheck(testContext.user);
 createTestEnv().connect({ id: '1', role: 'reader' });
 // @ts-expect-error test connections require the registered shape
 createTestEnv().connect({ role: 'reader' });
-const options: HandleRpcOptions = { beforeExecute: ws => { socketCheck(ws.getUserData()); }, onError: (_path, _error, ctx) => { check(ctx); } };
+type RpcErrorContext = Assert<Equal<Parameters<NonNullable<HandleRpcOptions['onError']>>[2], LiveContext | null>>;
+type MessageErrorContext = Assert<Equal<Parameters<NonNullable<CreateMessageOptions['onError']>>[2], LiveContext | null>>;
+const options: HandleRpcOptions = { beforeExecute: ws => { socketCheck(ws.getUserData()); }, onError: (_path, _error, ctx) => { if (ctx) check(ctx); } };
 const streamOptions: StreamOptions = { filter: ctx => ctx.user.role === 'reader' };
 const explicit: LiveContext<{ other: number }> = {} as any;
 const other: number = explicit.user.other;

@@ -285,10 +285,9 @@ function _newConn(ws) {
  * slot is not enumerable, so a copy of the user data does not carry it.
  * A record a closed socket left on the same object is replaced, and `fresh`
  * replaces any record: the open hook passes it, since a socket at open is new.
- * Only an own slot counts here. The fast path reads the slot without that
- * check, so user data built on another live socket's user data (through its
- * prototype) is not supported for a socket that skips the open hook: uWS and
- * the adapter give every socket its own copy.
+ * Only an own slot counts here. A dispatch that skips the open hook also
+ * checks the record's socket before using it, so inherited or reused user
+ * data cannot share another socket's admission lifetime.
  * @param {any} user - the socket's user data
  * @param {object} [ws]
  * @param {boolean} [fresh]

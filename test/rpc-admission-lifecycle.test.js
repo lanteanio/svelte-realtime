@@ -391,15 +391,12 @@ describe('a closed connection', () => {
 		expect(replies(platform).get('b')).toMatchObject({ ok: true, data: 'ran' });
 	});
 
-	it('shares a record through the prototype when a socket skips the open hook (unsupported)', async () => {
-		// uWS and the adapter give every socket its own user data; one built on
-		// another live socket's user data with Object.create is not supported.
-		// Through the open hook it gets its own slot; without it, the fast path
-		// reads the inherited one, which this test pins.
+	it('keeps an inherited user-data record scoped to its original socket', async () => {
 		api.configureRpc({ perConnectionConcurrent: 1, maxQueue: 0 });
 		let release;
 		const gate = new Promise(resolve => { release = resolve; });
-		api.__register('closed/proto', api.live(async () => { await gate; return 1; }));
+		const signals = new Map();
+		api.__register('closed/proto', api.live(async ctx => { signals.set(ctx.ws, ctx.abortSignal); await gate; return 1; }));
 		const platform = mockPlatform();
 		const parent = { id: 'p' };
 		const first = { ...mockWs({}), getUserData: () => parent };
@@ -410,9 +407,15 @@ describe('a closed connection', () => {
 		const second = { ...mockWs({}), getUserData: () => child };
 		api.handleRpc(second, text('closed/proto', 'b'), platform);
 		await settle();
-		expect(replies(platform).get('b')).toMatchObject({ ok: false, code: 'OVERLOADED', scope: 'connection' });
+		expect(replies(platform).has('b')).toBe(false);
+		expect(admission._rpcAdmissionSnapshot().active).toBe(2);
+		api.close(first, { platform });
+		expect(signals.get(first).aborted).toBe(true);
+		expect(signals.get(second).aborted).toBe(false);
 		release();
 		await settle();
+		expect(replies(platform).get('b')).toMatchObject({ ok: true, data: 1 });
+		expect(admission._rpcAdmissionSnapshot().active).toBe(0);
 	});
 
 	it('refuses a late call of a closed connection on an idle worker too', async () => {
