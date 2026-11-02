@@ -276,6 +276,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Uploads with `reauthEvery` wait for required pending guard checks before exposing EOF or reporting success. A late denial aborts the upload, and cancellation or disconnect cannot turn into success after the check settles.
+
 - The warning for an uncompilable `piiRedact` topic factory now states that a publish before local topic resolution can send raw data on a single instance as well as in a cluster.
 
 - Document mount bookkeeping bounds completed and pending distinct mounts per document and connection. Re-syncing an existing ID shares its reservation; cancellation keeps pending work counted until it settles.

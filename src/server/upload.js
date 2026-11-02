@@ -440,7 +440,7 @@ function _createUploadStream(ctrl, onConsume, onBuffered) {
 	}
 
 	function abort(err) {
-		if (done) return;
+		if (error) return;
 		done = true;
 		error = err;
 		clear();
@@ -686,6 +686,10 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		return;
 	}
 
+	if (upload.lastReceived) {
+		upload.fail('INVALID_REQUEST', 'upload chunk received after final chunk');
+		return;
+	}
 	if (seq !== upload.expectedSeq) {
 		upload.fail('INVALID_REQUEST', `out-of-order chunk: expected ${upload.expectedSeq}, got ${seq}`);
 		return;
@@ -753,7 +757,8 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 	// reauthEvery: re-run the module guard against the live ctx whenever
 	// the upload crosses a configured byte threshold. The check is
 	// fire-and-forget because the receive path is sync and the guard is
-	// async; if the guard rejects, upload.fail aborts the stream and the
+	// async; EOF and successful completion wait for required checks. If the
+	// guard rejects, upload.fail aborts the stream and the
 	// handler observes the abort signal. A re-auth already in flight is
 	// honored to avoid running parallel guards on the same ctx (the most
 	// recent one is what matters; the sync byte counter does the
@@ -777,7 +782,13 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 			})();
 		}
 	}
-	if (isLast) upload.streamWrap.end();
+	if (isLast) {
+		if (upload._reauthInflight) {
+			upload._reauthInflight.then(() => {
+				if (upload.phase !== 'settled') upload.streamWrap.end();
+			}, () => {}); // The guard failure path already aborts and settles it.
+		} else upload.streamWrap.end();
+	}
 }
 
 /**
@@ -990,6 +1001,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			_assertRegistrationRevision(registrationRevision);
 			handlerStarted = true;
 			const result = await fn(ctx, ...args);
+			while (upload.phase !== 'settled' && upload._reauthInflight) await upload._reauthInflight;
 			_assertRegistrationRevision(registrationRevision);
 			if (upload.phase !== 'settled') {
 				upload.phase = 'settled';
@@ -1092,6 +1104,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		// Cancellation releases payload bytes immediately, but a still-running
 		// guard keeps its admission slot until it settles, preventing cancel/retry
 		// loops from starting unbounded asynchronous authorization work.
+		if (upload._reauthInflight) await upload._reauthInflight.catch(() => {});
 		_releasePendingUploadStart(ws, upload);
 		_exitInFlight();
 		_cleanupUpload(ws, perWs, streamId, upload);

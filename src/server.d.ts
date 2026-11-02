@@ -1787,7 +1787,8 @@ export interface UploadOptions extends Omit<LiveOptions, 'perRouteConcurrent'> {
 	 * threshold (e.g. `5 * 1024 * 1024`) for long uploads where the
 	 * user's session can be revoked mid-stream. Reauth runs as a fire-
 	 * and-forget task off the chunk-receive path; concurrent reauths on
-	 * the same upload are coalesced.
+	 * the same upload are coalesced. EOF and successful completion wait
+	 * for required pending checks. Bytes already read are not rolled back.
 	 */
 	reauthEvery?: number;
 
