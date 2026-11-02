@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dockerServiceHost, dockerServiceUrl } from '../test/helpers/docker-service-host.js';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceFixture = path.join(repository, 'test/fixture');
@@ -17,6 +18,7 @@ const temporary = mkdtempSync(path.join(tmpdir(), 'realtime-production-lifecycle
 const fixture = path.join(temporary, 'fixture');
 const containers = new Set();
 const image = process.env.REALTIME_LIFECYCLE_NODE_IMAGE || 'node:' + process.versions.node + '-trixie-slim';
+const serviceHost = dockerServiceHost();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function docker(...args) {
 	return execFileSync('docker', args, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -66,7 +68,9 @@ async function exercise({ label, workMs, drainMs, completes }) {
 			if (docker('inspect', '--format', '{{.State.Running}}', name) !== 'true') throw new Error('Production server exited during startup:\n' + output);
 			return output.includes('lifecycle:init');
 		}, 'the built realtime init hook');
-		socket = new WebSocket('ws://127.0.0.1:' + port + '/ws', { handshakeTimeout: 5000 });
+		const endpoint = dockerServiceUrl('ws', port, '/ws', serviceHost);
+		console.log('Production lifecycle Docker service endpoint: ' + endpoint);
+		socket = new WebSocket(endpoint, { handshakeTimeout: 5000 });
 		const frames = [];
 		let closed;
 		socket.on('message', data => {

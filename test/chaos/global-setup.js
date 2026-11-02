@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { retryPortBind, terminateChild } from './process-lifecycle.js';
 import { chaosRun, composeArgs, initializeRun, prepareFixture, removeRun, awaitStartGate } from './run-context.js';
+import { dockerServiceHost, dockerServiceUrl } from '../helpers/docker-service-host.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const run = chaosRun();
@@ -112,6 +113,7 @@ function startInstance(port, redisUrl, label, cleanupPort, cleanupToken, onSpawn
 }
 
 export default async function globalSetup() {
+	const serviceHost = dockerServiceHost();
 	initializeRun(run);
 	globalThis.__chaosOwner = run.id;
 	const instances = [];
@@ -120,9 +122,11 @@ export default async function globalSetup() {
 		// Unlike an anonymous Docker binding, this explicit mapping survives
 		// stop/start so the already-running ioredis clients reconnect in place.
 		const redisPort = await startRedis();
-		const redisUrl = 'redis://127.0.0.1:' + redisPort;
+		const redisUrl = dockerServiceUrl('redis', redisPort, '', serviceHost);
+		console.log('Chaos Docker service endpoint: ' + redisUrl);
 		persisted = {
 			runId: run.id,
+			dockerServiceHost: serviceHost,
 			redisPort,
 			redisUrl,
 			portA: null,

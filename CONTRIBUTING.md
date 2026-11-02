@@ -25,6 +25,17 @@ binary. State your Node version, OS, architecture, addon availability, exact
 commands and omitted checks in the pull request; a skipped native test is not
 evidence of native runtime coverage.
 
+The Docker lifecycle and chaos suites connect to published service ports on
+`127.0.0.1` by default. When the test process runs in a container whose Docker
+daemon publishes on another host, set `REALTIME_TEST_DOCKER_SERVICE_HOST` to a
+plain hostname or IPv4/IPv6 address, for example `host.docker.internal` on Docker
+Desktop. The value cannot contain a URL, port, credentials or zone. The selected
+endpoint appears in lifecycle logs and the chaos context; record this network
+profile with verification evidence. Published ports, real SIGTERM, Redis
+stop/start, isolation and cleanup checks remain required. Local application and
+cleanup servers continue using loopback. This option configures test services
+only and does not change an application endpoint or waive a failing check.
+
 The [runtime and peer matrix](docs/ci-support.md) is generated from
 `docs/ci-support.v1.json` and checked by `npm run check:ci-support`. Linux runs
 the exact Node baseline plus the newest patch of each maintained Node major,
