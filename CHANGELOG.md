@@ -278,6 +278,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The warning for an uncompilable `piiRedact` topic factory now states that a publish before local topic resolution can send raw data on a single instance as well as in a cluster.
 
+- Document mount bookkeeping bounds completed and pending distinct mounts per document and connection. Re-syncing an existing ID shares its reservation; cancellation keeps pending work counted until it settles.
+
 - Document writes re-evaluate the current access guard, so revoking write rights takes effect without a client requesting another sync. Pending checks cannot write after a newer refusal, mount replacement, connection close or declaration reload. Failed or cancelled syncs release only their own reference and membership claim, preserving other pending mounts.
 
 - The demo scaffolder fetches an immutable source commit and verifies its detached identity before running installation, preflight or build commands. Moving the demo repository's default branch cannot change the template in an existing CLI release.

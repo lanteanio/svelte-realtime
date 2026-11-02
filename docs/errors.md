@@ -191,7 +191,7 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 | [`PAYLOAD_TOO_LARGE`](#live-error-payload-too-large) | <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>Upload arguments do not fit the server frame size</code>; <code>Upload arguments exceed 65535 bytes</code>; <code>upload exceeds limit during start</code>; <code>upload exceeds maxSize</code> |
 | [`PROTOCOL_MISMATCH`](#live-error-protocol-mismatch) | computed |
 | [`QUEUE_FULL`](#live-error-queue-full) | <code>Offline queue overflow - oldest mutation dropped</code> |
-| [`RATE_LIMITED`](#live-error-rate-limited) | <code>Too many concurrent rate-limit identities</code>; <code>Too many requests</code>; <code>smooth re-sync rate exceeded (max 5 per 1000ms per identity); back off and retry</code> |
+| [`RATE_LIMITED`](#live-error-rate-limited) | <code>Document mount limit reached; close unused document stores</code>; <code>Too many concurrent rate-limit identities</code>; <code>Too many requests</code>; <code>smooth re-sync rate exceeded (max 5 per 1000ms per identity); back off and retry</code> |
 | [`SERVICE_UNAVAILABLE`](#live-error-service-unavailable) | <code>Service is temporarily unavailable, try again shortly</code> |
 | [`SOURCE_ERROR`](#live-error-source-error) | computed |
 | [`STALE`](#live-error-stale) | <code>Offline mutation dropped by beforeReplay filter</code>; <code>Offline mutation dropped by the replay function</code>; <code>Offline mutation dropped: beforeReplay returned a promise</code>; <code>Offline mutation dropped: beforeReplay threw</code>; <code>Offline mutation dropped: its stored args cannot be sent</code>; <code>Offline mutation dropped: the replay function gave it args that cannot be sent</code>; <code>Offline mutation expired</code>; <code>Offline mutation expired: the server asked to retry it after its retention ends</code> |
@@ -542,8 +542,8 @@ A code reaches the client as `RpcError.code` and is thrown on the server as `Liv
 - Consequence: The call is refused before the handler runs. Client and direct-call errors carry `retryAfter` in milliseconds when the limiter supplied it.
 - Automatic recovery: None. Buckets refill as their window passes, but refused calls are not retried.
 - Next action: Wait for `retryAfter` before retrying when present. If legitimate traffic is refused, tune points and window or look for clients calling in a loop.
-- Message patterns: <code>Too many concurrent rate-limit identities</code>; <code>Too many requests</code>; <code>smooth re-sync rate exceeded (max 5 per 1000ms per identity); back off and retry</code>
-- Owning sources: [src/server/dispatch.js](../src/server/dispatch.js), [src/server/rate-limit.js](../src/server/rate-limit.js), [src/server/smooth.js](../src/server/smooth.js)
+- Message patterns: <code>Document mount limit reached; close unused document stores</code>; <code>Too many concurrent rate-limit identities</code>; <code>Too many requests</code>; <code>smooth re-sync rate exceeded (max 5 per 1000ms per identity); back off and retry</code>
+- Owning sources: [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/rate-limit.js](../src/server/rate-limit.js), [src/server/smooth.js](../src/server/smooth.js)
 
 <a id="live-error-service-unavailable"></a>
 ### `SERVICE_UNAVAILABLE`

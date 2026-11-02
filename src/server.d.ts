@@ -4227,6 +4227,10 @@ export interface SmoothExport {
 
 /**
  * Configuration for `live.doc()` / `live.map()` / `live.array()`.
+ * One connection holds at most 128 distinct mounts per document and 1,024
+ * document mounts in total. Existing-mount syncs do not consume capacity;
+ * pending distinct mount IDs count until their sync settles.
+ * excess mounts fail with RATE_LIMITED until unused stores close.
  */
 export interface DocConfig {
 	/** Topic name, or a function computing it from context and room args. */

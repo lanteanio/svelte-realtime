@@ -173,6 +173,31 @@ function _unsubscribeCrdtTopic(ctx, rec, name) {
 		try { trackedUnsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
 	}
 }
+const MAX_DOC_MOUNTS = 128;
+const MAX_CONNECTION_DOC_MOUNTS = 1024;
+
+/**
+ * Count distinct mounted stores, including every document on the socket.
+ * @param {Map<string, { mounts: Set<number> }> | undefined} docs
+ * @param {Map<string, Map<number, CrdtSyncReservation>> | undefined} pending
+ * @param {string} key
+ * @param {number} mountId
+ */
+function _hasCrdtMountRoom(docs, pending, key, mountId) {
+	const held = docs?.get(key);
+	const waiting = pending?.get(key);
+	if (held?.mounts.has(mountId) || waiting?.has(mountId)) return true;
+	let perDocument = held?.mounts.size || 0;
+	if (waiting) for (const id of waiting.keys()) if (!held?.mounts.has(id)) perDocument++;
+	if (perDocument >= MAX_DOC_MOUNTS) return false;
+	let total = 0;
+	if (docs) for (const entry of docs.values()) total += entry.mounts.size;
+	if (pending) for (const [name, mounts] of pending) {
+		const active = docs?.get(name);
+		for (const id of mounts.keys()) if (!active?.mounts.has(id)) total++;
+	}
+	return total < MAX_CONNECTION_DOC_MOUNTS;
+}
 
 /**
  * Sockets whose close path has already run - the same ghost guard as smooth:
@@ -658,6 +683,9 @@ export function _crdtRegister(kind, config) {
 		rec.platform = ctx.platform;
 		const wsKey = rec.key + '\u0000' + name;
 		const docs = ctx.ws ? _crdtWsDocs.get(ctx.ws) : undefined;
+		if (ctx.ws && !_hasCrdtMountRoom(docs, _crdtPendingSyncs.get(ctx.ws), wsKey, mountId)) {
+			throw new LiveError('RATE_LIMITED', 'Document mount limit reached; close unused document stores');
+		}
 		const heldAtStart = docs?.get(wsKey);
 		const alreadyHeld = !!heldAtStart;
 		const wireTopic = rec.prefix + name;
