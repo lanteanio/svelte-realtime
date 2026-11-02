@@ -258,6 +258,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Oversized incoming RPC batches return one bounded envelope error and take one connection admission place before the configured `beforeExecute` rate gate. Rejection never walks or echoes their entries; valid batches retain per-call correlation.
+
 - Dynamic `piiRedact` pattern matches fail closed when a custom projection throws, before replay storage or cluster relay. Explicit string-topic siblings retain their own policy; unrelated factories and ad-hoc publishers must use non-overlapping namespaces. Coalesced publishes retain redacted data when the relay falls back to ordinary publication.
 
 - Smoothed topic owners stop accepting commands and emitting frames when their lease expires, including after event-loop stalls, slow application callbacks, and late renewal replies. Base and cell receivers share an epoch watermark, so older owners cannot reopen delivery by alternating instance identities.

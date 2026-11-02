@@ -75,6 +75,7 @@ On the client it rejects with `RpcError` code `OVERLOADED` carrying `reason` and
 ## What counts
 
 - RPC calls, binary calls and each entry of a `batch()` take places, and each is admitted or refused on its own. A parallel batch of 50 calls from one connection runs 32 and queues the rest. A refused entry of a sequential batch fails like any other failing entry, and the batch goes on with the next one.
+- An oversized batch takes one place for the rejected envelope, without walking its entries or resolving handlers. The configured `beforeExecute` hook sees `('__batch__', [])` once; admission or hook refusal returns one bounded error. Otherwise the reply on `__rpc` / `__batch` has `ok: false` and `code: 'INVALID_REQUEST'`, with no per-call result array. The place stays occupied until the hook settles, and graceful shutdown waits for it.
 - A fire-and-forget call (`.fireAndForget()`, no `id`) takes a place too. When it is refused nothing is sent back, but it is counted like any other refusal.
 - A stream subscribe holds its place while the stream subscribes and loads, and gives it back once the subscribe is answered, never for the life of the subscription.
 - Uploads keep their own limits (`maxConcurrentPerSession`, `maxConcurrentTotal`, the pending byte cap) and take no RPC place.

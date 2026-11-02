@@ -688,6 +688,12 @@ export function handleRpc(ws, data, platform, options) {
 	} catch {
 		return false;
 	}
+	// An invalid batch needs no element inspection, including the depth walk.
+	// JSON parsing is bounded by the transport's ingress byte limit.
+	if (Array.isArray(msg.batch) && msg.batch.length > MAX_RPC_BATCH_CALLS) {
+		_executeBatch(ws, msg, platform, options);
+		return true;
+	}
 
 	// Post-parse depth cap. The adapter's `maxPayloadLength` (default 1 MB)
 	// already bounds the bytes JSON.parse ever sees, so this is defense
@@ -823,14 +829,7 @@ async function _executeBatch(ws, msg, platform, options) {
 	const _batchMetricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
 	if (batch.length > MAX_RPC_BATCH_CALLS) {
-		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
-		const results = [];
-		for (const call of batch) {
-			if (typeof call?.id !== 'string') continue;
-			results.push({ id: call.id, ok: false, code: 'INVALID_REQUEST', error: `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls`, requestId: _operationRequestId(call.id) });
-		}
-		_respond(ws, platform, '__batch', { batch: results }, undefined, '__batch__');
-		return;
+		return _rejectOversizedBatch(ws, platform, options, _batchMetricsStart);
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
@@ -866,6 +865,51 @@ async function _executeBatch(ws, msg, platform, options) {
 
 	_respond(ws, platform, '__batch', { batch: results }, undefined,
 		state.metricsInstruments ? batch.map(call => typeof call?.id === 'string' ? call.rpc : null) : undefined);
+}
+
+/** @param {any} ws @param {any} platform @param {any} options @param {number} started */
+async function _rejectOversizedBatch(ws, platform, options, started) {
+	const path = '__batch__';
+	const requestId = randomUuid();
+	/** @param {any} result */
+	const respond = result => {
+		_recordRpcMetrics(path, result.code, started, ws);
+		_respond(ws, platform, '__batch', result, requestId, path);
+	};
+	const protocol = _protocolRejection(ws, platform);
+	if (protocol) { respond(protocol); return; }
+	if (_isShuttingDown()) {
+		respond({ ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' });
+		return;
+	}
+	_enterInFlight();
+	const route = _rpcRoute(path, _rejectOversizedBatch);
+	/** @type {import('./rpc-admission.js').RpcConn | null} */
+	let conn = null;
+	try {
+		let permit = /** @type {any} */ (_admitRpc(ws.getUserData(), ws, route, rpcTick));
+		if (permit.active === undefined) {
+			if (permit.reason === undefined) permit = await permit;
+			if (permit.active === undefined) {
+				_respond(ws, platform, '__batch', _overloaded(path, permit, started, ws), requestId, path);
+				return;
+			}
+		}
+		conn = permit;
+		// One fixed envelope charge; untrusted elements never reach the hook.
+		if (options?.beforeExecute) await options.beforeExecute(ws, path, []);
+		respond({ ok: false, code: 'INVALID_REQUEST', error: `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls` });
+	} catch (err) {
+		if (err instanceof LiveError) {
+			respond({ ok: false, code: err.code, error: err.message, ...copyErrorMetadata(err) });
+		} else {
+			if (options?.onError) { try { options.onError(path, err, null); } catch {} }
+			respond({ ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
+		}
+	} finally {
+		if (conn) _releaseRpc(route, conn, null);
+		_exitInFlight();
+	}
 }
 
 // Settle both per-socket claim barriers a stream subscribe opened (the owner

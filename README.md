@@ -1120,7 +1120,7 @@ Each sent call resolves or rejects independently. Batches are limited to 50 call
 
 A `batch()` containing only one call sends a bare RPC frame (no batch envelope) and the server replies through the normal RPC path - so the defensive "always wrap writes in batch() for symmetry" pattern pays no envelope overhead. Batches of 2+ keep the envelope.
 
-RPC batches accept at most 50 calls. Oversized incoming batches return `INVALID_REQUEST` for every supplied request id. Stream subscriptions created in one turn split automatically at that shared count and a conservative 64 KiB coalescing budget, preserving order. Complex arguments travel separately so sizing never invokes application serialization hooks. This is a batching budget: individual requests retain the transport's payload limit, including a primitive request larger than the coalescing budget.
+RPC batches accept at most 50 calls. An oversized incoming batch returns one batch-level `INVALID_REQUEST` reply on `__rpc` / `__batch`, without inspecting or echoing its entries. It takes one RPC admission place and invokes `beforeExecute(ws, '__batch__', [])` once when configured, so the same connection rate gate applies. Valid batches retain a result for each call. Stream subscriptions created in one turn split automatically at that shared count and a conservative 64 KiB coalescing budget, preserving order. Complex arguments travel separately so sizing never invokes application serialization hooks. This is a batching budget: individual requests retain the transport's payload limit, including a primitive request larger than the coalescing budget.
 
 ### Server-side batching
 

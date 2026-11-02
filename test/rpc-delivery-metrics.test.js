@@ -110,6 +110,7 @@ it('records oversized batch rejection once under the bounded envelope label', as
 	await dispatch(platform, { batch: Array.from({ length: MAX_RPC_BATCH_CALLS + 1 }, (_, i) => ({ rpc: 'delivery/echo', id: 'c' + i })) });
 	expect(handler).not.toHaveBeenCalled();
 	expect(platform.sent).toHaveLength(1);
-	expect(platform.sent[0].data.batch).toHaveLength(MAX_RPC_BATCH_CALLS + 1);
+	expect(platform.sent[0].data).toMatchObject({ ok: false, code: 'INVALID_REQUEST' });
+	expect(platform.sent[0].data.batch).toBeUndefined();
 	expect(counters.get(metric)).toEqual([{ path: '__batch__', outcome: 'delivered' }]);
 });
