@@ -39,7 +39,7 @@ describe('declared coalescing', () => {
     const publish = vi.spyOn(env.platform, 'publish');
     await expect(publisher.call('prices/write', 'quotes', { id: 'asset', price: 5 })).resolves.toBe(true);
     expect(env.platform.relayCoalesced).toHaveBeenCalledExactlyOnceWith('quotes', 'set', { price: 5 }, 'asset');
-    expect(publish).toHaveBeenCalledWith('quotes', 'set', { id: 'asset', price: 5 }, undefined);
+    expect(publish).toHaveBeenCalledWith('quotes', 'set', { price: 5 }, undefined);
     expect(env.platform.sendCoalesced).not.toHaveBeenCalled();
   });
 
