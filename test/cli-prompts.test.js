@@ -124,7 +124,7 @@ describe('interactive CLI prompts', { timeout: 25000 }, () => {
 		const selected = ['Wiring only', 'Barebones example', 'Full demo app'][index];
 		expect(result.output).toMatch(new RegExp('Which template would you like\\?[^\\n]*\\n[^\\n]*' + selected));
 		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
-		if (template === 'demo') expect(command(captured)).toEqual({ name: 'git', args: ['clone', 'https://github.com/lanteanio/svelte-realtime-demo.git', 'prompt-probe'] });
+		if (template === 'demo') expect(command(captured)).toEqual({ name: 'git', args: ['clone', '--no-checkout', '--no-recurse-submodules', '--filter=blob:none', '--no-tags', 'https://github.com/lanteanio/svelte-realtime-demo.git', join(root, 'prompt-probe')] });
 		else expect(command(captured)).toEqual({ name: 'npx', args: ['-y', 'sv@1.1.1', 'create', 'prompt-probe', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install'] });
 	});
 });
