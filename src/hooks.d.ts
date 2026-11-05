@@ -17,14 +17,14 @@ export interface TransportEntry {
 export type TransportMap = Record<string, TransportEntry>;
 
 /**
- * SvelteKit `transport` hook preset that auto-registers serialization
- * for `RpcError` and `LiveError` across the SSR / client boundary.
+ * SvelteKit `transport` hook preset that registers serialization for
+ * `RpcError` and `LiveError` across the SSR / client boundary.
  *
- * Without this, a typed error thrown during a `+page.server.js` `load()`
- * arrives at `+error.svelte` as a plain `Error` instance with no `code`
- * field. With it, the typed `code` survives hydration so the error page
- * (and any client-side handler that rethrows the load error) can render
- * targeted UI per cause.
+ * An error that a `load` function or form action returns inside its data
+ * reaches the browser as the same class with its `code`, `params` and
+ * `details`. Without this, SvelteKit cannot serialize the instance and the
+ * request fails. A `load` that throws goes through SvelteKit's
+ * `handleError` hook instead, which decides what `+error.svelte` receives.
  *
  * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) - both
  * the server's `encode` and the client's `decode` need to be visible

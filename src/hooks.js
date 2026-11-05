@@ -1,17 +1,20 @@
 // @ts-check
 import { copyErrorMetadata } from './shared/error-metadata.js';
-import { RpcError } from './client.js';
-import { LiveError } from './server.js';
+import { hasErrorBrand, RPC_ERROR_BRAND, LIVE_ERROR_BRAND } from './shared/error-brand.js';
+// The shared hooks file runs in the browser too, so import the two error
+// classes directly rather than through the client and server entries.
+import { RpcError } from './client/rpc-error.js';
+import { LiveError } from './server/live-error.js';
 
 /**
- * SvelteKit `transport` hook preset that auto-registers serialization for
+ * SvelteKit `transport` hook preset that registers serialization for
  * `RpcError` and `LiveError` across the SSR / client boundary.
  *
- * Without this, a typed error thrown during a `+page.server.js` `load()`
- * arrives at `+error.svelte` as a plain `Error` instance with no `code`
- * field. With it, the typed `code` survives hydration so the error page
- * (and any client-side handler that rethrows the load error) can render
- * targeted UI per cause.
+ * An error that a `load` function or form action returns inside its data
+ * reaches the browser as the same class with its `code`, `params` and
+ * `details`. Without this, SvelteKit cannot serialize the instance and the
+ * request fails. A `load` that throws goes through SvelteKit's
+ * `handleError` hook instead, which decides what `+error.svelte` receives.
  *
  * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) - both
  * the server's `encode` and the client's `decode` need to be visible
@@ -46,7 +49,7 @@ import { LiveError } from './server.js';
 export function realtimeTransport(extras) {
 	const base = {
 		RpcError: {
-			encode: (value) => value instanceof RpcError && [value.code, value.message, /** @type {any} */ (value).issues, copyErrorMetadata(value)],
+			encode: (value) => hasErrorBrand(value, RPC_ERROR_BRAND) && [value.code, value.message, /** @type {any} */ (value).issues, copyErrorMetadata(value)],
 			decode: ([code, message, issues, metadata]) => {
 				const err = new RpcError(code, message, metadata);
 				if (issues !== undefined) /** @type {any} */ (err).issues = issues;
@@ -54,7 +57,7 @@ export function realtimeTransport(extras) {
 			}
 		},
 		LiveError: {
-			encode: (value) => value instanceof LiveError && [value.code, value.message, copyErrorMetadata(value)],
+			encode: (value) => hasErrorBrand(value, LIVE_ERROR_BRAND) && [value.code, value.message, copyErrorMetadata(value)],
 			decode: ([code, message, metadata]) => new LiveError(code, message, metadata)
 		}
 	};

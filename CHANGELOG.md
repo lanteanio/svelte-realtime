@@ -130,6 +130,18 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** The client from this release.
   - **Compatibility:** Matches browser behavior; optimistic settlement is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: SvelteKit 2 development finds live functions.** Under `vite dev` on SvelteKit 2, a server `load` or endpoint that calls a stream's `.load()` now finds its live functions on a cold or warm Vite cache instead of failing with `NOT_FOUND`, because the server runtime is loaded once in Node and shared by routes, WebSocket hooks and live-module reloads.
+  - **Affects:** SvelteKit 2 applications that call `.load()` during SSR in development.
+  - **Action:** None.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Unchanged contract; production builds and SvelteKit 3 already found them.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: transport hook bundle size.** A shared `src/hooks.js` that exports `realtimeTransport()` now adds about 1 KB brotli to each page's browser bundle instead of pulling the entire realtime server and client runtimes into it, because the hook imports only the two error classes it serializes and recognizes them across module copies.
+  - **Affects:** Applications that follow the typed error transport recipe in a shared `src/hooks.js`.
+  - **Action:** None; rebuild to get the smaller bundle.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Unchanged contract; the encoded tuples are identical.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -275,6 +287,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Live events are still applied in arrival order, and the cursor keeps the highest sequence seen, so an event that arrives after a later one and is still in flight when the socket drops is skipped by the next resume; the README's crud section covers `rowVersion` and its limits.
 
 ### Fixed
+
+- `realtimeTransport()` imports `LiveError` and `RpcError` from their own modules instead of the server and client entries. A shared `src/hooks.js` therefore adds about 1 KB brotli to the browser bundle, where it previously carried the whole server runtime (about 109 KB brotli in a Vite 8 production build). A browser bundle budget test pins the module set the transport hook reaches.
+
+- `realtimeTransport()` recognizes `LiveError` and `RpcError` by a registry-symbol brand on their prototypes, so it encodes instances created by another evaluation of either class. Development loads the server runtime in Node while the shared hooks module stays in Vite's SSR graph, so an error a live function creates there is such an instance.
+
+- The transport hook documentation states what `realtimeTransport()` covers: errors that a `load` function or form action returns inside its data, which SvelteKit otherwise cannot serialize. A thrown error goes through SvelteKit's `handleError` hook, which decides what `+error.svelte` receives.
 
 - Document persistence failures and unexpected document or smooth plugin import errors return generic internal RPC errors. Server error observers retain the original cause and request correlation without exposing backend exception text or metadata to callers.
 

@@ -1,5 +1,6 @@
 // @ts-check
 import { copyErrorMetadata } from '../shared/error-metadata.js';
+import { LIVE_ERROR_BRAND } from '../shared/error-brand.js';
 
 /**
  * Typed error that propagates code to the client.
@@ -14,5 +15,10 @@ export class LiveError extends Error {
 		super(message || code);
 		this.code = code;
 		if (metadata !== undefined) Object.assign(this, copyErrorMetadata(metadata));
+	}
+
+	/** @returns {true} */
+	get [LIVE_ERROR_BRAND]() {
+		return true;
 	}
 }

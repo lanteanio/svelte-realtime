@@ -1788,7 +1788,7 @@ The client coalesces concurrent connects into a single in-flight preflight, trea
 
 ## SvelteKit transport
 
-`realtimeTransport()` from `svelte-realtime/hooks` is a SvelteKit transport-hook preset that auto-registers `RpcError` and `LiveError` serialization across the SSR / client boundary. Without it, typed errors thrown from `+page.server.js` `load()` arrive at `+error.svelte` as plain `Error` instances and lose their `code` field.
+`realtimeTransport()` from `svelte-realtime/hooks` is a SvelteKit transport-hook preset that registers `RpcError` and `LiveError` serialization across the SSR / client boundary. An error that a `load` function or form action returns inside its data, for example after catching a failed `.load()` call, arrives in the browser as the same class with its `code`, `params` and `details`. Without the preset, SvelteKit cannot serialize the instance and the request fails. A `load` that throws goes through SvelteKit's `handleError` hook instead, which decides what `+error.svelte` receives; return the error's `code` from `handleError` to show it there.
 
 ```js
 // src/hooks.js  (NOT hooks.server.js - the shared hook is required)

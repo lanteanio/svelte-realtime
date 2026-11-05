@@ -453,9 +453,9 @@ configure({ upload: { frameSize: 1024 * 1024 } }); // safe; framework subtracts 
 
 ### `RpcError` and `LiveError` SvelteKit transport (opt-in)
 
-**What changed.** Typed errors thrown during `+page.server.js` `load()` previously arrived at `+error.svelte` as plain `Error` instances. The new `realtimeTransport()` SvelteKit transport hook (from `svelte-realtime/hooks`) auto-registers serialization for `RpcError` and `LiveError` across the SSR / client boundary so the original class with `code` intact is preserved.
+**What changed.** The new `realtimeTransport()` SvelteKit transport hook (from `svelte-realtime/hooks`) registers serialization for `RpcError` and `LiveError` across the SSR / client boundary. An error that a `load` function or form action returns inside its data then reaches the browser as the same class with its `code` intact; without the hook, SvelteKit cannot serialize the instance and the request fails.
 
-This is opt-in (additive), but apps that catch `LiveError` in their error boundary by `instanceof` or `err.code` will see the previous behavior (plain Error) until they wire the transport.
+This is opt-in (additive). A `load` that throws is unaffected: SvelteKit passes the thrown error to its `handleError` hook, which decides what `+error.svelte` receives, so return the error's `code` from `handleError` to show it there.
 
 **How to migrate.** Wire the transport hook from `src/hooks.js` (NOT `hooks.server.js`):
 

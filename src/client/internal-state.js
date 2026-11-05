@@ -1,5 +1,5 @@
 // @ts-check
-import { copyErrorMetadata } from '../shared/error-metadata.js';
+import { RpcError } from './rpc-error.js';
 import { readable } from 'svelte/store';
 import { _withCurrent } from './current.js';
 import { randomFloat } from '../client-runtime.js';
@@ -105,34 +105,7 @@ function _getBinaryFrame(size) {
  */
 const _useRAF = typeof window !== 'undefined' && typeof requestAnimationFrame === 'function';
 
-/**
- * Typed error for RPC failures.
- */
-export class RpcError extends Error {
-	/**
-	 * @param {string} code
-	 * @param {string} [message]
-	 * @param {import('../shared/error-metadata.js').ErrorMetadata} [metadata]
-	 */
-	constructor(code, message, metadata) {
-		super(message || code);
-		this.code = code;
-		if (metadata !== undefined) {
-			Object.assign(this, copyErrorMetadata(metadata));
-			// Which admission limit refused an OVERLOADED call, as the server named it.
-			if (code === 'OVERLOADED' && metadata !== null && typeof metadata === 'object') {
-				const { reason, scope } = /** @type {any} */ (metadata);
-				if (_OVERLOAD_REASONS.has(reason) && _OVERLOAD_SCOPES.has(scope)) {
-					/** @type {any} */ (this).reason = reason;
-					/** @type {any} */ (this).scope = scope;
-				}
-			}
-		}
-	}
-}
-
-const _OVERLOAD_REASONS = new Set(['concurrency_limit', 'queue_full']);
-const _OVERLOAD_SCOPES = new Set(['connection', 'route', 'global']);
+export { RpcError };
 
 /**
  * The errors an RPC from `_sendRpc` is rejected with when its connection

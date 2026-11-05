@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { realtimeTransport } from '../src/hooks.js';
 import { LiveError } from '../src/server.js';
 import { RpcError } from '../src/client.js';
@@ -126,6 +128,49 @@ describe('realtimeTransport()', () => {
 		const b = realtimeTransport();
 		expect(a).not.toBe(b);
 		expect(a.RpcError).not.toBe(b.RpcError);
+	});
+});
+
+describe('realtimeTransport() across module copies', () => {
+	// Vite development runs svelte-realtime/server in Node while the shared
+	// hooks module runs in the SSR graph, so an error from a live function
+	// comes from a different evaluation of its class, and of the brand
+	// module, than the one hooks imported. Node's own loader gives the test
+	// that separate evaluation.
+	const nativeImport = (path) => createRequire(import.meta.url)(fileURLToPath(new URL(path, import.meta.url)));
+
+	it('encodes a LiveError created by another evaluation of its module', () => {
+		const { LiveError: OtherLiveError } = nativeImport('../src/server/live-error.js');
+		expect(OtherLiveError).not.toBe(LiveError);
+		const transport = realtimeTransport();
+		const error = new OtherLiveError('NOT_FOUND', 'Missing', { params: { id: 7 } });
+		expect(transport.LiveError.encode(error)).toEqual(['NOT_FOUND', 'Missing', { params: { id: 7 } }]);
+		expect(transport.RpcError.encode(error)).toBe(false);
+	});
+
+	it('encodes an RpcError created by another evaluation of its module', () => {
+		const { RpcError: OtherRpcError } = nativeImport('../src/client/rpc-error.js');
+		expect(OtherRpcError).not.toBe(RpcError);
+		const transport = realtimeTransport();
+		const error = new OtherRpcError('FORBIDDEN', 'Denied');
+		error.issues = [{ path: ['a'] }];
+		expect(transport.RpcError.encode(error)).toEqual(['FORBIDDEN', 'Denied', [{ path: ['a'] }], {}]);
+		expect(transport.LiveError.encode(error)).toBe(false);
+	});
+
+	it('recognizes subclasses and ignores look-alike plain objects', () => {
+		class Gone extends LiveError {}
+		const transport = realtimeTransport();
+		expect(transport.LiveError.encode(new Gone('GONE', 'Removed'))).toEqual(['GONE', 'Removed', {}]);
+		expect(transport.LiveError.encode({ code: 'GONE', message: 'Removed', name: 'LiveError' })).toBe(false);
+		expect(transport.RpcError.encode(Object.create(Error.prototype))).toBe(false);
+	});
+
+	it.each([['LiveError', LiveError], ['RpcError', RpcError]])('keeps the %s brand off own and enumerable keys', (_name, Ctor) => {
+		const error = new Ctor('X', 'y');
+		expect(Object.getOwnPropertySymbols(error)).toEqual([]);
+		expect(Object.keys(error)).toEqual(['code']);
+		expect(JSON.parse(JSON.stringify({ ...error }))).toEqual({ code: 'X' });
 	});
 });
 
