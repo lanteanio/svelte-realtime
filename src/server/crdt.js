@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _beginGuardedSubscribe, _endGuardedSubscribe, _cancelGuardedSubscribe, _undoUnguardedSubscribe } from './subscribe-gate.js';
 import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _subscribeTracked, trackedUnsubscribe } from './membership.js';
 import { _tenantTopic } from './tenant.js';
@@ -708,7 +709,22 @@ export function _crdtRegister(kind, config) {
 			// Walk-visible membership for the reserved wire topic, same as smooth:
 			// reserved-prefix topics never ride the client's own subscribe frames.
 			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
-				const denial = await ctx.platform.subscribe(ctx.ws, wireTopic);
+				// A tenant-scoped document topic must pass the hooks from realtime().
+				const tenantGuard = ctx.tenantId ? _beginGuardedSubscribe(ctx.ws, wireTopic) : null;
+				let denial;
+				try {
+					denial = await ctx.platform.subscribe(ctx.ws, wireTopic);
+				} catch (err) {
+					if (tenantGuard) _cancelGuardedSubscribe(ctx.ws, wireTopic, tenantGuard);
+					throw err;
+				}
+				if (tenantGuard) {
+					const unguarded = _endGuardedSubscribe(ctx.ws, wireTopic, tenantGuard, denial);
+					if (unguarded !== null) {
+						_undoUnguardedSubscribe(ctx.platform, ctx.ws, wireTopic);
+						throw new LiveError('TENANT_GUARD_REQUIRED', 'Subscribe refused: the server does not route subscribes through its tenant hooks');
+					}
+				}
 				if (denial) {
 					if (denial === 'FORBIDDEN' || denial === 'UNAUTHENTICATED') observeSyncRefusal(ctx, name);
 					throw new LiveError(

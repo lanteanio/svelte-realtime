@@ -248,6 +248,22 @@ describe('live.smooth sync', () => {
 		expect(wsA.isSubscribed('__smooth:@t/b/shape:r1')).toBe(false);
 	});
 
+	it('refuses a tenant-scoped smooth sync that the subscribe hooks never saw', async () => {
+		_setTenantResolver((u) => u.org);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { name } = declareShape();
+			const ws = mockWs({ id: 'u1', org: 'a' });
+			const platform = wirePlatform();
+			platform.subscribeHook = null;
+			const res = await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+			expect(res).toMatchObject({ ok: false, code: 'TENANT_GUARD_REQUIRED' });
+			expect(ws.isSubscribed('__smooth:@t/a/shape:r1')).toBe(false);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('subscribes the socket, ensures the entity, and returns the catalog basis', async () => {
 		const { name } = declareShape();
 		const ws = mockWs({ id: 'u1' });

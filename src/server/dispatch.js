@@ -12,6 +12,7 @@ import { LiveError } from './live-error.js';
 import { _assertRegistrationRevision } from './registration.js';
 import { _bindResponseFence, _fenceResponse, _responseFenceFailure } from './response-fence.js';
 import { _subscribeTracked } from './membership.js';
+import { _beginGuardedSubscribe, _endGuardedSubscribe, _cancelGuardedSubscribe, _undoUnguardedSubscribe, TENANT_GUARD_REQUIRED, TENANT_GUARD_CLIENT_MESSAGE } from './subscribe-gate.js';
 import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
@@ -1194,6 +1195,10 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	// policy with this stream's rpc and args. A refused admission drops it.
 	const _admission = beginDeliveryAdmission(ws, topic, msg.rpc, streamArgs);
 	let _subscribeDenial = null;
+	// A tenant-scoped topic must pass the subscribe hooks from realtime(), which
+	// hand the application's gate the logical topic; a gate that sees the wire
+	// topic would match none of its patterns and let the subscribe through.
+	const _guard = ctx.tenantId && typeof platform.subscribe === 'function' ? _beginGuardedSubscribe(ws, topic) : null;
 	try {
 		if (typeof platform.subscribe === 'function') {
 			// Another stream's failed admission on this socket may release the
@@ -1209,9 +1214,17 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 			_subscribeDenial = _subscribeTracked(ws, topic);
 		}
 	} catch {
+		if (_guard) _cancelGuardedSubscribe(ws, topic, _guard);
 		endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, false, _admission);
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
+	}
+	if (_guard) {
+		const _unguarded = _endGuardedSubscribe(ws, topic, _guard, _subscribeDenial);
+		if (_unguarded !== null) {
+			_undoUnguardedSubscribe(platform, ws, topic);
+			_subscribeDenial = _unguarded;
+		}
 	}
 	endDeliveryAdmission(ws, topic, msg.rpc, streamArgs, !_subscribeDenial, _admission);
 	if (state.registrationRevision !== registrationRevision) {
@@ -1227,7 +1240,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	}
 	if (_subscribeDenial) {
 		_settleClaimBarriers(ws, topic, fn);
-		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : _subscribeDenial === TENANT_GUARD_REQUIRED ? TENANT_GUARD_CLIENT_MESSAGE : 'Access denied' };
 	}
 	if (subscribedRef.cancelled) {
 		// Answered by a middleware while the adapter admitted the subscribe:

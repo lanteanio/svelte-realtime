@@ -1112,7 +1112,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "5b340f7d1f76d136b1657024068bb5f97bdc74dfbc07ca3b04c9cca381277dac",
+			"fingerprint": "ee90bc5352004f84002c8d30d5ffbc8ab6ab1231ab2abe628ee53844eb969f90",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Multi-tenancy (`live.tenant`)",

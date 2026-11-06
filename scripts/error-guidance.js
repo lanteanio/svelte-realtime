@@ -237,6 +237,12 @@ export const CODE_GUIDANCE = Object.freeze({
 		automaticRecovery: 'The stream subscribes again after the next reconnect while it still has subscribers. Otherwise nothing retries.',
 		nextAction: 'Inspect the error message and server logs for the subscribe. Fix the cause, then `detach()` and `attach()` or resubscribe.'
 	}),
+	TENANT_GUARD_REQUIRED: Object.freeze({
+		cause: 'A tenant resolver is configured, and a stream, document or smooth subscribe of a tenant-scoped connection reached the adapter without passing the `subscribe` / `subscribeBatch` hooks from `realtime()`: hooks.ws exports its own subscribe hook, or none.',
+		consequence: 'The subscribe is refused before its loader runs and holds no membership, so no frame of the topic reaches the connection. Every tenant-scoped subscribe fails the same way until the hooks are exported. The server warns once with the fix.',
+		automaticRecovery: 'None. The configuration stays wrong until the server restarts with the hooks exported.',
+		nextAction: 'Export `subscribe` and `subscribeBatch` from the `realtime()` result in src/hooks.ws.js. Pass your own gate as `realtime({ subscribe, subscribeBatch })`; it then receives the logical topic and `ctx.tenantId`.'
+	}),
 	TIMEOUT: Object.freeze({
 		cause: 'No reply arrives within the timeout for an RPC, batch, binary RPC, stream subscribe, `loadMore` or upload (default 30s via `configure({ timeout })`). On the server, a `live.push` recipient does not answer within `timeoutMs`, `live.effect` calls stay pending past the `timeoutMs` of the effect (default 30000), or an RPC handler runs past its deadline (the route `timeout`, else `realtime({ rpc: { timeout } })`, default 30000), which fires `ctx.abortSignal` with this code as its reason.',
 		consequence: 'The call rejects with an RpcError, or a LiveError for `live.push`. A timed-out upload sends a cancel frame. The server may still have run the request. A timed-out effect call gives its slot back and its late result is ignored, though a late rejection is still reported; the handler itself keeps running.',

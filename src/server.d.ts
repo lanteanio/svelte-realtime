@@ -5717,6 +5717,21 @@ export interface RealtimeConfig {
 	 */
 	tenant?: ((user: RegisteredUser) => string | null | undefined) | null;
 	/**
+	 * Your subscribe gate, run by the `subscribe` hook `realtime()` returns.
+	 * It receives the logical topic, without the connection's tenant prefix,
+	 * with `ctx.tenantId` and the subscribed `ctx.wireTopic`; a topic of
+	 * another tenant never reaches it. A plugin hook it calls that keys state
+	 * by topic, such as presence or cursors, gets `ctx.wireTopic`. Return
+	 * `false` or a reason string to refuse.
+	 */
+	subscribe?: (ws: WebSocket<RegisteredUser>, topic: string, ctx: { platform: Platform; tenantId: string | null; wireTopic: string }) => boolean | string | void | Promise<boolean | string | void>;
+	/**
+	 * Batch form of `subscribe`, answered by logical topic; `ctx.wireTopics[i]`
+	 * is the wire topic of `topics[i]`. When given, `realtime()` also returns a
+	 * `subscribeBatch` hook, which the adapter then uses for single subscribes too.
+	 */
+	subscribeBatch?: (ws: WebSocket<RegisteredUser>, topics: string[], ctx: { platform: Platform; tenantId: string | null; wireTopics: string[] }) => Record<string, boolean | string> | void | Promise<Record<string, boolean | string> | void>;
+	/**
 	 * Opt-in admin / observability plane. When set, `realtime()` returns an
 	 * `admin(request)` handler (a Web `Request` -> `Response` router) for the
 	 * reserved `/__realtime/*` path - today `GET /__realtime/introspect` serves the
@@ -5998,6 +6013,21 @@ export interface RealtimeHooks {
 	open(ws: WebSocket<RegisteredUser>, ctx: { platform: Platform }): void;
 	close(ws: WebSocket<RegisteredUser>, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
 	message(ws: WebSocket<RegisteredUser>, ctx: { data: ArrayBuffer; platform: Platform }): void;
+	/**
+	 * Subscribe hook to export from `hooks.ws`. Refuses a topic of another
+	 * tenant, and any tenant-scoped topic of an untenanted connection, with
+	 * `'FORBIDDEN'`, then runs the `subscribe` / `subscribeBatch` gate from the
+	 * config with the logical topic and `ctx.tenantId`. Required with a tenant
+	 * resolver: a tenant-scoped subscribe that does not pass it fails with
+	 * `TENANT_GUARD_REQUIRED`.
+	 */
+	subscribe(ws: WebSocket<RegisteredUser>, topic: string, ctx: { platform: Platform }): Promise<boolean | string | void>;
+	/**
+	 * Batch form of `subscribe`, answering by wire topic. Present only when the
+	 * config passes `subscribeBatch`, so an exported `subscribe` of your own is
+	 * never shadowed by a batch hook you did not write.
+	 */
+	subscribeBatch?: (ws: WebSocket<RegisteredUser>, topics: string[], ctx: { platform: Platform }) => Promise<Record<string, boolean | string>>;
 	unsubscribe: typeof unsubscribe;
 	init(ctx: { platform: Platform }): void;
 	/**

@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer, setImmediateTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _beginGuardedSubscribe, _endGuardedSubscribe, _cancelGuardedSubscribe, _undoUnguardedSubscribe } from './subscribe-gate.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 import { _setResponseFence } from './response-fence.js';
 import { _subscribeTracked, releaseSubscription } from './membership.js';
@@ -3494,15 +3495,25 @@ export const _smoothRegister = function smooth(config) {
 			// which is what the broadcast walk delivers by. Reserved-prefix
 			// topics never ride the client's own subscribe frames.
 			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
+				// A tenant-scoped smooth topic must pass the hooks from realtime().
+				const tenantGuard = ctx.tenantId ? _beginGuardedSubscribe(ctx.ws, rec.wireTopic) : null;
 				let denial;
 				try {
 					const admission = ctx.platform.subscribe(ctx.ws, rec.wireTopic);
 					denial = admission && typeof admission.then === 'function' ? await admission : admission;
 				} catch (err) {
+					if (tenantGuard) _cancelGuardedSubscribe(ctx.ws, rec.wireTopic, tenantGuard);
 					// A wrapper can start an immediately settling admission and then
 					// throw. Drain its queued completion before releasing membership.
 					await new Promise(resolve => setImmediateTimer(resolve));
 					throw err;
+				}
+				if (tenantGuard) {
+					const unguarded = _endGuardedSubscribe(ctx.ws, rec.wireTopic, tenantGuard, denial);
+					if (unguarded !== null) {
+						_undoUnguardedSubscribe(ctx.platform, ctx.ws, rec.wireTopic);
+						throw new LiveError('TENANT_GUARD_REQUIRED', 'Subscribe refused: the server does not route subscribes through its tenant hooks');
+					}
 				}
 				if (denial) {
 					throw new LiveError(

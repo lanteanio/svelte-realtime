@@ -2193,17 +2193,17 @@ Tenant isolation is a platform concern, not something every handler has to remem
 It is strictly opt-in. With no resolver configured every scoping helper is a single null-check that returns its input unchanged, so the single-tenant path is byte-identical and zero-cost.
 
 ```js
-// hooks.ws.js (or wherever you call realtime())
+// src/hooks.ws.js
 import { realtime } from 'svelte-realtime/server';
-
-realtime({
-  // Map the authenticated user (ws.getUserData()) to a tenant id, or null for
-  // an unscoped connection. Server-trusted: the id is NEVER read off the wire.
-  tenant: (user) => user?.orgId ?? null
+export const { open, message, close, subscribe, subscribeBatch, unsubscribe, init, shutdown } = realtime({
+  // Map the authenticated user (ws.getUserData()) to a tenant id, or null. Server-trusted: never read off the wire.
+  tenant: (user) => user?.orgId ?? null,
+  // Your own subscribe gate, if any: it sees the logical topic, with the tenant on ctx.tenantId.
+  subscribe: (ws, topic, ctx) => !topic.startsWith('audit:') || ws.getUserData().isAuditor
 });
 ```
 
-The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars - a UUID fits). A resolver that throws or returns a malformed id fails the network RPC with `INTERNAL_ERROR` before its middleware, guard or handler runs. The response and framework diagnostic omit the rejected tenant value. A direct `.load()` call rejects or returns its configured fallback. See [tenant cleanup](docs/tenant-cleanup.md) for admitted subscription scope and connection cleanup.
+The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars - a UUID fits). A resolver that throws or returns a malformed id fails the network RPC with `INTERNAL_ERROR` before its middleware, guard or handler runs. The response and framework diagnostic omit the rejected tenant value. A direct `.load()` call rejects or returns its configured fallback. See [tenant cleanup](docs/tenant-cleanup.md) for admitted subscription scope and connection cleanup. Export `subscribe` (and `subscribeBatch`, returned when you pass a batch gate) from the `realtime()` result, as above: before any gate of yours runs, they refuse a subscribe to another tenant's topic, and any tenant-scoped topic of an untenanted connection, with `FORBIDDEN`, then hand the gate you pass as `realtime({ subscribe, subscribeBatch })` the logical topic in the same position, with `ctx.tenantId` and the subscribed `ctx.wireTopic` (`ctx.wireTopics[i]` for `topics[i]` in a batch gate). A plugin hook your gate calls that keys state by topic, such as presence or cursors, takes `ctx.wireTopic`, so its rosters stay per tenant; to keep such a hook of your own exported, call the returned `subscribe` first and run yours only when it allows. A gate exported directly would see the tenant-scoped wire topic (`@t/<tenant>/audit:acme`), which no pattern written against topic names matches, so a tenant-scoped subscribe that does not pass these hooks fails with `TENANT_GUARD_REQUIRED` instead of reaching such a gate.
 
 ### What you get
 

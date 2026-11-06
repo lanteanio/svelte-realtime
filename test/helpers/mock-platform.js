@@ -1,3 +1,5 @@
+import { _scopeSubscribe } from '../../src/server/subscribe-gate.js';
+
 /**
  * Create a mock platform that records publish/send calls.
  * Matches the core svelte-adapter-uws Platform interface.
@@ -34,12 +36,30 @@ export function mockPlatform() {
 			}
 		},
 		// platform.subscribe + platform.checkSubscribe mirrors of the real
-		// adapter. Default subscribe consults checkSubscribe (if a test
-		// has overridden it) before falling through to the bare
-		// ws.subscribe. Tests that want to assert denial-from-gate
+		// adapter. Like the adapter with an app that exports the subscribe
+		// hooks from realtime(), subscribe runs those hooks first (p.subscribeHook
+		// replaces them; null models an app that exports none), then consults
+		// checkSubscribe (if a test has overridden it) before falling through to
+		// the bare ws.subscribe. Tests that want to assert denial-from-gate
 		// behavior set p.checkSubscribe; tests that want to assert
 		// legacy-adapter behavior delete p.subscribe before handleRpc.
+		subscribeHook: undefined,
 		async subscribe(ws, topic) {
+			// Like the adapter, a topic the socket already holds runs no hook.
+			if (ws.isSubscribed?.(topic)) {
+				try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
+				return null;
+			}
+			if (p.subscribeHook === undefined) {
+				// The default hooks decide synchronously, so the membership below
+				// still lands before the first await, as it always did here.
+				const denial = _scopeSubscribe(ws, topic);
+				if (denial) return denial;
+			} else if (p.subscribeHook !== null) {
+				const result = await p.subscribeHook(ws, topic, { platform: p });
+				if (result === false) return 'FORBIDDEN';
+				if (typeof result === 'string') return result;
+			}
 			if (typeof p.checkSubscribe === 'function') {
 				const denial = await p.checkSubscribe(ws, topic);
 				if (denial) return denial;

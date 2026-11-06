@@ -3,6 +3,7 @@ import { __register, __registerGuard, __registerCron, __registerDerived, __regis
 import { isStaleRow } from './shared/merge.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
 import { _noteTopicPublish } from './server/publish-helpers.js';
+import { _scopeSubscribe } from './server/subscribe-gate.js';
 import { NEVER_ABORTED, _openRpcConnection } from './server/rpc-admission.js';
 
 /**
@@ -422,16 +423,19 @@ export function createTestEnv(options) {
 			return topicSubscribers.get(topic)?.size || 0;
 		},
 		// platform.subscribe / platform.checkSubscribe mirrors of the real
-		// adapter shape. The test platform has no user subscribe hooks, so
-		// these just delegate to ws.subscribe and report null (allow). Tests
-		// that need to exercise gate-denial paths can replace this mock
-		// with a custom platform.
+		// adapter shape, for an app that exports the subscribe hooks from
+		// realtime() without a gate of its own: a topic of another tenant is
+		// refused, anything else is allowed. Tests that need to exercise
+		// gate-denial paths can replace this mock with a custom platform.
 		async subscribe(ws, topic) {
+			// Like the adapter, a topic the socket already holds runs no hook.
+			const denial = ws.isSubscribed?.(topic) ? null : _scopeSubscribe(ws, topic);
+			if (denial) return denial;
 			try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
 			return null;
 		},
-		async checkSubscribe() {
-			return null;
+		async checkSubscribe(ws, topic) {
+			return _scopeSubscribe(ws, topic);
 		},
 		topic(t) {
 			return {

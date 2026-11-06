@@ -24,6 +24,7 @@ import {
 import { mockWs } from './helpers/mock-ws.js';
 import { WS_SUBSCRIPTIONS } from 'svelte-adapter-uws/testing';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 import svelteRealtime from '../src/vite.js';
 import { _purgeCrdtDocs } from '../src/server/crdt.js';
@@ -229,6 +230,27 @@ describe('live.doc sync', () => {
 		expect(ws.isSubscribed('__crdt:' + topic('r1'))).toBe(true);
 		expect(rt.calls.acquire).toEqual([topic('r1')]);
 		expect(rt.calls.diff[0].sv).toEqual([0]); // the client vector reached the diff
+	});
+
+	it('refuses a tenant-scoped document sync that the subscribe hooks never saw', async () => {
+		_setTenantResolver((user) => user.org ?? null);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { name } = declareBoard();
+			const ws = mockWs({ id: 'u1', org: 'acme' });
+			const platform = wirePlatform();
+			platform.subscribeHook = null;
+			const res = await call(ws, platform, name + '/board/__doc/sync', ['r1', []]);
+			expect(res).toMatchObject({ ok: false, code: 'TENANT_GUARD_REQUIRED' });
+			// This platform records unsubscribes instead of applying them.
+			expect(platform.unsubscribed.length).toBeGreaterThan(0);
+			expect(platform.unsubscribed.every((topic) => /^__crdt:@t\/acme\//.test(topic))).toBe(true);
+			const admitted = await call(mockWs({ id: 'u2', org: 'acme' }), wirePlatform(), name + '/board/__doc/sync', ['r1', []]);
+			expect(admitted.ok).toBe(true);
+		} finally {
+			warn.mockRestore();
+			_resetTenantResolver();
+		}
 	});
 
 	it('widens a boolean guard and enforces a record guard', async () => {

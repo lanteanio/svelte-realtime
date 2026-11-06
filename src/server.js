@@ -61,6 +61,7 @@ import {
 	_dynamicDerivedByFn
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
+import { _createSubscribeHooks } from './server/subscribe-gate.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _validateTenantConfig, _tenantConfigRegistry, _makeTenantScope, _tenantTopic, _TENANT_TOPIC_NS, _isTenancyEnabled } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
@@ -4617,7 +4618,10 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, aggregateGenerationStore, authorizeDelivery, deliveryAuthorizationOptions, rpc } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret, aggregateGenerationStore, authorizeDelivery, deliveryAuthorizationOptions, rpc, subscribe: appSubscribe, subscribeBatch: appSubscribeBatch } = cfg;
+	// The subscribe hooks scope every subscribed topic to the connection's tenant
+	// before the application's own gate sees it. Validated here, at startup.
+	const subscribeHooks = _createSubscribeHooks(appSubscribe, appSubscribeBatch);
 
 	// RPC admission limits for this worker. Validated here, so a bad value
 	// fails at startup; omitted keys keep their defaults.
@@ -4705,6 +4709,8 @@ export function realtime(config) {
 		open: pushHooks.open,
 		close: pushHooks.close,
 		message,
+		subscribe: subscribeHooks.subscribe,
+		subscribeBatch: subscribeHooks.subscribeBatch,
 		unsubscribe,
 		init(ctx) {
 			if (!ctx || !ctx.platform) {
