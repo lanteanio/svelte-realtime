@@ -27,6 +27,7 @@ registry metadata exists, together with its complete published row.
 | --- | --- | --- | --- | --- | --- | --- |
 | 0.6.0-next.91 | proposed | 2026-10-13T22:15:27.639Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.96 and svelte-adapter-uws-extensions 0.6.0-next.64 installed: all checks, 156 files, 4054 tests passed. |
 | 0.6.0-next.91 | published | 2026-10-13T22:28:50.738Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm records gitHead 54c8c55e2df0c0807650d20a72375d42591baec3 for 0.6.0-next.91, which adds only the proposed row above to this head. No release tag was created. The tarball matches 54c8c55 except CRLF line endings in 49 text files. |
+| 0.6.0-next.92 | proposed | 2026-11-06T16:39:25.867Z | c9e096c24bec88905fab0950a4294caa8aca9b31 | svelte-realtime@0.6.0-next.92 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.97 and with svelte-adapter-uws-extensions 0.6.0-next.65 installed from its release tarball (sha512-JYdqlmahr1E0FEFZsNhH16za4i/XVPAMkanSkIPTDlDQSiVR8hcKraMLs1ulZjUqBw5Smv8XE1FV8qRcyef2YA==): all checks, 248 files, 5770 tests passed. The Kit compatibility matrix on that adapter passed with no known adapter failures. |
 
 ## Published releases
 
