@@ -1694,8 +1694,8 @@ live.stream = function stream(topic, initFn, options) {
 				console.warn(
 					'[svelte-realtime] live.stream "' + _label + '"' +
 					' declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer ' +
-					'cannot cover reloads through the loader and delta.fromSeq is not called. Drop replay to resume ' +
-					'gaps through delta.fromSeq, or drop delta.fromSeq.'
+					'cannot cover reloads through the loader and delta.fromSeq is not called. A stream that resumes ' +
+					'through delta.fromSeq declares it without replay and publishes with its own seq.'
 				);
 			}
 		}

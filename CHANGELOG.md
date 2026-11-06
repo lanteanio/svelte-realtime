@@ -117,10 +117,16 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Detail:** [Changed engineering detail](#changed).
 - **Changed: stream resume from a replay buffer.** A stream that declares `replay` now takes a replay on resume only when the buffer can answer the whole gap, and otherwise reloads through its loader instead of calling `delta.fromSeq`, so a trimmed or restarted buffer no longer leaves stale rows and a `live.flag` resumes to its newest value.
   - **Affects:** Applications that declare streams with `replay` and expose `platform.replay`, especially those that also declare `delta.fromSeq`.
-  - **Action:** Drop `replay` from a stream that should resume its gaps through `delta.fromSeq`; declaring both now warns in dev.
+  - **Action:** Declare a stream that resumes its gaps through `delta.fromSeq` without `replay` and publish its events with their own `seq`; a stream that declares both resumes from the buffer or its loader and warns in dev.
   - **Requires:** Nothing beyond this release. Against an older server the client discards a crud or latest replay with a hole and reloads, while a set stream applies its newest entry; that includes an older server's `delta.fromSeq` answer, which is not marked, when its events are not numbered on from the cursor.
   - **Compatibility:** Behavior change: with a replay buffer, a buffer that cannot answer, including one whose store is unreachable such as during a Redis outage, now sends the resume to the loader, not to `delta.fromSeq`; a stream without a buffer uses `delta.fromSeq` as before.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: resume cursor of fromSeq streams.** A stream that resumes through `delta.fromSeq` keeps its own cursor when an answer carries no numbered event, instead of taking the replay buffer's unrelated counter, so a later resume no longer delivers events the client already has again or skips the events between its cursor and that counter.
+  - **Affects:** Applications whose streams declare `delta.fromSeq` without `replay` on a platform that installs `platform.replay`.
+  - **Action:** None.
+  - **Requires:** A server from this release; the client also keeps its cursor when an answer numbers its events below it.
+  - **Compatibility:** Fixed behavior; streams that declare `replay` are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: presence and multiplayer consistency.** Sticky presence, multiplayer selections and multiplayer locks now stay consistent between live members, late joiners and replicas, because payloads keep their exact bytes on the Redis roster, refused entries are never broadcast, oversized lock names are rejected, and updates for departed or erased members stop instead of reappearing later.
   - **Affects:** Applications using presence, multiplayer selections or locks, especially across replicas.
   - **Action:** None.
@@ -304,6 +310,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Live events are still applied in arrival order, and the cursor keeps the highest sequence seen, so an event that arrives after a later one and is still in flight when the socket drops is skipped by the next resume; the README's crud section covers `rowVersion` and its limits.
 
 ### Fixed
+
+- A `delta.fromSeq` answer without a numbered event leaves the client's cursor where it was. The server used to stamp such an answer with `platform.replay.seq(topic)`, a counter in the replay buffer's numbering, and the client took any answer's seq as its cursor, so a stream without `replay` on a platform with a buffer could resume from 0 and receive its events again, or from a stale higher counter and skip events. An incremental answer, from the buffer or `delta.fromSeq`, no longer moves the cursor back; a loader answer still sets the baseline.
 
 - `realtimeTransport()` imports `LiveError` and `RpcError` from their own modules instead of the server and client entries. A shared `src/hooks.js` therefore adds about 1 KB brotli to the browser bundle, where it previously carried the whole server runtime (about 109 KB brotli in a Vite 8 production build). A browser bundle budget test pins the module set the transport hook reaches.
 

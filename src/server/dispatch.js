@@ -1449,13 +1449,12 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 				// matched by the sensitive-key set).
 				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
 				if (_redact) events = _redact(events);
+				// The cursor stays in the application's numbering: an answer without
+				// a numbered event carries no seq, so the client keeps its cursor.
 				let respSeq;
 				if (events.length > 0) {
 					const last = events[events.length - 1];
 					if (last && typeof last.seq === 'number') respSeq = last.seq;
-				}
-				if (respSeq === undefined && platform.replay) {
-					try { respSeq = await platform.replay.seq(topic); } catch {}
 				}
 				const deltaResp = {
 					id, ok: true, data: events, topic,

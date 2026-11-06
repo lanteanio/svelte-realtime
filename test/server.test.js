@@ -12429,7 +12429,7 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		expect(fromSeqCalls).toEqual([3]);
 	});
 
-	it('tier 2: a stream without replay takes response.seq from platform.replay.seq when events lack seq fields', async () => {
+	it('tier 2: a stream without replay leaves response.seq out when events lack seq fields, whatever the buffer counter reads', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 		platform.replay = {
@@ -12447,7 +12447,7 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 
 		const response = platform.sent[0].data;
 		expect(response.replay).toBe(true);
-		expect(response.seq).toBe(99);
+		expect('seq' in response).toBe(false);
 	});
 
 	it('tier 2: empty array means "nothing missed" (no-op for client)', async () => {

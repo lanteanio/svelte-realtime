@@ -6098,6 +6098,32 @@ describe('stream resume-grace window', () => {
 		unsub2();
 	});
 
+	it('keeps the cursor on an incremental answer numbered lower and follows a loader answer', async () => {
+		const store = __stream('resume/guard', { merge: 'crud', key: 'id' });
+		const resumeOnce = async () => {
+			sendQueuedFn.mockClear();
+			const unsub = store.subscribe(() => {});
+			await flush();
+			return { request: sendQueuedFn.mock.calls[0][0], unsub };
+		};
+		let { request, unsub } = await resumeOnce();
+		simulateRpcResponse(request.id, { ok: true, data: [{ id: 1 }], topic: 'resume-guard', merge: 'crud', key: 'id', seq: 42 });
+		unsub(); await flush();
+		({ request, unsub } = await resumeOnce());
+		expect(request.seq).toBe(42);
+		// A delta.fromSeq answer numbered below the cursor leaves it where it was.
+		simulateRpcResponse(request.id, { ok: true, data: [{ seq: 3, event: 'created', data: { id: 2 } }], topic: 'resume-guard', merge: 'crud', key: 'id', seq: 3, replay: true, fromSeq: true });
+		unsub(); await flush();
+		({ request, unsub } = await resumeOnce());
+		expect(request.seq).toBe(42);
+		// A loader answer sets the new baseline, even a lower one.
+		simulateRpcResponse(request.id, { ok: true, data: [{ id: 1 }], topic: 'resume-guard', merge: 'crud', key: 'id', seq: 5 });
+		unsub(); await flush();
+		({ request, unsub } = await resumeOnce());
+		expect(request.seq).toBe(5);
+		unsub();
+	});
+
 	it('drops the cursor on a grace resume once the retained cursor exceeds resumeMaxCursorAgeMs', async () => {
 		// The grace window stays open (60s) but the cursor-age bound is tiny: a
 		// resume landing past the bound must rehydrate, not gap-fill a stale seq.

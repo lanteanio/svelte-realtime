@@ -1534,6 +1534,12 @@ Plain `console.warn` and `console.error` lines, outside the structured event for
 - Message pattern: <code>[svelte-realtime] a piiRedact factory topic has NO cluster-transient redaction coverage - &lt;value&gt; (derived skeleton: "&lt;value&gt;"). In a cluster, an instance that publishes to a resolved topic it never subscribed to relays the RAW, un-redacted frame to the peer holding the subscriber, which never re-redacts. Give the topic a leading literal namespace and single-segment args - e.g. (ctx, roomId) =&gt; 'chat:' + roomId - not a ctx-derived or variable-first topic. Publishing before a local subscription resolves the topic can send raw data, even on a single instance. Only topics already resolved by a local subscription have exact-topic coverage.</code>
 - [src/server.js](../src/server.js): Development-only declaration-time warning that states the cause, the single-instance and cluster consequences, and the topic shape that fixes it.
 
+<a id="diagnostic-console-608c1ad7c326f479"></a>
+### <code>console-608c1ad7c326f479</code>
+
+- Message pattern: <code>[svelte-realtime] live.stream "&lt;value&gt;" declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer cannot cover reloads through the loader and delta.fromSeq is not called. A stream that resumes through delta.fromSeq declares it without replay and publishes with its own seq.</code>
+- [src/server.js](../src/server.js): Development-only once-per-topic declaration warning that states which hook a resume uses and how a stream that resumes through delta.fromSeq is declared.
+
 <a id="diagnostic-console-608e723b70c5a292"></a>
 ### <code>console-608e723b70c5a292</code>
 
@@ -1738,12 +1744,6 @@ Plain `console.warn` and `console.error` lines, outside the structured event for
 
 - Message pattern: <code>[svelte-realtime] Live handlers are still loading after &lt;value&gt; s; serving requests without waiting for them.\n  See: https://svti.me/vite</code>
 - [src/vite/plugin.js](../src/vite/plugin.js): Printed only inside the Vite dev server; the line states what happens (requests are served without waiting) and links the Vite guide.
-
-<a id="diagnostic-console-baeb0cac2cec5e87"></a>
-### <code>console-baeb0cac2cec5e87</code>
-
-- Message pattern: <code>[svelte-realtime] live.stream "&lt;value&gt;" declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer cannot cover reloads through the loader and delta.fromSeq is not called. Drop replay to resume gaps through delta.fromSeq, or drop delta.fromSeq.</code>
-- [src/server.js](../src/server.js): Development-only once-per-topic declaration warning that states which hook a resume uses and both ways to resolve it inline.
 
 <a id="diagnostic-console-bbfe574a77bfeb80"></a>
 ### <code>console-bbfe574a77bfeb80</code>

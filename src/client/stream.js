@@ -2055,8 +2055,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_attachInstalledListener = false;
 				_attachAcquiredRef = false;
 
-				// Track sequence number for replay
-				if (response.seq !== undefined) _lastSeq = response.seq;
+				// Track sequence number for replay. An incremental answer (from the
+				// buffer or delta.fromSeq) never moves the cursor back; a loader answer
+				// sets a new baseline, which is lower after a buffer lost its history.
+				if (response.seq !== undefined && (response.replay !== true || _lastSeq === null || response.seq > _lastSeq)) _lastSeq = response.seq;
 
 				// Track version for delta sync
 				if (response.version !== undefined) _lastVersion = response.version;
