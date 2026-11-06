@@ -86,8 +86,10 @@ async function join(url) {
 	return client;
 }
 
-it.skipIf(!native).each([false, true])('announces idle local and remote joins to earlier non-owner subscribers (interest=%s)', async interest => {
-	const [ownerUrl, edgeUrl] = await pair(interest);
+it.skipIf(!native).each([
+	[false, false], [true, false], [false, true], [true, true]
+])('announces idle local and remote joins to earlier non-owner subscribers (interest=%s, pre-v1 coordinator=%s)', async (interest, preV1) => {
+	const [ownerUrl, edgeUrl] = await pair(interest, { preV1 });
 	await join(ownerUrl); // Establish the owner before the first forwarded sync.
 	const earlier = await join(edgeUrl);
 	for (const url of [ownerUrl, edgeUrl]) {

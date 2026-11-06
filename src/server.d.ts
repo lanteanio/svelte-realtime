@@ -3762,6 +3762,8 @@ export interface SmoothClusterHandlers {
  * Coordinator installed as platform.smooth. Lease mutation and authoritative
  * publishing must atomically check the live owner and epoch at the backend.
  * See docs/smooth-cluster.md for lifetime, durability, ordering, and cell rules.
+ * A coordinator without `ownershipVersion` (boolean leases, no epochs) runs on
+ * the pre-v1 path described there.
  */
 export interface SmoothCluster {
 	readonly ownershipVersion: 1;

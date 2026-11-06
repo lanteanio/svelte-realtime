@@ -1,10 +1,32 @@
 # Smooth cluster ownership
 
 `platform.smooth` implements the exported `SmoothCluster` interface with
-`ownershipVersion: 1`. A coordinator with boolean lease results is rejected with
-an actionable error before acquisition. Deploy compatible coordinators on every
-worker together; mixed ownership protocols do not provide fencing. A deployment
-without `platform.smooth` keeps the single-instance authority path.
+`ownershipVersion: 1`. Deploy compatible coordinators on every worker together;
+mixed ownership protocols do not provide fencing. A deployment without
+`platform.smooth` keeps the single-instance authority path. A coordinator that
+declares another version, or lacks `acquireOwner`, `renewOwner` or
+`releaseOwner`, is rejected with an actionable error before acquisition.
+
+## Pre-v1 coordinators
+
+A coordinator that does not declare `ownershipVersion` speaks the pre-v1
+contract: `acquireOwner(topic)` and `renewOwner(topic)` resolve to booleans, and
+relays carry no epoch. Realtime runs it on the pre-v1 path and logs one warning
+per coordinator:
+
+- A tenure starts when `acquireOwner` resolves `true` and lasts until a renewal
+  resolves `false`. A failed acquisition keeps a working local authority and a
+  failed renewal keeps the tenure, so entities keep moving through a coordinator
+  outage.
+- Realtime numbers each local tenure itself, so a new tenure still starts with
+  fresh command queues and simulation state.
+- Received broadcasts are deduplicated per owner instance: a new owner starts a
+  new sequence. Acknowledgements and sync replies are accepted as they arrive.
+- Nothing fences a replaced owner. During a takeover, its late broadcasts can
+  interleave with the new owner's until it learns it lost the lease.
+
+The Redis coordinator in `svelte-adapter-uws-extensions` up to
+`0.6.0-next.65` is a pre-v1 coordinator.
 
 ## Lease and epoch
 

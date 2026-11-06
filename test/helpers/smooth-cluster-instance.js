@@ -38,7 +38,24 @@ const server = await createTestServer({ handler: {
 	},
 	close
 } });
-server.platform.smooth = {
+server.platform.smooth = instance.preV1 ? {
+	// A coordinator on the pre-v1 contract, as svelte-adapter-uws-extensions
+	// ships it: boolean leases and relays that carry no epoch.
+	instanceId: instance.instanceId,
+	onMessage(next) {
+		handlers = next;
+		for (const message of pending.splice(0)) handlers[message.method](...message.args);
+	},
+	async acquireOwner() { return owner; },
+	async renewOwner() { return owner; },
+	async releaseOwner() { return true; },
+	requestSync(...args) { relay('onSync', args); },
+	sendSyncReply(topic, corr, _origin, payload) { relay('onSyncReply', [topic, corr, payload]); },
+	relayBroadcast(topic, event, data, exclude, seq) { relay('onBroadcast', [topic, event, data, exclude, seq, instance.instanceId]); },
+	relayCommand(...args) { relay('onCommand', args); },
+	relayAck(topic, identity, _origin, payload) { relay('onAck', [topic, identity, payload]); },
+	relayLeave(...args) { relay('onLeave', args); }
+} : {
 	ownershipVersion: 1,
 	instanceId: instance.instanceId,
 	onMessage(next) {

@@ -291,6 +291,16 @@ const _SMOOTH_SYNC_TIMEOUT_MS = 2000;
 const _SMOOTH_RENEW_MS = 3000;
 
 /**
+ * A coordinator that does not declare `ownershipVersion` speaks the pre-v1
+ * contract: boolean lease results, no epochs, no lease duration. Its tenure
+ * lasts until a renewal answers false, so it gets a duration no tick outlives.
+ */
+const _SMOOTH_PRE_V1_LEASE_MS = 2 ** 31 - 1;
+
+/** Pre-v1 coordinators already warned about, once each. */
+const _smoothPreV1Warned = new WeakSet();
+
+/**
  * Default debounce for the owner's warm-handoff snapshot write (ms). At most
  * this much entity state is lost on an owner crash; one Redis write per topic
  * per interval while the topic is owned and non-empty. Overridable per topic
@@ -1553,6 +1563,44 @@ function _smoothAcceptEpoch(rec, epoch, owner) {
 	return true;
 }
 
+/**
+ * The lease a pre-v1 coordinator's boolean answer stands for. A tenure keeps
+ * one local epoch while this instance holds it and a new tenure takes the
+ * next one, so the ownership state machine is the same as for v1; nothing
+ * fences another instance, as on the pre-v1 path. A coordinator failure keeps
+ * a working local authority, the pre-v1 availability tradeoff: an acquire
+ * that throws owns, a renewal that throws keeps the tenure.
+ * @param {any} rec
+ * @param {() => any} call The coordinator's acquireOwner or renewOwner call
+ * @param {string | null} renewing The tenure's epoch for a renewal, null for an acquisition
+ */
+async function _smoothPreV1Grant(rec, call, renewing) {
+	let held;
+	try { held = await call(); } catch { held = true; }
+	if (held !== true) return null;
+	const epoch = renewing ?? (rec.owned && rec.ownerEpoch !== null ? rec.ownerEpoch
+		: rec.lastSeenEpoch === null ? '1' : String(BigInt(rec.lastSeenEpoch) + 1n));
+	return { epoch, leaseMs: _SMOOTH_PRE_V1_LEASE_MS };
+}
+
+/**
+ * Accept a frame a pre-v1 coordinator relayed. It carries no epoch, so frames
+ * are deduplicated per owner instance, as on the pre-v1 path: a new owner
+ * starts a new sequence. The record's current epoch marks the frame as
+ * received for delivery.
+ * @param {any} rec
+ * @param {string | undefined} owner
+ * @returns {string}
+ */
+function _smoothPreV1Received(rec, owner) {
+	if (rec.lastSeenEpoch === null) rec.lastSeenEpoch = '1';
+	if (owner !== undefined && owner !== rec.lastSeenOwner) {
+		rec.lastSeenOwner = owner;
+		rec.lastSeenSeq = -1;
+	}
+	return rec.lastSeenEpoch;
+}
+
 function _smoothRenew(rec, cluster) {
 	const started = monotonicNow();
 	if (rec.ownerRenewing || started - rec.lastRenew < rec.ownerRenewMs) return;
@@ -1561,6 +1609,7 @@ function _smoothRenew(rec, cluster) {
 	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
 	Promise.resolve().then(() => {
 		if (!_smoothOwnerValid(rec, epoch) || generation !== rec.ownerGeneration) return null;
+		if (cluster.ownershipVersion !== 1) return _smoothPreV1Grant(rec, () => cluster.renewOwner(rec.wireTopic), epoch);
 		return cluster.renewOwner(rec.wireTopic, epoch);
 	}).then(grant => {
 		if (generation !== rec.ownerGeneration || _smoothTopics.get(rec.name) !== rec) return;
@@ -1580,7 +1629,10 @@ function _smoothAcquire(rec, cluster) {
 	let generation = rec.ownerGeneration;
 	const pending = (async () => {
 		let grant;
-		try { grant = await cluster.acquireOwner(rec.wireTopic); } catch { grant = null; }
+		if (cluster.ownershipVersion !== 1) grant = await _smoothPreV1Grant(rec, () => cluster.acquireOwner(rec.wireTopic), null);
+		else {
+			try { grant = await cluster.acquireOwner(rec.wireTopic); } catch { grant = null; }
+		}
 		if (_smoothTopics.get(rec.name) !== rec || rec.ownerGeneration !== generation) return false;
 		if (rec.owned && monotonicNow() >= rec.ownerDeadline) { _smoothDemote(rec); return false; }
 		if (!_smoothLease(grant, started) || _smoothCompareEpoch(grant.epoch, rec.lastSeenEpoch) < 0
@@ -2123,11 +2175,19 @@ function _smoothRequestSync(rec, cluster, identity, corr, ws) {
  */
 function _ensureSmoothCluster(smooth) {
 	if (!smooth) return;
-	if (smooth.ownershipVersion !== 1 || typeof smooth.acquireOwner !== 'function' || typeof smooth.renewOwner !== 'function' || typeof smooth.releaseOwner !== 'function') {
+	const preV1 = smooth.ownershipVersion === undefined;
+	if ((smooth.ownershipVersion !== 1 && !preV1) || typeof smooth.acquireOwner !== 'function' || typeof smooth.renewOwner !== 'function' || typeof smooth.releaseOwner !== 'function') {
 		throw new LiveError('INTERNAL', 'Smooth cluster requires ownershipVersion: 1 and fenced lease methods; upgrade the coordinator to the SmoothCluster contract');
+	}
+	if (preV1 && !_smoothPreV1Warned.has(smooth)) {
+		_smoothPreV1Warned.add(smooth);
+		console.warn('[svelte-realtime] live.smooth() cluster coordinator does not declare ownershipVersion: 1; it runs on the pre-v1 boolean ownership path, which cannot stop a replaced owner\'s late broadcasts during a takeover. Upgrade the coordinator to the SmoothCluster contract to fence them.\n  See: https://svti.me/smooth');
 	}
 	if (typeof smooth.onMessage !== 'function' || _smoothClustersWired.has(smooth)) return;
 	_smoothClustersWired.add(smooth);
+	// The epoch a received frame is delivered under, or null to drop it.
+	/** @type {(rec: any, epoch: any, owner?: string) => string | null} */
+	const deliveredUnder = (rec, epoch, owner) => preV1 ? _smoothPreV1Received(rec, owner) : _smoothAcceptEpoch(rec, epoch, owner) ? epoch : null;
 	smooth.onMessage({
 		// Owner: a non-owner forwarded a client's command batch. Ensure the
 		// client's surrogate entity (idle until commands flow), drop ids the
@@ -2170,12 +2230,13 @@ function _ensureSmoothCluster(smooth) {
 		// Requester: the owner answered our cold-join sync. Resolve the pending.
 		onSyncReply: (wireTopic, corr, payload, epoch) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !_smoothAcceptEpoch(rec, epoch)) return;
+			const accepted = rec ? deliveredUnder(rec, epoch) : null;
+			if (accepted === null) return;
 			const pending = rec.pendingSync.get(corr);
 			if (!pending) return;
 			rec.pendingSync.delete(corr);
 			if (pending.timer !== null) clearTimer(pending.timer);
-			pending.resolve({ payload, epoch });
+			pending.resolve({ payload, epoch: accepted });
 		},
 		// Every instance: the owner relayed a broadcast. Drop older epochs and
 		// seen/regressing sequences; only a higher epoch resets the counter.
@@ -2197,26 +2258,28 @@ function _ensureSmoothCluster(smooth) {
 				// The owner stamps base events and cell frames from ONE counter
 				// (rec.eventSeq) on one in-order channel, so the record's per-owner
 				// watermark covers both families.
-				if (!_smoothAcceptEpoch(rec, epoch, ownerInstance)) return;
+				const accepted = deliveredUnder(rec, epoch, ownerInstance);
+				if (accepted === null) return;
 				if (seq <= rec.lastSeenSeq) return;
 				rec.lastSeenSeq = seq;
 				// A live owner republishes nothing (its own publish already reached
 				// local sockets; its own relays are instanceId-suppressed anyway).
 				if (rec.owned) return;
-				_smoothPublishCell(rec, cellHit.cellKey, event, data, epoch);
+				_smoothPublishCell(rec, cellHit.cellKey, event, data, accepted);
 				// Own-entity follow: a relayed update for a LOCAL subscriber's own
 				// entity re-places its cell block (the non-owner has no tick follow).
 				// Covers server-driven (onMissing) motion; commanded motion is also
 				// followed on the ack path.
 				if (event === 'update' && data && typeof data.key === 'string') {
 					const ws = rec.registry.get(data.key);
-					if (ws !== undefined) _smoothCellFollow(rec, data.key, ws, data.data, epoch);
+					if (ws !== undefined) _smoothCellFollow(rec, data.key, ws, data.data, accepted);
 				}
 				return;
 			}
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec) return;
-			if (!_smoothAcceptEpoch(rec, epoch, ownerInstance)) return;
+			const accepted = deliveredUnder(rec, epoch, ownerInstance);
+			if (accepted === null) return;
 			if (seq <= rec.lastSeenSeq) return;
 			rec.lastSeenSeq = seq;
 			if (rec.interest !== null && !rec.owned) {
@@ -2236,12 +2299,13 @@ function _ensureSmoothCluster(smooth) {
 				}
 			}
 			const excludeWs = excludeIdentity !== undefined ? rec.registry.get(excludeIdentity) : undefined;
-			if (!rec.owned) _smoothPublish(rec, event, data, excludeWs, epoch);
+			if (!rec.owned) _smoothPublish(rec, event, data, excludeWs, accepted);
 		},
 		// The commanding client's instance: deliver the owner's ack to its socket.
 		onAck: (wireTopic, identity, payload, epoch) => {
 			const rec = _smoothRecByWire(wireTopic);
-			if (!rec || !_smoothAcceptEpoch(rec, epoch)) return;
+			const accepted = rec ? deliveredUnder(rec, epoch) : null;
+			if (accepted === null) return;
 			// Capture the owner's wall stamp (carried on every ack) so a non-owner can
 			// reconstruct the owner's clock for an edge-measured forwarded shot. Gated
 			// on hitTest so a non-lag-comp topic pays nothing.
@@ -2251,12 +2315,12 @@ function _ensureSmoothCluster(smooth) {
 			}
 			const ws = rec.registry.get(identity);
 			if (ws !== undefined) {
-				_smoothSendTo(rec, ws, 'ack', payload, epoch);
+				_smoothSendTo(rec, ws, 'ack', payload, accepted);
 				// Cells mode: the ack carries the authoritative post-drain state, so a
 				// non-owner follows its local subscriber's own entity from it (the
 				// non-owner counterpart of the tick's own-entity follow).
 				if (rec.cells && payload && payload.state !== undefined) {
-					_smoothCellFollow(rec, identity, ws, payload.state, epoch);
+					_smoothCellFollow(rec, identity, ws, payload.state, accepted);
 				}
 			}
 		},

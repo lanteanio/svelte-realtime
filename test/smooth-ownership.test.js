@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as runtime from 'svelte-adapter-uws/plugins/smooth';
 import { live, handleRpc, close, __register, _setSmoothRuntime, _resetSmooth } from '../src/server.js';
 import { _smoothTopics } from '../src/server/smooth.js';
@@ -94,11 +94,102 @@ it.each([false, true])('never reopens an older epoch when owner identities alter
 	expect(platform.published.filter(message => message.event === 'event')).toEqual([]);
 });
 
-it('fails closed on a coordinator without the ownership contract', async () => {
-	delete platform.smooth.ownershipVersion; declare();
+it.each([
+	['an unknown ownership version', (smooth) => { smooth.ownershipVersion = 2; }],
+	['a missing lease method', (smooth) => { delete smooth.releaseOwner; }],
+	['a pre-v1 coordinator without lease methods', (smooth) => { delete smooth.ownershipVersion; delete smooth.renewOwner; }]
+])('fails closed on %s', async (_name, change) => {
+	change(platform.smooth); declare();
 	const result = await rpc('sync');
 	expect(result.ok).toBe(false);
 	expect(platform.smooth.acquireOwner).not.toHaveBeenCalled();
+});
+
+describe('a coordinator without ownershipVersion', () => {
+	let owner, renew, warn;
+	beforeEach(() => {
+		owner = true; renew = async () => true;
+		warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		delete platform.smooth.ownershipVersion;
+		platform.smooth.acquireOwner = vi.fn(async () => owner);
+		platform.smooth.renewOwner = vi.fn(async () => renew());
+	});
+	const wire = () => '__smooth:' + topic;
+	const updates = () => platform.published.filter(message => message.topic === wire() && message.event === 'update').map(message => message.data.data.x);
+
+	it('runs on the pre-v1 boolean path with one warning per coordinator', async () => {
+		declare(); expect((await rpc('sync')).ok).toBe(true);
+		expect((await rpc('sync')).ok).toBe(true);
+		const rec = _smoothTopics.get(topic);
+		expect(rec.owned).toBe(true);
+		expect(platform.smooth.acquireOwner).toHaveBeenCalledWith(wire());
+		expect(warn.mock.calls.filter(([message]) => String(message).includes('pre-v1 boolean ownership path'))).toHaveLength(1);
+		await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		expect(applied).toBe(1);
+		expect(platform.smooth.relayBroadcast).toHaveBeenCalled();
+	});
+
+	it('keeps the tenure while renewals answer true or throw, and ends it when one answers false', async () => {
+		declare(); await rpc('sync');
+		const rec = _smoothTopics.get(topic);
+		renew = async () => { throw Error('redis blip'); };
+		fire(); await settle(); await settle();
+		expect(platform.smooth.renewOwner).toHaveBeenCalledWith(wire());
+		expect(rec.owned).toBe(true);
+		const epoch = rec.ownerEpoch;
+		renew = async () => true;
+		mono += 3000; fire(mono); await settle(); await settle();
+		expect(rec.owned).toBe(true);
+		expect(rec.ownerEpoch).toBe(epoch);
+		renew = async () => false;
+		mono += 3000; fire(mono); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+	});
+
+	it('starts a new epoch and authority for a new tenure', async () => {
+		declare(); await rpc('sync'); await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		const rec = _smoothTopics.get(topic);
+		const first = rec.ownerEpoch;
+		renew = async () => false;
+		mono += 3000; fire(mono); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+		expect((await rpc('sync')).ok).toBe(true);
+		expect(rec.owned).toBe(true);
+		expect(BigInt(rec.ownerEpoch)).toBeGreaterThan(BigInt(first));
+		expect(rec.authority.get('player').state).toEqual({ x: 0, y: 0 });
+	});
+
+	it('keeps a working local authority when acquisition rejects, as the pre-v1 path does', async () => {
+		platform.smooth.acquireOwner = vi.fn(async () => { throw Error('offline'); });
+		declare(); expect((await rpc('sync')).ok).toBe(true);
+		expect(_smoothTopics.get(topic).owned).toBe(true);
+		await rpc('command', [[{ id: 1, cmd: { dx: 1 } }]]); fire();
+		expect(applied).toBe(1);
+	});
+
+	it('delivers relays without an epoch and deduplicates them per owner instance', async () => {
+		owner = false;
+		declare(); await answerSync(rpc('sync'), undefined);
+		const rec = _smoothTopics.get(topic);
+		expect(rec.owned).toBe(false);
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 1, y: 0 } }, undefined, 0, 'first');
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 9, y: 0 } }, undefined, 0, 'first');
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 2, y: 0 } }, undefined, 1, 'first');
+		// A new owner starts its own sequence.
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 3, y: 0 } }, undefined, 0, 'second');
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 8, y: 0 } }, undefined, 0, 'second');
+		expect(updates()).toEqual([1, 2, 3]);
+		handlers.onAck(wire(), 'player', { id: 4, state: { x: 4, y: 0 } });
+		expect(platform.sent.filter(message => message.event === 'ack').map(message => message.data.id)).toEqual([4]);
+	});
+
+	it('completes a non-owner sync from a reply without an epoch', async () => {
+		owner = false;
+		declare();
+		const result = await answerSync(rpc('sync'), undefined);
+		expect(result.ok).toBe(true);
+		expect(platform.smooth.requestSync).toHaveBeenCalledOnce();
+	});
 });
 
 it('does not promote an acquisition whose lease elapsed while awaiting its reply', async () => {
