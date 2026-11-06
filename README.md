@@ -4642,28 +4642,28 @@ How it works:
 
 ### Three-tier reconnect with `delta.fromSeq`
 
-For seq-based reconnects of a stream without a replay buffer, `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. A stream with one resumes from the buffer, and a gap the buffer cannot cover, or a buffer read that fails, goes to the loader rather than to this hook; declaring both `replay` and `delta.fromSeq` warns in dev. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
+For seq-based reconnects of a stream without a replay buffer, `delta.fromSeq(sinceSeq, ctx, ...args)` is the user-supplied bridge to the durable store. Like `delta.version(ctx, ...args)` and `delta.diff(sinceVersion, ctx, ...args)`, it receives after its cursor the `ctx` and arguments the loader receives, so a stream with a topic factory reads only the events of the topic they name; a hook that ignored them would answer every subscriber with every topic's events, and declaring `diff` or `fromSeq` with at most one parameter on such a stream warns in dev. A stream with a replay buffer resumes from the buffer, and a gap the buffer cannot cover, or a buffer read that fails, goes to the loader rather than to this hook; declaring both `replay` and `delta.fromSeq` warns in dev. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
 <!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
   (ctx, orgId) => `audit:${orgId}`,
   async (ctx, orgId) => loadAudit(orgId, { limit: 200 }),
   {
-    merge: 'crud',
-    key: 'id',
+    merge: 'crud', key: 'id',
+    access: live.access.org(),
     delta: {
-      fromSeq: async (sinceSeq) => {
-        const events = await db.auditEvents.where('seq', '>', sinceSeq).orderBy('seq').limit(500);
-        if (events.length === 0) return [];        // nothing missed, no-op
-        if (events.length === 500) return null;     // too many -> fall through to full rehydrate
-        return events;
+      fromSeq: async (sinceSeq, ctx, orgId) => {
+        const rows = await db.auditEvents.where({ orgId }).where('seq', '>', sinceSeq).orderBy('seq').limit(500);
+        if (rows.length === 500) return null;      // too many -> fall through to full rehydrate
+        return rows.map((row) => ({ event: 'created', data: row, seq: row.seq })); // [] = nothing missed
       }
     }
   }
 );
+// Wherever a row is written, publish it with its stored number: ctx.publish(`audit:${orgId}`, 'created', row, { seq: row.seq });
 ```
 
-Resolution order on reconnect-with-seq: a stream with a replay buffer resumes from it (bounded, fast) or from the loader; a stream without one calls `delta.fromSeq(clientSeq)` (this hook) and falls back to a full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, answers with the loader. A `merge: 'set'` stream, `live.flag` included, needs only the newest event, reaching the current sequence: each one replaces the whole value. Returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks them without extra plumbing.
+Resolution order on reconnect-with-seq: a stream with a replay buffer resumes from it (bounded, fast) or from the loader; a stream without one calls `delta.fromSeq(clientSeq, ctx, ...args)` (this hook) and falls back to a full rehydrate via the loader (always safe). The replay buffer answers only when it returns every event after the client's `seq` without a hole; a buffer trimmed past it, or one whose sequence restarted behind it, answers with the loader. A `merge: 'set'` stream, `live.flag` included, needs only the newest event, reaching the current sequence: each one replaces the whole value. The hook returns the missed events oldest first as `{ event, data, seq }` envelopes, the shape a live publish delivers; returning `[]` signals "nothing missed" (client no-op). The answer is applied as given, without the replay buffer's continuity check. The client resumes from the `seq` of the last event it received, live or answered, so every live event of the stream is published with the same number as its stored row, `ctx.publish(topic, event, row, { seq: row.seq })`, a positive integer; without it the frame carries the adapter's own counter and the next `fromSeq` reads from the wrong place. Publish through `ctx.publish` as usual, also behind a cluster bus; the [adapter's publish options](https://github.com/lanteanio/svelte-adapter-uws#platformpublishtopic-event-data-options) describe how an explicit `seq` is carried. An answer without a numbered event leaves the cursor where it was.
 
 ### Replay
 

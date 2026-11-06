@@ -493,6 +493,9 @@ const _redactUncompilableWarned = new Set();
 /** One-shot dedup for the "replay and delta.fromSeq both declared" warning (keyed by topic source). */
 const _replayFromSeqWarned = new Set();
 
+/** One-shot dedup for the "delta hook may not be scoped to its topic" warning (keyed by topic source and hook). */
+const _deltaScopeWarned = new Set();
+
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
 
@@ -1696,6 +1699,26 @@ live.stream = function stream(topic, initFn, options) {
 					' declares both replay and delta.fromSeq. Where platform.replay is installed, a resume the buffer ' +
 					'cannot cover reloads through the loader and delta.fromSeq is not called. A stream that resumes ' +
 					'through delta.fromSeq declares it without replay and publishes with its own seq.'
+				);
+			}
+		}
+		// A topic factory gives every subscriber its own topic, but a diff or
+		// fromSeq hook that declares no parameter after its cursor cannot tell
+		// those topics apart. fn.length undercounts rest and default parameters,
+		// so this warns rather than refuses. Once per factory and hook.
+		if (_IS_DEV && typeof topic === 'function') {
+			for (const [_hook, _cursor] of [['diff', 'sinceVersion'], ['fromSeq', 'sinceSeq']]) {
+				const _fn = delta[_hook];
+				if (typeof _fn !== 'function' || _fn.length > 1) continue;
+				const _key = _hook + '\0' + String(topic);
+				if (_deltaScopeWarned.has(_key)) continue;
+				_deltaScopeWarned.add(_key);
+				const _label = String(topic).replace(/\s+/g, ' ').slice(0, 80);
+				console.warn(
+					'[svelte-realtime] live.stream with topic factory "' + _label + '"' +
+					' declares delta.' + _hook + ' with at most one parameter, so it may not be scoped to its topic. ' +
+					'delta.' + _hook + ' receives (' + _cursor + ', ctx, ...args), the ctx and arguments the loader receives; ' +
+					'use them to read only the changes of the topic they name.'
 				);
 			}
 		}

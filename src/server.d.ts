@@ -880,40 +880,54 @@ export interface StreamOptions extends LiveOptions {
 	 *
 	 * - **Seq-based delta** (`fromSeq`): the user-provided bridge for a
 	 *   stream without a replay buffer. On a resume the server calls
-	 *   `fromSeq(clientSeq)` to fetch missed events from the durable store
-	 *   (e.g., Postgres). Resolution order:
+	 *   `fromSeq(clientSeq, ctx, ...args)` to fetch missed events from the
+	 *   durable store (e.g., Postgres). Resolution order:
 	 *
 	 *   1. Replay buffer (bounded, fast) - if `replay: true` is set and the
 	 *      platform exposes `platform.replay`. A gap the buffer cannot cover
 	 *      goes to the loader, not to this hook; declaring both warns in dev.
-	 *   2. `delta.fromSeq(clientSeq)` - this hook, for a stream without one.
+	 *   2. `delta.fromSeq(clientSeq, ctx, ...args)` - this hook, for a stream
+	 *      without one.
 	 *   3. Full rehydrate via the loader (always safe).
 	 *
 	 *   Returning `null`/`undefined` falls through to rehydrate. Returning
-	 *   `[]` means "nothing missed" (no-op for the client). Each event
-	 *   should carry a `seq` field so the client's `_lastSeq` advances.
+	 *   `[]` means "nothing missed" (no-op for the client). The client resumes
+	 *   from the `seq` of the last event it received, so publish every live
+	 *   event of the stream with the same number:
+	 *   `ctx.publish(topic, 'created', row, { seq: row.seq })`.
+	 *
+	 * Every hook receives, after its cursor, the `ctx` and arguments the
+	 * loader receives. A stream with a topic factory reads only the changes of
+	 * the topic they name; a hook that ignores them would answer every
+	 * subscriber with every topic's changes, and declaring one with at most
+	 * one parameter on such a stream warns in dev.
 	 */
 	delta?: {
-		/** Return the current version/hash of the data. Must be fast. */
-		version?(): any | Promise<any>;
-		/** Return only the items that changed since `sinceVersion`. Return null to force full refetch. */
-		diff?(sinceVersion: any): any[] | Promise<any[] | null> | null;
+		/** Return the current version/hash of this topic's data. Must be fast. */
+		version?(ctx: LiveContext, ...args: any[]): any | Promise<any>;
+		/** Return only the items of this topic that changed since `sinceVersion`. Return null to force full refetch. */
+		diff?(sinceVersion: any, ctx: LiveContext, ...args: any[]): any[] | Promise<any[] | null> | null;
 		/**
 		 * Bridge tier for seq-based reconnect of a stream without a replay
-		 * buffer. Returns the events the client missed, or
-		 * `null`/`undefined` to fall through to full rehydrate.
+		 * buffer. Returns the `{ event, data, seq }` envelopes the client
+		 * missed, oldest first, or `null`/`undefined` to fall through to full
+		 * rehydrate.
 		 *
 		 * @example
 		 * ```js
 		 * delta: {
-		 *   fromSeq: async (sinceSeq) => db.audit
-		 *     .where('seq', '>', sinceSeq)
-		 *     .orderBy('seq', 'asc')
-		 *     .get()
+		 *   fromSeq: async (sinceSeq, ctx, orgId) => {
+		 *     const rows = await db.audit
+		 *       .where({ orgId })
+		 *       .where('seq', '>', sinceSeq)
+		 *       .orderBy('seq', 'asc')
+		 *       .get();
+		 *     return rows.map((row) => ({ event: 'created', data: row, seq: row.seq }));
+		 *   }
 		 * }
 		 * ```
 		 */
-		fromSeq?(sinceSeq: number): any[] | null | undefined | Promise<any[] | null | undefined>;
+		fromSeq?(sinceSeq: number, ctx: LiveContext, ...args: any[]): any[] | null | undefined | Promise<any[] | null | undefined>;
 	};
 
 	/**

@@ -117,15 +117,21 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Detail:** [Changed engineering detail](#changed).
 - **Changed: stream resume from a replay buffer.** A stream that declares `replay` now takes a replay on resume only when the buffer can answer the whole gap, and otherwise reloads through its loader instead of calling `delta.fromSeq`, so a trimmed or restarted buffer no longer leaves stale rows and a `live.flag` resumes to its newest value.
   - **Affects:** Applications that declare streams with `replay` and expose `platform.replay`, especially those that also declare `delta.fromSeq`.
-  - **Action:** Declare a stream that resumes its gaps through `delta.fromSeq` without `replay` and publish its events with their own `seq`; a stream that declares both resumes from the buffer or its loader and warns in dev.
+  - **Action:** Declare a stream that resumes its gaps through `delta.fromSeq` without `replay` and publish its events with their own `seq`; where `platform.replay` is installed, a stream that declares both resumes from the buffer or its loader, and it warns in dev.
   - **Requires:** Nothing beyond this release. Against an older server the client discards a crud or latest replay with a hole and reloads, while a set stream applies its newest entry; that includes an older server's `delta.fromSeq` answer, which is not marked, when its events are not numbered on from the cursor.
   - **Compatibility:** Behavior change: with a replay buffer, a buffer that cannot answer, including one whose store is unreachable such as during a Redis outage, now sends the resume to the loader, not to `delta.fromSeq`; a stream without a buffer uses `delta.fromSeq` as before.
   - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: resume cursor of fromSeq streams.** A stream that resumes through `delta.fromSeq` keeps its own cursor when an answer carries no numbered event, instead of taking the replay buffer's unrelated counter, so a later resume no longer delivers events the client already has again or skips the events between its cursor and that counter.
   - **Affects:** Applications whose streams declare `delta.fromSeq` without `replay` on a platform that installs `platform.replay`.
-  - **Action:** None.
-  - **Requires:** A server from this release; the client also keeps its cursor when an answer numbers its events below it.
-  - **Compatibility:** Fixed behavior; streams that declare `replay` are unchanged.
+  - **Action:** None for a stream that publishes its live events with their own `seq`; one that does not publishes them with it, since the client's cursor otherwise follows the adapter's counter rather than the numbering `delta.fromSeq` reads.
+  - **Requires:** A server from this release.
+  - **Compatibility:** Fixed behavior; an incremental answer, from the buffer or `delta.fromSeq`, no longer moves the cursor back, and a loader answer still sets it.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: delta hooks scoped to their topic.** `delta.version`, `delta.diff` and `delta.fromSeq` now receive the `ctx` and arguments the stream's loader receives after their cursor, so a stream whose topic factory returns `'audit:' + orgId` answers a resume with the changes of its own topic, where the documented `delta.fromSeq` example read every organization's events.
+  - **Affects:** Applications that declare `delta.diff` or `delta.fromSeq` on a stream with a topic factory, especially those that copied the documented example.
+  - **Action:** Filter such a hook by the `ctx` and arguments it now receives, as the README example does; one declared with at most one parameter warns in dev.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Additive for a hook that declares only its cursor; a hook whose second parameter has a default value now receives `ctx` in that slot, so move such a parameter into a closure.
   - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: presence and multiplayer consistency.** Sticky presence, multiplayer selections and multiplayer locks now stay consistent between live members, late joiners and replicas, because payloads keep their exact bytes on the Redis roster, refused entries are never broadcast, oversized lock names are rejected, and updates for departed or erased members stop instead of reappearing later.
   - **Affects:** Applications using presence, multiplayer selections or locks, especially across replicas.
@@ -312,6 +318,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 ### Fixed
 
 - A `delta.fromSeq` answer without a numbered event leaves the client's cursor where it was. The server used to stamp such an answer with `platform.replay.seq(topic)`, a counter in the replay buffer's numbering, and the client took any answer's seq as its cursor, so a stream without `replay` on a platform with a buffer could resume from 0 and receive its events again, or from a stale higher counter and skip events. An incremental answer, from the buffer or `delta.fromSeq`, no longer moves the cursor back; a loader answer still sets the baseline.
+
+- `delta.version(ctx, ...args)`, `delta.diff(sinceVersion, ctx, ...args)` and `delta.fromSeq(sinceSeq, ctx, ...args)` receive the `ctx` and the validated arguments the stream's loader receives. They used to receive only their cursor, so on a stream with a topic factory they could not tell one subscriber's topic from another's. The README's `delta.fromSeq` example and the one in the type declarations read the audit events of every organization after the cursor and answered a resume with other organizations' rows, and both returned bare rows, which the client does not merge. Both now filter by the organization argument and return `{ event, data, seq }` envelopes; the README example checks membership with `live.access.org()` and states that live events are published with `{ seq }` in the same numbering. In development, a stream with a topic factory whose `delta.diff` or `delta.fromSeq` declares at most one parameter warns once that the hook may not be scoped to its topic; a parameter count cannot see rest or default parameters, so it does not refuse the declaration.
 
 - `realtimeTransport()` imports `LiveError` and `RpcError` from their own modules instead of the server and client entries. A shared `src/hooks.js` therefore adds about 1 KB brotli to the browser bundle, where it previously carried the whole server runtime (about 109 KB brotli in a Vite 8 production build). A browser bundle budget test pins the module set the transport hook reaches.
 

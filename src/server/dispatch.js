@@ -1367,18 +1367,20 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 		if (/** @type {any} */ (fn).__streamInvalidateOn) _registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
 	};
 
-	// Delta sync
+	// Delta sync. Every delta hook receives, after its cursor, the ctx and
+	// arguments the loader receives, so a stream whose topic depends on them
+	// can read only that topic's changes.
 	const deltaOpts = /** @type {any} */ (fn).__delta;
 	const clientVersion = msg.version;
 	if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
 		try {
-			const currentVersion = await deltaOpts.version();
+			const currentVersion = await deltaOpts.version(ctx, ...streamArgs);
 			_assertRegistrationRevision(registrationRevision);
 			if (currentVersion === clientVersion) {
 				armReloads();
 				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
 			}
-			let diff = await deltaOpts.diff(clientVersion);
+			let diff = await deltaOpts.diff(clientVersion, ctx, ...streamArgs);
 			_assertRegistrationRevision(registrationRevision);
 			if (diff !== null && diff !== undefined) {
 				// piiRedact on the user-bridged delta egress (this diff is computed
@@ -1440,7 +1442,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	// Seq-delta (user-provided bridge for older-than-buffer reconnects)
 	if (!resumesFromBuffer && deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
 		try {
-			let events = await deltaOpts.fromSeq(clientSeq);
+			let events = await deltaOpts.fromSeq(clientSeq, ctx, ...streamArgs);
 			_assertRegistrationRevision(registrationRevision);
 			if (Array.isArray(events)) {
 				// piiRedact on the user-bridged seq-delta egress (these events come
@@ -1542,7 +1544,7 @@ async function _executeStreamRpcInner(ws, platform, fn, ctx, args, msg, subscrib
 	}
 	if (typeof clientSeq === 'number') response.replay = false;
 	if (deltaOpts && deltaOpts.version) {
-		try { response.version = await deltaOpts.version(); } catch {}
+		try { response.version = await deltaOpts.version(ctx, ...streamArgs); } catch {}
 	}
 	if (serverVersion !== undefined) response.schemaVersion = serverVersion;
 

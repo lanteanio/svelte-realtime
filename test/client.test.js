@@ -6116,8 +6116,8 @@ describe('stream resume-grace window', () => {
 		unsub(); await flush();
 		({ request, unsub } = await resumeOnce());
 		expect(request.seq).toBe(42);
-		// A loader answer sets the new baseline, even a lower one.
-		simulateRpcResponse(request.id, { ok: true, data: [{ id: 1 }], topic: 'resume-guard', merge: 'crud', key: 'id', seq: 5 });
+		// A loader answer to a resume sets the new baseline, even a lower one.
+		simulateRpcResponse(request.id, { ok: true, data: [{ id: 1 }], topic: 'resume-guard', merge: 'crud', key: 'id', seq: 5, replay: false });
 		unsub(); await flush();
 		({ request, unsub } = await resumeOnce());
 		expect(request.seq).toBe(5);

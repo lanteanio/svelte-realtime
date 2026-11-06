@@ -36,7 +36,8 @@ describe('delta.fromSeq resume cursor', () => {
 	});
 
 	it('omits seq when the answered events carry no numbers', async () => {
-		const { response } = await resume('fsc/unnumbered', async () => [{ event: 'created', data: { id: 3 } }], 99);
+		const { response, counterCalls } = await resume('fsc/unnumbered', async () => [{ event: 'created', data: { id: 3 } }], 99);
 		expect('seq' in response).toBe(false);
+		expect(counterCalls).toEqual([]);
 	});
 });
