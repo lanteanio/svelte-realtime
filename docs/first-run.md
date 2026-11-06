@@ -6,9 +6,9 @@ by hand.
 
 ## Audited candidate tuple
 
-- `svelte-adapter-uws@0.6.0-next.96`
-- `svelte-realtime@0.6.0-next.91`
-- `svelte-adapter-uws-extensions@0.6.0-next.64`
+- `svelte-adapter-uws@0.6.0-next.97`
+- `svelte-realtime@0.6.0-next.92`
+- `svelte-adapter-uws-extensions@0.6.0-next.65`
 - `https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz`
 
 The candidate versions must be published together before the registry command

@@ -38,7 +38,7 @@
 	"blocks": [
 		{
 			"document": "README.md",
-			"fingerprint": "c8cc72c7020f9d38ecbdc6c753ba7f634ab63ebaf3fea20b44ff46590e0897ea",
+			"fingerprint": "d6e1f3648ad3f557a131160a2ed1b9e556e3338d1d3d5345cdbc4de27a247def",
 			"occurrence": 1,
 			"language": "bash",
 			"section": "Quick start",
@@ -47,7 +47,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "503583bb73e45d1fa87bd75cdfa4d60d56c4ced51bb53c938741bb79e03b53b4",
+			"fingerprint": "7875f251bec20c7f0177647747194eeaa914a9ac80d01dd66505fb7f2806a6bd",
 			"occurrence": 1,
 			"language": "bash",
 			"section": "Version compatibility",

@@ -11,6 +11,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ## [Unreleased]
 
+## [0.6.0-next.92] - 2026-11-06
+
+*Not published to npm; release candidate.*
+
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
@@ -63,6 +67,18 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   - **Requires:** A registry gauge with `set` for the gauges.
   - **Compatibility:** Additive; the existing cron series are unchanged.
   - **Detail:** [Added engineering detail](#added).
+- **Changed: adapter and extensions versions.** This release declares `svelte-adapter-uws` `^0.6.0-next.97` as its peer and lists `svelte-adapter-uws-extensions` `0.6.0-next.65` in its compatibility tuple, so an application that keeps an older adapter gets a peer conflict on upgrade until it moves the adapter into that range together with realtime.
+  - **Affects:** Every application upgrading to this release.
+  - **Action:** Install `svelte-adapter-uws@0.6.0-next.97` together with this release; applications that use the extensions packages move them to `svelte-adapter-uws-extensions@0.6.0-next.65` at the same time.
+  - **Requires:** `svelte-adapter-uws` `^0.6.0-next.97`.
+  - **Compatibility:** Breaking for installs that keep an older adapter, and for extensions alarm stores older than `0.6.0-next.65`, which lack the execution methods `configureAlarm` now requires. The tuple is listed under [version compatibility](README.md#version-compatibility).
+  - **Detail:** [Changed engineering detail](#changed).
+- **Changed: clustered smooth ownership.** Clustered smoothed entities keep running with the Redis coordinator from `svelte-adapter-uws-extensions`, which declares no ownership version, on the pre-v1 ownership path with one warning, while a coordinator declaring `ownershipVersion: 1` gets fenced epoch ownership that stops a replaced owner's late broadcasts during a takeover.
+  - **Affects:** Clustered deployments that install a coordinator on `platform.smooth`.
+  - **Action:** None for the extensions Redis coordinator; a custom coordinator declares `ownershipVersion: 1` and implements [fenced ownership](docs/smooth-cluster.md), or resolves exactly `true` or `false` from both lease calls.
+  - **Requires:** Nothing beyond this release on the pre-v1 path; fencing needs a coordinator implementing `SmoothCluster` with `ownershipVersion: 1`.
+  - **Compatibility:** A coordinator declaring another version, missing a lease method, or answering a lease call with anything but `true` or `false` now fails closed.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Changed: tenant-scoped erasure.** When a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store is configured, `live.forget(userId, opts)` now requires `opts.tenantId` and rejects with `INVALID_REQUEST` before purging anything, instead of silently erasing the untenanted scope and reporting success for a call that named no tenant.
   - **Affects:** Multi-tenant applications and applications with a durable erasure or dead-letter store.
   - **Action:** Pass `tenantId`, or an explicit `null` for the untenanted scope, on every `live.forget` call.
@@ -212,6 +228,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
+- The adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.97`. The scaffold pin, the README compatibility row, the upgrade guide floor, the generated first-run transcript and the test fixtures follow it; the tuple pairs it with `svelte-adapter-uws-extensions@0.6.0-next.65`, which development now uses. The compatibility check reads the adapter manifest's `sveltekit`, `realtime_adapter_floor` and `extensions_adapter_floor` columns; the release a row pairs with must declare `^` plus that row's `realtime_adapter_floor` as its peer, and the range must admit the row's adapter.
 - Clustered smoothed entities use fenced ownership with a coordinator implementing `SmoothCluster` with `ownershipVersion: 1`: monotonic ownership epochs, duration-bounded leases, and conditionally fenced publishes and snapshots. A coordinator that does not declare `ownershipVersion`, such as the Redis coordinator in `svelte-adapter-uws-extensions` `0.6.0-next.65`, keeps working on the pre-v1 boolean ownership path and logs one warning: a tenure ends when a lease call answers false or the owner stops (every case is listed under [pre-v1 coordinators](docs/smooth-cluster.md#pre-v1-coordinators)), relays are deduplicated per owner instance, each instance continues its own relay sequence across tenures, and a replaced owner's late broadcasts are not fenced. A lease answer other than `true` or `false` fails closed with `REALTIME-ERR-SMOOTH-LEASE-ANSWER`, where 0.6.0-next.91 read a truthy answer as ownership and any other answer as none. A coordinator declaring any other version, or missing a lease method, fails with an upgrade error. Single-instance behavior is unchanged.
 - CI follows maintained Node majors through a checked lifecycle table and runs native, browser, lifecycle and recovery suites on every runtime leg. Compatible Svelte, SvelteKit, Vite and adapter versions are installed with each package separately at its floor and latest version, with exact tuples retained in the results. See [runtime and peer coverage](docs/ci-support.md).
 

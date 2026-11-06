@@ -31,7 +31,10 @@ it('runs the public no-configuration composition with actual native work', async
 	expect(result.executed).toBe(48);
 	expect(result.generatedUpdates).toBe(48);
 	expect(result.updateRequests).toBe(64);
-	expect(result.deliveries).toBe(128);
+	// A duplicated request that adds no state is not fanned out again, so each
+	// distinct update reaches every other replica exactly once.
+	expect(result.deliveries).toBe(result.generatedUpdates * (result.replicas - 1));
+	expect(result.deliveries).toBe(96);
 });
 
 it('rejects overlapping runs without corrupting the active native run', async () => {
@@ -46,7 +49,8 @@ it('executes concurrent document edits through native RPCs and validates an inde
 	expect(result.executed).toBe(18);
 	expect(result.generatedUpdates).toBe(18);
 	expect(result.updateRequests).toBe(24);
-	expect(result.deliveries).toBe(48);
+	expect(result.deliveries).toBe(result.generatedUpdates * (result.replicas - 1));
+	expect(result.deliveries).toBe(36);
 	expect(result.actual).toHaveLength(4);
 	expect(result.actual.every(state => JSON.stringify(state) === JSON.stringify(result.actual[0]))).toBe(true);
 	expect(result.actual[0].map).toEqual(result.expected.map);

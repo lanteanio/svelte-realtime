@@ -124,7 +124,7 @@ describe('peer version boundaries', () => {
 		expect(versions['@sveltejs/kit']).toBe('2.70.3');
 	});
 	it.each([
-		['kit', '@sveltejs/kit', '2.0.0'], ['svelte', 'svelte', '4.0.0'], ['vite', 'vite', '5.0.3'], ['adapter', 'svelte-adapter-uws', '0.6.0-next.96']
+		['kit', '@sveltejs/kit', '2.0.0'], ['svelte', 'svelte', '4.0.0'], ['vite', 'vite', '5.0.3'], ['adapter', 'svelte-adapter-uws', '0.6.0-next.97']
 	])('tests the %s floor independently of companion floors', (target, name, expected) => {
 		const versions = resolvePeerVersions({ kit: 2, svelte: 4, vite: 5, plugin: 3, adapter: 0 }, input.pkg, metadata, 'floor', '22.23.2', target);
 		expect(versions[name]).toBe(expected);

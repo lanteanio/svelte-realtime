@@ -98,17 +98,18 @@ describe('README blocks generated from the adapter manifest', () => {
 	});
 
 	it('labels rows from the channel column once the current row is the stable release', () => {
-		const facts = Object.fromEntries(['realtime_head', 'extensions_head', 'wire_protocol', 'procedure'].map((field) => [field, current[field]]));
+		const facts = Object.fromEntries(['realtime_head', 'extensions_head', 'wire_protocol', 'procedure', 'sveltekit'].map((field) => [field, current[field]]));
+		const floors = (version) => ({ realtime_adapter_floor: version, extensions_adapter_floor: version });
 		const promoted = parseManifest(csv([
 			{ schema_version: '1', owner: 'svelte-adapter-uws', current: 'false', channel: 'legacy', adapter: '0.5.x', realtime: '0.5.x', extensions: '0.5.x', train: '0.5' },
-			{ schema_version: '1', owner: 'svelte-adapter-uws', current: 'true', channel: 'stable', dist_tag: 'latest', adapter_version: '0.6.0', provenance: 'workspace', adapter: '0.6.x', realtime: '0.6.x', extensions: '0.6.x', node: '>=22.0.0', uwebsockets: current.uwebsockets, train: '0.6', realtime_version: '0.6.0', extensions_version: '0.6.0', ...facts },
-			{ schema_version: '1', owner: 'svelte-adapter-uws', current: 'false', channel: 'prerelease', dist_tag: 'next', adapter_version: '0.7.0-next.1', provenance: 'npm:svelte-adapter-uws@0.7.0-next.1', adapter: '0.7.0-next', realtime: '0.7.0-next', extensions: '0.7.0-next', node: '>=22.0.0', uwebsockets: current.uwebsockets, train: '0.7' }
+			{ schema_version: '1', owner: 'svelte-adapter-uws', current: 'true', channel: 'stable', dist_tag: 'latest', adapter_version: '0.6.0', provenance: 'workspace', adapter: '0.6.x', realtime: '0.6.x', extensions: '0.6.x', node: '>=22.0.0', uwebsockets: current.uwebsockets, train: '0.6', realtime_version: '0.6.0', extensions_version: '0.6.0', ...facts, ...floors('0.6.0') },
+			{ schema_version: '1', owner: 'svelte-adapter-uws', current: 'false', channel: 'prerelease', dist_tag: 'next', adapter_version: '0.7.0-next.1', provenance: 'npm:svelte-adapter-uws@0.7.0-next.1', adapter: '0.7.0-next', realtime: '0.7.0-next', extensions: '0.7.0-next', node: '>=22.0.0', uwebsockets: current.uwebsockets, train: '0.7', ...floors('0.7.0-next.1') }
 		]));
 		expect(validateRows(promoted)).toEqual([]);
 		const table = renderCompatibility(promoted);
 		expect(table).toContain('| `^' + ADAPTER_FLOORS.get('0.5') + '` | `0.5.x` | `0.5.x` | Legacy. |');
 		expect(table).toContain('| `0.6.0` | `0.6.0` | `0.6.0` | Stable 0.6 release. Node `>=22.0.0` required. |');
-		expect(table).toContain('| `0.7.0-next` | `0.7.0-next` | `0.7.0-next` | Prerelease. Node `>=22.0.0` required. |');
+		expect(table).toContain('| `^0.7.0-next.1` | `0.7.0-next` | `0.7.0-next` | Prerelease. Node `>=22.0.0` required. |');
 		expect(table).toContain('Install the current stable tuple');
 		expect(table).not.toMatch(/candidate|Publish the tuple together|newer `svelte-adapter-uws`/);
 		// The stable cut of the prerelease series this package develops on stays in series.
@@ -119,10 +120,14 @@ describe('README blocks generated from the adapter manifest', () => {
 		const stable = rows.find((row) => row.train === '0.5');
 		expect(stable.adapter).toBe('0.5.x');
 		expect(renderCompatibility(rows)).toContain('| `^0.5.11` | `0.5.x` | `0.5.x` |');
-		const dropped = rows.map((row) => (row.train === '0.5' ? { ...row, train: '0.4', adapter: '0.4.x', realtime: '0.4.x', extensions: '0.4.x', adapter_version: '0.4.9', provenance: 'npm:svelte-adapter-uws@0.4.9' } : row));
+		const dropped = rows.map((row) => (row.train === '0.5' ? { ...row, train: '0.4', adapter: '0.4.x', realtime: '0.4.x', extensions: '0.4.x', adapter_version: '0.4.9', provenance: 'npm:svelte-adapter-uws@0.4.9', realtime_adapter_floor: '0.4.9', extensions_adapter_floor: '0.4.9' } : row));
 		expect(validateRows(dropped)).toEqual(['the manifest no longer lists the 0.5 train; remove it from ADAPTER_FLOORS']);
 		const moved = rows.map((row) => (row.train === '0.5' ? { ...row, adapter: '0.5.1' } : row));
 		expect(validateRows(moved).join('\n')).toContain('adapter floor 0.5.11 is not an exact release inside the 0.5 adapter series 0.5.1');
+		// A row that carries the floor column is rendered from it.
+		const raised = rows.map((row) => (row.train === '0.5' ? { ...row, realtime_adapter_floor: '0.5.12' } : row));
+		expect(validateRows(raised)).toEqual([]);
+		expect(renderCompatibility(raised)).toContain('| `^0.5.12` | `0.5.x` | `0.5.x` |');
 	});
 
 	it('names adapter releases that documented features need beyond the tuple', () => {
@@ -205,7 +210,7 @@ describe('manifest parsing', () => {
 		// validation, and a quoted comma still splits the row.
 		const quoted = parseManifest(manifestText.replace(current.uwebsockets, '"' + current.uwebsockets + '"'));
 		expect(currentRow.bind(null, quoted)).toThrow(/prerelease: uWebSockets\.js must be an exact tagged GitHub source/);
-		expect(() => parseManifest(manifestText.replace(current.procedure, '"a,b"'))).toThrow(/row 4 has 20 fields; expected 19/);
+		expect(() => parseManifest(manifestText.replace(current.procedure, '"a,b"'))).toThrow(new RegExp('row 4 has ' + (EXPECTED_HEADERS.length + 1) + ' fields; expected ' + EXPECTED_HEADERS.length));
 	});
 
 	it('fails closed on missing, duplicated, extra and reordered columns', () => {
@@ -215,7 +220,7 @@ describe('manifest parsing', () => {
 		expect(() => parseManifest(manifestText.replace(header, header.replace('extensions_version', 'realtime_version')))).toThrow(/duplicate realtime_version; missing extensions_version/);
 		expect(() => parseManifest(manifestText.replace(header, header + ',ecosystem_release'))).toThrow(/unexpected ecosystem_release/);
 		expect(() => parseManifest(manifestText.replace(header, header.replace('adapter,realtime', 'realtime,adapter')))).toThrow(/columns out of order/);
-		expect(() => parseManifest(manifestText.replace(',0.4,', ',0.4,,'))).toThrow(/row 2 has 20 fields; expected 19/);
+		expect(() => parseManifest(manifestText.replace(',0.4,', ',0.4,,'))).toThrow(new RegExp('row 2 has ' + (EXPECTED_HEADERS.length + 1) + ' fields; expected ' + EXPECTED_HEADERS.length));
 		expect(() => parseManifest('')).toThrow(/empty/);
 	});
 
@@ -245,7 +250,18 @@ describe('manifest parsing', () => {
 		['a train with a patch level', withCurrent({ train: '0.6.0' }), 'prerelease: train must be a major.minor release train'],
 		['a train that does not prefix the series', withCurrent({ train: '0.7' }), 'prerelease: train 0.7 does not prefix the adapter series 0.6.0-next'],
 		['a partial set of train facts', withCurrent({ extensions_version: '' }), 'prerelease: train release facts form one unit and must be all present or all empty'],
-		['a current row without train facts', withCurrent(Object.fromEntries(['realtime_version', 'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'].map((field) => [field, '']))), 'prerelease: current row must record all six train release facts'],
+		['a current row without train facts', withCurrent(Object.fromEntries(['realtime_version', 'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure', 'sveltekit'].map((field) => [field, '']))), 'prerelease: current row must record every train release fact'],
+		['a current row without its SvelteKit versions', withCurrent({ sveltekit: '' }), 'prerelease: train release facts form one unit and must be all present or all empty'],
+		['SvelteKit versions out of order', withCurrent({ sveltekit: '3.0.1 2.70.2' }), 'prerelease: sveltekit must be space-separated exact SvelteKit versions in ascending order'],
+		['a SvelteKit range instead of a version', withCurrent({ sveltekit: '^2.70.2' }), 'prerelease: sveltekit must be space-separated exact SvelteKit versions in ascending order'],
+		['a repeated SvelteKit version', withCurrent({ sveltekit: '2.70.2 2.70.2' }), 'prerelease: sveltekit must be space-separated exact SvelteKit versions in ascending order'],
+		['a SvelteKit version with a v prefix', withCurrent({ sveltekit: 'v2.70.2' }), 'prerelease: sveltekit must be space-separated exact SvelteKit versions in ascending order'],
+		['an adapter floor that is not canonical', withCurrent({ extensions_adapter_floor: 'v' + current.adapter_version }), 'prerelease: extensions_adapter_floor must be an exact adapter release inside the series 0.6.0-next'],
+		['adapter floors on the untagged legacy row', byChannel('legacy', { realtime_adapter_floor: '0.4.0' }), 'legacy: untagged legacy channel must not claim release or runtime facts'],
+		['a tagged row without a realtime adapter floor', withCurrent({ realtime_adapter_floor: '' }), 'prerelease: realtime_adapter_floor must be an exact adapter release inside the series 0.6.0-next'],
+		['an extensions adapter floor outside the series', withCurrent({ extensions_adapter_floor: '0.5.11' }), 'prerelease: extensions_adapter_floor must be an exact adapter release inside the series 0.6.0-next'],
+		['an adapter floor above the row adapter release', withCurrent({ realtime_adapter_floor: '0.6.0-next.999' }), 'prerelease: realtime_adapter_floor 0.6.0-next.999 is above the row\'s adapter release ' + current.adapter_version],
+		['an invalid adapter release beside valid floors', withCurrent({ adapter_version: 'next' }), 'prerelease: adapter release identity is outside its series'],
 		['a realtime release outside its series', withCurrent({ realtime_version: '0.5.16' }), 'prerelease: realtime_version release identity is outside its series'],
 		['an abbreviated git head', withCurrent({ extensions_head: current.extensions_head.slice(0, 12) }), 'prerelease: extensions_head must be a full lowercase git head'],
 		['a zero wire protocol', withCurrent({ wire_protocol: '0' }), 'prerelease: wire_protocol must be a positive integer revision'],
@@ -261,6 +277,32 @@ describe('manifest parsing', () => {
 describe('agreement with package, scaffolder and docs', () => {
 	it('compares engines.node and both package floors with the current row', () => {
 		expect(validatePackage(pkg, current)).toEqual([]);
+		const withPeer = (base, range) => ({ ...base, peerDependencies: { ...base.peerDependencies, 'svelte-adapter-uws': range } });
+		// The release the row pairs with declares the caret range of the row's
+		// floor, the range the upgrade guide states.
+		const floor = current.realtime_adapter_floor;
+		const paired = withPeer({ ...pkg, version: current.realtime_version }, '^' + floor);
+		expect(validatePackage(paired, current)).toEqual([]);
+		expect(validatePackage(paired, { ...current, realtime_adapter_floor: '0.6.0-next.96' })).toEqual(['Adapter peer floor "^' + floor + '" differs from the manifest realtime_adapter_floor; expected ^0.6.0-next.96']);
+		expect(validatePackage(withPeer(paired, '>=' + floor), current).join('\n')).toContain('expected ^' + floor);
+		expect(validatePackage(withPeer(paired, floor), current).join('\n')).toContain('expected ^' + floor);
+		// An adapter-only release keeps the floor of the realtime release it pairs
+		// with, and the range must admit the adapter the row installs it with.
+		const next = current.adapter_version.replace(/\d+$/, (n) => String(Number(n) + 1));
+		expect(validatePackage(paired, { ...current, adapter_version: next })).toEqual([]);
+		expect(validatePackage(paired, { ...current, adapter_version: next }, { release: true })).toEqual([]);
+		// npm's peer resolution: a prerelease of a later version is outside the range.
+		expect(validatePackage(withPeer(paired, '^0.7.0-alpha.1'), { ...current, realtime_adapter_floor: '0.7.0-alpha.1', adapter_version: '0.7.1-next.0' })).toEqual(['Adapter peer ^0.7.0-alpha.1 does not admit the manifest adapter release 0.7.1-next.0']);
+		expect(validatePackage(withPeer(paired, '^' + next), { ...current, adapter_version: next }, { release: true }).join('\n')).toContain('expected ^' + floor);
+		expect(validatePackage(paired, { ...current, adapter_version: '0.6.0-next.1' })).toEqual(['Adapter peer ^' + floor + ' does not admit the manifest adapter release 0.6.0-next.1']);
+		// A checkout at another version follows the current adapter, and a release
+		// of a version the row does not declare is refused for its version alone.
+		const ahead = withPeer({ ...pkg, version: current.realtime_version.replace(/\d+$/, (n) => String(Number(n) + 1)) }, '^' + current.adapter_version);
+		expect(validatePackage(ahead, current)).toEqual([]);
+		expect(validatePackage(ahead, { ...current, adapter_version: next }).join('\n')).toContain('expected ^' + next);
+		const unpaired = validatePackage(ahead, { ...current, realtime_adapter_floor: '0.6.0-next.96' }, { release: true }).join('\n');
+		expect(unpaired).toContain('Publishing ' + ahead.version);
+		expect(unpaired).not.toContain('realtime_adapter_floor');
 		expect(validatePackage({ ...pkg, engines: { node: '>=24.0.0' } }, current).join('\n')).toContain('engines.node');
 		expect(validatePackage({ ...pkg, peerDependencies: { ...pkg.peerDependencies, 'svelte-adapter-uws': '^0.6.0-next.1' } }, current).join('\n')).toContain('Adapter peer floor');
 		expect(validatePackage({ ...pkg, devDependencies: { ...pkg.devDependencies, 'svelte-adapter-uws-extensions': '^0.6.0-next.1' } }, current).join('\n')).toContain('Extensions development floor');
@@ -303,13 +345,17 @@ describe('agreement with package, scaffolder and docs', () => {
 
 	it('generates the floors the upgrade guide states', () => {
 		expect(applyStatements(UPGRADE_GUIDE, upgrade, current)).toBe(upgrade);
-		const moved = { ...current, adapter_version: '0.6.0-next.500', adapter: '0.6.1-next', realtime: '0.6.1-next', extensions: '0.6.1-next' };
+		const moved = { ...current, adapter_version: '0.6.0-next.501', realtime_adapter_floor: '0.6.0-next.500', adapter: '0.6.1-next', realtime: '0.6.1-next', extensions: '0.6.1-next' };
 		const rendered = applyStatements(UPGRADE_GUIDE, upgrade, moved);
 		expect(rendered).toContain('`svelte-adapter-uws`\n`^0.6.0-next.500` as a peer');
 		expect(rendered).toContain('| exact `0.6.1-next.*` | matching `0.6.1-next`, at least `0.6.0-next.500` | matching `0.6.1-next` |');
-		const promoted = applyStatements(UPGRADE_GUIDE, upgrade, { ...current, adapter_version: '0.6.0', adapter: '0.6.x', realtime: '0.6.x', extensions: '0.6.x' });
+		const promoted = applyStatements(UPGRADE_GUIDE, upgrade, { ...current, adapter_version: '0.6.0', realtime_adapter_floor: '0.6.0', adapter: '0.6.x', realtime: '0.6.x', extensions: '0.6.x' });
 		expect(promoted).toContain('| exact `0.6.x` | matching `0.6.x`, at least `0.6.0` | matching `0.6.x` |');
 		expect(applyStatements(UPGRADE_GUIDE, upgrade.replace('(0.5.11 or later)', '(0.5.8 or later)'), current)).toBe(upgrade);
+		// The rollback floor comes from the same manifest column as the README row.
+		expect(applyStatements(UPGRADE_GUIDE, upgrade, current, rows)).toBe(upgrade);
+		const raised = rows.map((row) => (row.train === '0.5' ? { ...row, realtime_adapter_floor: '0.5.12' } : row));
+		expect(applyStatements(UPGRADE_GUIDE, upgrade, current, raised)).toContain('| `0.5.x` (0.5.12 or later) |');
 		expect(() => applyStatements(UPGRADE_GUIDE, upgrade.replace('as a peer', 'as peer'), current)).toThrow(/exactly one statement/);
 	});
 });

@@ -2,7 +2,9 @@
 
 - **0.5.x to 0.6.x:** the [0.6 migration guide](./docs/0.6-upgrade.md) lists
   prerequisites, required source edits, default changes, wire and storage
-  notes, rollback and the surfaces that need no action.
+  notes, rollback and the surfaces that need no action. The
+  [0.6.0-next.92 release notes](./docs/releases/0.6.0-next.92.md) list what
+  changed for consumers in this release.
 - **0.4.x to 0.5.x:** the guide below.
 
 ## 0.4.x to 0.5.x

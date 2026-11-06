@@ -77,7 +77,13 @@ it.skipIf(!supportsBudget)('retains a failed prefix for explicit retry before it
 	const record = _smoothRecord('budget-retry', shape.__smoothCfg, mockPlatform(), budgetModule);
 	record.authority.ensure('player', {}, 0);
 	record.authority.enqueue('player', [1, 2, 3].map(id => ({ id, cmd: id })));
-	expect(() => record.authority.drain()).toThrow('retry');
+	let failure;
+	try { record.authority.drain(); } catch (error) { failure = error; }
+	// The adapter wraps the application's error and hands back what the drain
+	// committed before it; this entity committed nothing.
+	expect(failure).toBeInstanceOf(budgetModule.SmoothDrainError);
+	expect(failure.cause.message).toBe('retry');
+	expect(failure.partial).toMatchObject({ updates: [], acks: [], events: [], idle: false });
 	expect(record.authority.get('player').state).toBe(0);
 	expect(record.authority.drain().acks[0]).toMatchObject({ id: 2, state: 3 });
 	expect(record.authority.drain().acks[0]).toMatchObject({ id: 3, state: 6 });

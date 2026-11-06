@@ -41,7 +41,7 @@ node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --drive-case lower
 Each fixture installs this checkout as a packed copy, so repeat its
 `npm ci --install-links` after changing `src/`; the runner refuses a fixture
 whose installed copy differs from the checkout. All fixtures use
-svelte-adapter-uws 0.6.0-next.96 from the registry.
+svelte-adapter-uws 0.6.0-next.97 from the registry.
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
 Readiness requires the fixture's `/readiness.json` route to return the spawned
@@ -108,7 +108,9 @@ the server unusable restarts it on the same port first, and the report lists
 those restarts. Any other failure fails the matrix. An entry covers every run in
 its scope whether or not the failure occurs in that run, because the adapter
 behaviour it describes depends on the order in which Vite delivers reload
-events; the matrix prints the entries a run did not need. The entries are:
+events; the matrix prints the entries a run did not need. The entries describe
+svelte-adapter-uws 0.6.0-next.96. With 0.6.0-next.97, which the fixtures
+install, every run passes without them:
 
 - Kit 3 development with a wrapped or omitted adapter entry: the dev server and
   the WebSocket handler load separate module instances, so the shared-state
@@ -132,8 +134,8 @@ The realtime archive must carry the version in the root package.json.
 
 ```sh
 npm pack --pack-destination test-results
-npm pack svelte-adapter-uws@0.6.0-next.96 --pack-destination test-results
-npm run test:kit-scaffold -- --adapter-pack test-results/svelte-adapter-uws-0.6.0-next.96.tgz --realtime-pack test-results/svelte-realtime-<version>.tgz
+npm pack svelte-adapter-uws@0.6.0-next.97 --pack-destination test-results
+npm run test:kit-scaffold -- --adapter-pack test-results/svelte-adapter-uws-0.6.0-next.97.tgz --realtime-pack test-results/svelte-realtime-<version>.tgz
 ```
 
 Add `--explicit-package` to exercise the npm exec package-option form too.

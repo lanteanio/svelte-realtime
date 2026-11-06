@@ -9,7 +9,7 @@
   "dependencies": {
     "@sveltejs/kit": "3.0.1",
     "svelte": "5.57.1",
-    "svelte-adapter-uws": "0.6.0-next.96",
+    "svelte-adapter-uws": "0.6.0-next.97",
     "svelte-realtime": "file:../../..",
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0",
     "ws": "8.22.0"

@@ -172,9 +172,9 @@ describe('detectAgent', () => {
 
 describe('newcomer scaffold contract', () => {
 	it('pins the audited adapter, realtime, and native addon tuple', () => {
-		expect(SCAFFOLD_ADAPTER_SPEC).toBe('svelte-adapter-uws@0.6.0-next.96');
-		expect(SCAFFOLD_REALTIME_SPEC).toBe('svelte-realtime@0.6.0-next.91');
-		expect(SCAFFOLD_EXTENSIONS_SPEC).toBe('svelte-adapter-uws-extensions@0.6.0-next.64');
+		expect(SCAFFOLD_ADAPTER_SPEC).toBe('svelte-adapter-uws@0.6.0-next.97');
+		expect(SCAFFOLD_REALTIME_SPEC).toBe('svelte-realtime@0.6.0-next.92');
+		expect(SCAFFOLD_EXTENSIONS_SPEC).toBe('svelte-adapter-uws-extensions@0.6.0-next.65');
 		expect(SCAFFOLD_UWS_SPEC).toBe(
 			'https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz'
 		);

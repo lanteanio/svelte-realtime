@@ -34,9 +34,13 @@ const ADAPTER_PACKAGE_PATH = 'node_modules/svelte-adapter-uws/package.json';
 export const EXPECTED_HEADERS = [
 	'schema_version', 'owner', 'current', 'channel', 'dist_tag', 'adapter_version', 'provenance',
 	'adapter', 'realtime', 'extensions', 'node', 'uwebsockets', 'train', 'realtime_version',
-	'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'
+	'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure',
+	'sveltekit', 'realtime_adapter_floor', 'extensions_adapter_floor'
 ];
-const TRAIN_FACT_FIELDS = ['realtime_version', 'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'];
+const TRAIN_FACT_FIELDS = ['realtime_version', 'extensions_version', 'realtime_head', 'extensions_head', 'wire_protocol', 'procedure', 'sveltekit'];
+// The lowest exact adapter release each sibling train declares as its peer.
+// Every tagged row carries both; the untagged legacy row carries neither.
+const ADAPTER_FLOOR_FIELDS = ['realtime_adapter_floor', 'extensions_adapter_floor'];
 const CHANNEL_TAGS = new Map([['legacy', ''], ['stable', 'latest'], ['prerelease', 'next']]);
 const SERIES = /^\d+\.\d+\.(?:x|\d+(?:-[0-9A-Za-z.-]+)?)$/;
 const TRAIN = /^\d+\.\d+$/;
@@ -46,10 +50,11 @@ const PROCEDURE_ANCHOR = /^docs\/releasing\.md#[a-z0-9-]+$/;
 const UWS_SPEC = /^(?:https:\/\/github\.com\/uNetworking\/uWebSockets\.js\/archive\/refs\/tags\/v\d+\.\d+\.\d+\.tar\.gz|github:uNetworking\/uWebSockets\.js#v\d+\.\d+\.\d+)$/;
 const UNPRINTABLE = new RegExp('[\\x00-\\x1f\\x7f' + String.fromCharCode(0x2028, 0x2029) + '`]');
 
-// The manifest records the series of each train, not the adapter release a
-// svelte-realtime train requires. svelte-realtime 0.5.x declares
-// svelte-adapter-uws ^0.5.11 as its peer, so the README states that floor on
-// the 0.5 row instead of the bare series.
+// The adapter release each documented svelte-realtime train declares as its
+// peer floor. The manifest has to keep listing these trains. A non-current
+// row that carries realtime_adapter_floor is rendered from that column; this value
+// stands in where no row of the train carries it, such as an untagged legacy
+// row. svelte-realtime 0.5.x declares svelte-adapter-uws ^0.5.11.
 export const ADAPTER_FLOORS = new Map([['0.5', '0.5.11']]);
 
 export const UPGRADE_GUIDE = 'docs/0.6-upgrade.md';
@@ -59,14 +64,19 @@ const NODE_PHRASE = '(Node \\d+(?:\\.\\d+){0,2} or newer|a Node version in `[^`]
 // statement fails the check instead of silently escaping it.
 export const STATEMENTS = [
 	{ file: UPGRADE_GUIDE, pattern: new RegExp('sibling packages\\s+require ' + NODE_PHRASE), value: (current) => nodeRequirement(current.node) },
-	{ file: UPGRADE_GUIDE, pattern: /`svelte-adapter-uws`\s+`\^([^`]+)` as a peer/, value: (current) => current.adapter_version },
-	{ file: UPGRADE_GUIDE, pattern: /\| `0\.5\.x` \((\d+\.\d+\.\d+) or later\) \|/, value: () => ADAPTER_FLOORS.get('0.5') },
+	{ file: UPGRADE_GUIDE, pattern: /`svelte-adapter-uws`\s+`\^([^`]+)` as a peer/, value: (current) => realtimeFloor(current) },
+	{ file: UPGRADE_GUIDE, pattern: /\| `0\.5\.x` \((\d+\.\d+\.\d+) or later\) \|/, value: (_current, rows = []) => realtimeFloor(rows.find((row) => row.train === '0.5') ?? { train: '0.5' }) },
 	{ file: UPGRADE_GUIDE, pattern: /\| matching `([^`]+)`, at least `[^`]+` \|/, value: (current) => current.adapter },
-	{ file: UPGRADE_GUIDE, pattern: /\| matching `[^`]+`, at least `([^`]+)` \|/, value: (current) => current.adapter_version },
+	{ file: UPGRADE_GUIDE, pattern: /\| matching `[^`]+`, at least `([^`]+)` \|/, value: (current) => realtimeFloor(current) },
 	{ file: UPGRADE_GUIDE, pattern: /\| exact `([^`]+)` \| matching `[^`]+`, at least/, value: (current) => (current.realtime.endsWith('.x') ? current.realtime : current.realtime + '.*') },
 	{ file: UPGRADE_GUIDE, pattern: /, at least `[^`]+` \| matching `([^`]+)` \|/, value: (current) => current.extensions },
 	{ file: 'README.md', pattern: new RegExp('the pinned native server supports ' + NODE_PHRASE + ' with a matching'), value: (current) => nodeRequirement(current.node) }
 ];
+
+/** The adapter floor the row's svelte-realtime release declares as its peer. */
+export function realtimeFloor(row) {
+	return row.realtime_adapter_floor || ADAPTER_FLOORS.get(row.train) || row.adapter_version;
+}
 
 /** The Node range as prose: a plain lower bound keeps its full precision. */
 export function nodeRequirement(range) {
@@ -132,18 +142,23 @@ export function validateRows(rows) {
 		else if (row.dist_tag !== CHANNEL_TAGS.get(row.channel)) errors.push(label + ': invalid dist tag role');
 		for (const field of ['adapter', 'realtime', 'extensions']) if (!SERIES.test(row[field])) errors.push(label + ': invalid ' + field + ' series');
 		if (!row.dist_tag) {
-			if (row.node || row.uwebsockets || row.adapter_version || row.provenance) errors.push(label + ': untagged legacy channel must not claim release or runtime facts');
+			if (row.node || row.uwebsockets || row.adapter_version || row.provenance || ADAPTER_FLOOR_FIELDS.some((field) => row[field])) errors.push(label + ': untagged legacy channel must not claim release or runtime facts');
 		} else {
 			if (!row.adapter_version || !matchesSeries(row.adapter_version, row.adapter)) errors.push(label + ': adapter release identity is outside its series');
 			if (!validNodeRange(row.node)) errors.push(label + ': node must be a canonical single-line npm semver range');
 			if (!UWS_SPEC.test(row.uwebsockets)) errors.push(label + ': uWebSockets.js must be an exact tagged GitHub source');
 			if (row.current === 'false' && row.provenance !== 'npm:svelte-adapter-uws@' + row.adapter_version) errors.push(label + ': published baseline provenance is not pinned');
+			for (const field of ADAPTER_FLOOR_FIELDS) {
+				const floor = row[field];
+				if (semver.valid(floor) !== floor || !matchesSeries(floor, row.adapter)) errors.push(label + ': ' + field + ' must be an exact adapter release inside the series ' + row.adapter);
+				else if (semver.valid(row.adapter_version) === row.adapter_version && semver.gt(floor, row.adapter_version)) errors.push(label + ': ' + field + ' ' + floor + ' is above the row\'s adapter release ' + row.adapter_version);
+			}
 		}
 		if (!TRAIN.test(row.train)) errors.push(label + ': train must be a major.minor release train');
 		else if (!(row.adapter.startsWith(row.train + '.') || row.adapter === row.train + '.x')) errors.push(label + ': train ' + row.train + ' does not prefix the adapter series ' + row.adapter);
 		const present = TRAIN_FACT_FIELDS.filter((field) => row[field]);
 		if (present.length !== 0 && present.length !== TRAIN_FACT_FIELDS.length) errors.push(label + ': train release facts form one unit and must be all present or all empty');
-		if (row.current === 'true' && present.length !== TRAIN_FACT_FIELDS.length) errors.push(label + ': current row must record all six train release facts');
+		if (row.current === 'true' && present.length !== TRAIN_FACT_FIELDS.length) errors.push(label + ': current row must record every train release fact');
 		if (present.length === TRAIN_FACT_FIELDS.length) {
 			for (const [field, series] of [['realtime_version', row.realtime], ['extensions_version', row.extensions]]) {
 				if (!matchesSeries(row[field], series)) errors.push(label + ': ' + field + ' release identity is outside its series');
@@ -151,6 +166,8 @@ export function validateRows(rows) {
 			for (const field of ['realtime_head', 'extensions_head']) if (!GIT_HEAD.test(row[field])) errors.push(label + ': ' + field + ' must be a full lowercase git head');
 			if (!WIRE_PROTOCOL.test(row.wire_protocol)) errors.push(label + ': wire_protocol must be a positive integer revision');
 			if (row.procedure.split(' ').some((token) => !PROCEDURE_ANCHOR.test(token))) errors.push(label + ': procedure must be space-separated docs/releasing.md anchors');
+			const kits = row.sveltekit.split(' ');
+			if (kits.some((version, index) => semver.valid(version) !== version || (index > 0 && !semver.gt(version, kits[index - 1])))) errors.push(label + ': sveltekit must be space-separated exact SvelteKit versions in ascending order');
 		}
 	}
 	if (currentRows.length === 1) {
@@ -194,7 +211,16 @@ export function inRealtimeSeries(version, series) {
 export function validatePackage(pkg, current, { release = false } = {}) {
 	const errors = [];
 	if (pkg.engines?.node !== current.node) errors.push('package.json engines.node ' + JSON.stringify(pkg.engines?.node) + ' differs from the manifest Node prerequisite ' + current.node);
-	if (pkg.peerDependencies?.['svelte-adapter-uws'] !== '^' + current.adapter_version) errors.push('Adapter peer floor ' + JSON.stringify(pkg.peerDependencies?.['svelte-adapter-uws']) + ' differs from the manifest; expected ^' + current.adapter_version);
+	const peer = pkg.peerDependencies?.['svelte-adapter-uws'];
+	// The row records the floor of the realtime release it pairs with, the
+	// lowest version of that release's peer range. A checkout at another
+	// version is not that release; during development the peer follows the
+	// current adapter. The paired release declares the caret range the upgrade
+	// guide states, and it has to admit the adapter the row installs it with.
+	if (current.realtime_adapter_floor && pkg.version === current.realtime_version) {
+		if (peer !== '^' + current.realtime_adapter_floor) errors.push('Adapter peer floor ' + JSON.stringify(peer) + ' differs from the manifest realtime_adapter_floor; expected ^' + current.realtime_adapter_floor);
+		else if (!semver.satisfies(current.adapter_version, peer)) errors.push('Adapter peer ' + peer + ' does not admit the manifest adapter release ' + current.adapter_version);
+	} else if (peer !== '^' + current.adapter_version) errors.push('Adapter peer floor ' + JSON.stringify(peer) + ' differs from the manifest; expected ^' + current.adapter_version);
 	if (pkg.devDependencies?.['svelte-adapter-uws-extensions'] !== '^' + current.extensions_version) errors.push('Extensions development floor ' + JSON.stringify(pkg.devDependencies?.['svelte-adapter-uws-extensions']) + ' differs from the manifest; expected ^' + current.extensions_version);
 	if (release) {
 		if (pkg.version !== current.realtime_version) errors.push('Publishing ' + pkg.version + ' but the manifest declares svelte-realtime ' + current.realtime_version + '; install the adapter release that declares this version first');
@@ -285,7 +311,7 @@ function rowNotes(row) {
 
 function rowVersions(row) {
 	if (row.current === 'true') return [row.adapter_version, row.realtime_version, row.extensions_version];
-	const floor = ADAPTER_FLOORS.get(row.train);
+	const floor = row.realtime_adapter_floor || ADAPTER_FLOORS.get(row.train);
 	return [floor ? '^' + floor : row.adapter, row.realtime, row.extensions];
 }
 
@@ -387,13 +413,13 @@ export function validateUnboundedPins(readme) {
 	return errors;
 }
 
-export function applyStatements(file, source, current) {
+export function applyStatements(file, source, current, rows = []) {
 	for (const statement of STATEMENTS) {
 		if (statement.file !== file) continue;
 		const matches = [...source.matchAll(new RegExp(statement.pattern.source, 'gd'))];
 		if (matches.length !== 1) throw new Error(file + ' needs exactly one statement matching ' + statement.pattern + '; found ' + matches.length);
 		const [from, to] = matches[0].indices[1];
-		source = source.slice(0, from) + statement.value(current) + source.slice(to);
+		source = source.slice(0, from) + statement.value(current, rows) + source.slice(to);
 	}
 	return source;
 }
@@ -438,7 +464,7 @@ export function checkCompatibility(directory = root, { write = false, release = 
 	for (const file of ['README.md', UPGRADE_GUIDE]) {
 		const source = file === 'README.md' ? readme : readText(directory, file);
 		let expected = file === 'README.md' ? renderReadme(source, rows, ahead) : source;
-		expected = applyStatements(file, expected, current);
+		expected = applyStatements(file, expected, current, rows);
 		if (file === 'README.md') errors.push(...validateUnboundedPins(expected));
 		if (expected !== source) stale.push({ file, expected });
 	}

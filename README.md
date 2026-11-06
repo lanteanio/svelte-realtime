@@ -36,7 +36,7 @@
 
 After the scaffold's native preflight and production build pass, write server functions, import them in components, and call them over WebSocket. The runtime handles pub/sub and protocol wiring; platform, native-addon, authentication, and build prerequisites still apply.
 
-**Upgrading?** Read the [0.6 upgrade actions](./docs/0.6-upgrade.md), [release scope](./docs/releasing.md#realtime-package-scope), [release history](./CHANGELOG.md), [migration guide](./MIGRATION.md), and [companion adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md).
+**Upgrading?** Read the [0.6 upgrade actions](./docs/0.6-upgrade.md), [release scope](./docs/releasing.md#realtime-package-scope), [0.6.0-next.92 release notes](./docs/releases/0.6.0-next.92.md), [release history](./CHANGELOG.md), [migration guide](./MIGRATION.md), and [companion adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md).
 
 The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/translating.md) defines the English source locale, application-owned catalogs, stable machine fields, placeholders, and bidirectional text across all three ecosystem packages.
 
@@ -54,12 +54,12 @@ Before launch or a scaling-policy change, use the ecosystem's versioned [capacit
 
 <!-- compatibility-cli:start -->
 ```bash
-npx svelte-realtime@0.6.0-next.91 my-app --template example
+npx svelte-realtime@0.6.0-next.92 my-app --template example
 cd my-app
 npm run dev
 ```
 
-For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
+For interactive prompts, run `npx svelte-realtime@0.6.0-next.92 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
 <!-- compatibility-cli:end -->
 
 The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`. The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning. The demo uses the immutable revision embedded in this CLI release, verified before installation or build; see [template provenance](docs/releasing.md#demo-template-provenance).
@@ -75,21 +75,19 @@ The three ecosystem packages move together. Bump them as a group. The [CI suppor
 | --- | --- | --- | --- |
 | `0.4.x` | `0.4.x` | `0.4.x` | Legacy. |
 | `^0.5.11` | `0.5.x` | `0.5.x` | Stable. Node `>=22.0.0` required. |
-| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Prerelease 0.6 candidate. Node `>=22.0.0` required. Publish the tuple together before these registry commands are used. |
-
-Some documented features need a newer `svelte-adapter-uws` than this tuple: `0.6.0-next.97` (this README, [docs/delivery-authorization.md](./docs/delivery-authorization.md)).
+| `0.6.0-next.97` | `0.6.0-next.92` | `0.6.0-next.65` | Prerelease 0.6 candidate. Node `>=22.0.0` required. Publish the tuple together before these registry commands are used. |
 
 Install the current prerelease tuple, the one the scaffolder installs, and run its native preflight:
 
 ```bash
-npm install svelte-adapter-uws@0.6.0-next.96 svelte-realtime@0.6.0-next.91
+npm install svelte-adapter-uws@0.6.0-next.97 svelte-realtime@0.6.0-next.92
 npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 npm install -D ws
 npm exec -- svelte-adapter-uws-preflight
 ```
 <!-- compatibility:end -->
 
-Mixed-version installs are rejected at install time with a peer-dep warning. SvelteKit 2 and 3 are supported. SvelteKit 3 development shares state between routes and WebSocket handlers only when the adapter is passed directly to `sveltekit()`, and a route edit can split that state until the dev server restarts; on either SvelteKit, restart the dev server after deleting `src/hooks.ws.js` and creating it again. The scaffolder and SvelteKit 3 need Node 22.17+ on 22.x, or Node 24+; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
+Mixed-version installs are rejected at install time with a peer-dep warning. SvelteKit 2 and 3 are supported. The scaffolder and SvelteKit 3 need Node 22.17+ on 22.x, or Node 24+; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
 
 Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-support.md) gives exact versions and executable checks. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. Every store also has a cached `.current` value; reading it in a Svelte 5 reaction subscribes automatically.
 
