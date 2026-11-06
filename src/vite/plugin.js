@@ -185,11 +185,11 @@ export default function svelteRealtime(options) {
 			if (id === SERVER_PUBLIC_ID) {
 				if (ssr) return SERVER_ID;
 				// The development alias for bare `svelte-realtime` applies to every
-				// environment. A client-graph import of it, such as a live module in
-				// a jsdom test, gets the package's own server entry, as it did before
-				// the alias existed; that file is public package code, unlike the
-				// registry.
-				return this.resolve('svelte-realtime/server', importer, { ...resolveOptions, skipSelf: true });
+				// environment. A client-graph import of it that goes through plugin
+				// resolution, such as a live module in a jsdom test, gets the file the
+				// package's `.` export names, its server entry; that file is public
+				// package code, unlike the registry.
+				return this?.resolve ? this.resolve('svelte-realtime/server', importer, { ...resolveOptions, skipSelf: true }) : null;
 			}
 			if (id.startsWith('$live/')) {
 				const modulePath = id.slice(6); // strip '$live/'

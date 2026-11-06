@@ -8,7 +8,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer } from 'vite';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'fs';
 import { resolve } from 'path';
 import svelteRealtime from '../src/vite.js';
 
@@ -86,7 +86,10 @@ describe('dev server registry exposure', () => {
 			await server.listen();
 			const { client, ssr } = server.environments;
 			const fromClient = await client.pluginContainer.resolveId('svelte-realtime', importer);
-			expect(fromClient?.id.split('\\').join('/')).toBe(resolve(import.meta.dirname, '../src/server.js').split('\\').join('/'));
+			// Vite names resolved files by their real path, whose drive letter
+			// case can differ from the spelled one on Windows.
+			const spelling = (path) => { const real = realpathSync(path).split('\\').join('/'); return process.platform === 'win32' ? real.toLowerCase() : real; };
+			expect(fromClient && spelling(fromClient.id)).toBe(spelling(resolve(import.meta.dirname, '../src/server.js')));
 			expect((await ssr.pluginContainer.resolveId('svelte-realtime', importer))?.id).toBe('\0live-server');
 			expect(await client.pluginContainer.resolveId('\0live-server', importer)).toBeNull();
 			expect(await client.pluginContainer.load('\0live-server')).toBeNull();
