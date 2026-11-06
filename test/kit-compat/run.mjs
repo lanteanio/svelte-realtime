@@ -179,11 +179,15 @@ async function availablePort() {
 // Close codes of server-initiated closes, so a report shows how a dev reload
 // ends existing connections (the client warns only on unexpected codes).
 report.serverCloseCodes = [];
-async function connectSocket(origin) {
+// A probe socket polls while the server may be reloading. A handshake the
+// reload refuses never opened and is no server close; once open, a probe's
+// close is judged like any other.
+async function connectSocket(origin, { probe = false } = {}) {
 	if (socket) socket.closedByRunner = true;
 	socket?.terminate();
 	const opened = new WebSocket(origin.replace('http:', 'ws:') + '/ws', { headers: { Origin: origin } });
-	opened.on('close', code => { if (!opened.closedByRunner) report.serverCloseCodes.push(code); });
+	opened.on('open', () => { opened.wasOpen = true; });
+	opened.on('close', code => { if (!opened.closedByRunner && (!probe || opened.wasOpen)) report.serverCloseCodes.push(code); });
 	socket = opened;
 	await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
 }
@@ -573,12 +577,32 @@ try {
 			await sharedStores(editedAt);
 		});
 		await check('deleted and recreated hooks.ws restore live handlers and shared state', async () => {
+			// The edited handler serves a fresh connection right before the unlink.
+			await freshRpc('connection', result => result.ok === true && result.data === 'compatibility-test-edited');
 			const deleted = output.length;
 			await unlink(hooksFile);
-			// The deletion must reach the server before the file returns.
-			const deadline = Date.now() + 15000;
-			while (Date.now() < deadline && !/hooks\.ws/.test(output.slice(deleted))) await pause(100);
-			assert.match(output.slice(deleted), /hooks\.ws/, 'The server did not observe the hooks.ws deletion');
+			// The deletion must reach the server before the file returns. Some
+			// adapter versions print the missing file. Others drop the handler
+			// silently: a connection that opens and then gets no answer, or an
+			// answer from another handler, observes it. A failed open or a close
+			// is no evidence, since every reload closes sockets.
+			let lastAnswer = 'no connection opened';
+			const observed = async () => {
+				if (/hooks\.ws/.test(output.slice(deleted))) return true;
+				try { await connectSocket(origin, { probe: true }); } catch { return false; }
+				try {
+					const result = await rpc('connection');
+					lastAnswer = 'connection ' + JSON.stringify(result);
+					return !(result.ok === true && result.data === 'compatibility-test-edited');
+				} catch (error) {
+					lastAnswer = error.message;
+					return /^RPC timed out/.test(error.message) && socket.readyState === WebSocket.OPEN;
+				}
+			};
+			const deadline = Date.now() + 30000;
+			let seen = false;
+			while (Date.now() < deadline && !(seen = await observed())) await pause(200);
+			assert.ok(seen, RELOAD + ': the server did not observe the hooks.ws deletion; last answer ' + lastAnswer);
 			await pause(500);
 			const recreatedAt = Date.now();
 			await writeFile(hooksFile, originalHooks.toString('utf8').replace(hooksAnchor, "return { id: 'compatibility-test-recreated' };"));
