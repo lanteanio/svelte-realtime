@@ -28,6 +28,7 @@ registry metadata exists, together with its complete published row.
 | 0.6.0-next.91 | proposed | 2026-10-13T22:15:27.639Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.96 and svelte-adapter-uws-extensions 0.6.0-next.64 installed: all checks, 156 files, 4054 tests passed. |
 | 0.6.0-next.91 | published | 2026-10-13T22:28:50.738Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm records gitHead 54c8c55e2df0c0807650d20a72375d42591baec3 for 0.6.0-next.91, which adds only the proposed row above to this head. No release tag was created. The tarball matches 54c8c55 except CRLF line endings in 49 text files. |
 | 0.6.0-next.92 | proposed | 2026-11-06T16:39:25.867Z | c9e096c24bec88905fab0950a4294caa8aca9b31 | svelte-realtime@0.6.0-next.92 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.97 and with svelte-adapter-uws-extensions 0.6.0-next.65 installed from its release tarball (sha512-JYdqlmahr1E0FEFZsNhH16za4i/XVPAMkanSkIPTDlDQSiVR8hcKraMLs1ulZjUqBw5Smv8XE1FV8qRcyef2YA==): all checks, 248 files, 5770 tests passed. The Kit compatibility matrix on that adapter passed with no known adapter failures. |
+| 0.6.0-next.92 | published | 2026-11-06T18:37:08.662Z | c9e096c24bec88905fab0950a4294caa8aca9b31 | svelte-realtime@0.6.0-next.92 | next | npm records gitHead e25a843d5fd3a1a2d642219ecd60b504db5f63bf for 0.6.0-next.92, which adds only the proposed row above to this head. No release tag was created. |
 
 ## Published releases
 
@@ -189,6 +190,7 @@ corrections in the event log below while retaining the original row.
 | svelte-realtime | 0.5.13 | latest | legacy-unrecorded | legacy-none | sha512-wpRYc25SRFNhyi4YfaGMsGKzbTPyR3jRxigh3r58cdmsixNCOWdKqgCAbiQrUwVpnC7psV43JLTkRM9HJcZjbQ== | e530eb8dfa3b4b9caffd49ca2ab3a4a464fb27e5 | 2026-10-10T10:24:32.518Z | Registry omitted gitHead; no release tag. |
 | svelte-realtime | 0.6.0-next.91 | next | 54c8c55e2df0c0807650d20a72375d42591baec3 | legacy-none | sha512-iqTj1BZLwGvsbSsYCkLMZF9SNKJGnQz4oesal9kXUyk3gx6fmrDtZ/cvYGq7OmTGm/P+/QXOU0gDbRujNNdzrg== | 5b6b20f2e7a8593ef1458a53dd11395f62011cde | 2026-10-13T22:26:01.792Z | No release tag. Published from dev at 54c8c55, one ledger row past the qualified source d9a1f09; 49 text files carry CRLF line endings. |
 | svelte-realtime | 0.5.14 | latest | legacy-unrecorded | legacy-none | sha512-HH5bHtc3LPqJ9Jkj6JLqGkjfl4cXeKRZLw7tgFWx4HH4kQ8UMPXvZY5ELLx7XcLWneog+yPmbDvTAfeBmOgvrw== | 7dd08342ac28f562e84b16633025a6cd26df8524 | 2026-10-20T20:33:00.353Z | Registry omitted gitHead; no release tag. Published directly from main. |
+| svelte-realtime | 0.6.0-next.92 | next | e25a843d5fd3a1a2d642219ecd60b504db5f63bf | legacy-none | sha512-KljxFu02GaliN/yA8Yhq/Gcd6IbIgEVIElod2Ox31nQWcOm1KrL+vCJ/6GAmKt5D/pGEeqOW0/7160Ax2mxxqw== | c44e4364c7be53d3d03bb4aecf5acf87ff334408 | 2026-11-06T18:35:45.116Z | No release tag. Published from dev at e25a843, one ledger row past the qualified source c9e096c. |
 
 ## Routing, corrections and rollback events
 
@@ -202,6 +204,7 @@ even if routing is rolled back or the version is later deprecated.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | svelte-realtime-next-2026-10-13-1 | 2026-10-13T22:26:01.792Z | routed | - | - | svelte-realtime | next | 0.6.0-next.90 | 0.6.0-next.91 | - | npm publish with the next tag; observed next=0.6.0-next.90 on 2026-10-13 before publication and next=0.6.0-next.91 at 2026-10-13T22:28:50.738Z. | No quarantine candidate tag was used. |
 | svelte-realtime-latest-2026-10-20-1 | 2026-10-20T20:33:00.353Z | routed | - | - | svelte-realtime | latest | 0.5.13 | 0.5.14 | - | npm publish with the latest tag from publishConfig; observed latest=0.5.14 and next=0.6.0-next.91 on 2026-10-22. | No quarantine candidate tag was used. |
+| svelte-realtime-next-2026-11-06-1 | 2026-11-06T18:35:45.116Z | routed | - | - | svelte-realtime | next | 0.6.0-next.91 | 0.6.0-next.92 | - | npm publish with the next tag; observed next=0.6.0-next.92 and latest=0.5.16 at 2026-11-06T18:37:08.662Z. | No quarantine candidate tag was used. |
 
 ## Source reconstructions
 

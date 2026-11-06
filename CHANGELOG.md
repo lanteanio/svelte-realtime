@@ -13,8 +13,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ## [0.6.0-next.92] - 2026-11-06
 
-*Not published to npm; release candidate.*
-
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
