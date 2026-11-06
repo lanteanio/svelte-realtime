@@ -94,10 +94,10 @@ export const CODE_GUIDANCE = Object.freeze({
 		nextAction: 'Use a new idempotency key for each distinct request, and resend exactly the same payload when you retry one. Check any `keyFrom` function for keys that collide.'
 	}),
 	INTERNAL: Object.freeze({
-		cause: 'A server capability is missing: the adapter lacks the CRDT or smooth plugin or a required feature, or `live.tenant(...).publish` ran before the server platform was wired.',
+		cause: 'A server capability is missing or misconfigured: the adapter lacks the CRDT or smooth plugin or a required feature, the `platform.smooth` coordinator does not meet the contract its `ownershipVersion` declares (an unknown version, a missing lease method, or a lease answer outside the contract), or `live.tenant(...).publish` ran before the server platform was wired.',
 		consequence: 'The `live.doc`, `live.smooth` or tenant publish call throws an INTERNAL LiveError, and the client receives it as RpcError INTERNAL. The document or smooth topic does not attach.',
-		automaticRecovery: 'A failed plugin load is attempted again on the next call. Version and wiring errors persist until the deployment changes.',
-		nextAction: 'Upgrade svelte-adapter-uws to the version named in the message, or publish only after the realtime server is wired. Inside handlers, use `ctx.tenant(id).publish`.'
+		automaticRecovery: 'A failed plugin load is attempted again on the next call, and after a lease answer outside the contract the coordinator\'s next valid answer is used as usual. Version and wiring errors, an unknown `ownershipVersion` and a missing lease method persist until the deployment changes.',
+		nextAction: 'Upgrade svelte-adapter-uws to the version named in the message, fix the coordinator as the message says, or publish only after the realtime server is wired. Inside handlers, use `ctx.tenant(id).publish`.'
 	}),
 	INTERNAL_ERROR: Object.freeze({
 		cause: 'An RPC, binary RPC or upload handler throws something that is not a LiveError, or a document load or unexpected adapter-plugin import fails.',

@@ -2,7 +2,7 @@
 import { live } from '../server.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer, setImmediateTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
-import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
+import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 import { _setResponseFence } from './response-fence.js';
 import { _subscribeTracked, releaseSubscription } from './membership.js';
 import { _getIdentityKey } from './identity.js';
@@ -300,6 +300,17 @@ const _SMOOTH_PRE_V1_LEASE_MS = 2 ** 31 - 1;
 /** Pre-v1 coordinators already warned about, once each. */
 const _smoothPreV1Warned = new WeakSet();
 
+/** Lease methods of each pre-v1 coordinator already reported for an answer that is not a boolean. */
+const _smoothPreV1Refused = new WeakMap();
+
+/**
+ * The relay sequence a new record starts from. A pre-v1 receiver tells
+ * tenures apart only by the owner instance, so this instance never relays a
+ * sequence it already used for a topic: a pre-v1 tenure continues its
+ * record's counter, and a forgotten record raises this floor for the next.
+ */
+let _smoothSeqFloor = 0;
+
 /**
  * Default debounce for the owner's warm-handoff snapshot write (ms). At most
  * this much entity state is lost on an owner crash; one Redis write per topic
@@ -456,6 +467,33 @@ export function _resetSmooth() {
 		}
 	}
 	_smoothTopics.clear();
+	_smoothSeqFloor = 0;
+}
+
+/**
+ * Drop every record for a hot reload. The next record for a topic must not
+ * relay a sequence an earlier one already used, so the floor is raised first.
+ */
+export function _smoothDropForReload() {
+	for (const rec of _smoothTopics.values()) {
+		if (rec.eventSeq > _smoothSeqFloor) _smoothSeqFloor = rec.eventSeq;
+	}
+	_smoothTopics.clear();
+}
+
+/**
+ * Put records back after a failed hot reload. A record the failed reload
+ * created may have relayed past a restored one, so a restored record on the
+ * pre-v1 path continues from the floor.
+ * @param {Iterable<[string, any]>} entries
+ */
+export function _smoothRestoreForReload(entries) {
+	for (const [name, rec] of entries) {
+		rec.timer = null;
+		const cluster = rec.platform && rec.platform.smooth;
+		if (rec.eventSeq < _smoothSeqFloor && !(cluster && cluster.ownershipVersion === 1)) rec.eventSeq = _smoothSeqFloor;
+		_smoothTopics.set(name, rec);
+	}
 }
 
 // Older adapters silently ignore unknown authority options. Check the requested
@@ -533,7 +571,7 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			syncPending: 0,
 			surrogates: new Map(),
 			pendingSync: new Map(),
-			eventSeq: 0,
+			eventSeq: _smoothSeqFloor,
 			// Outbound correlation id for events emitted by the shoot RPC's onHit (a
 			// hit has no commanded apply, so it cannot borrow a command id). Distinct
 			// from `eventSeq` (the cluster relay dedup counter); client-facing.
@@ -545,6 +583,8 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			ownerDeadline: 0,
 			ownerGeneration: 0,
 			ownerAcquiring: null,
+			// An acquisition is loading the snapshot of a granted tenure.
+			ownerLoading: false,
 			ownerRenewing: false,
 			ownerRenewMs: _SMOOTH_RENEW_MS,
 			runtime: rt,
@@ -1569,30 +1609,59 @@ function _smoothAcceptEpoch(rec, epoch, owner) {
  * next one, so the ownership state machine is the same as for v1; nothing
  * fences another instance, as on the pre-v1 path. A coordinator failure keeps
  * a working local authority, the pre-v1 availability tradeoff: an acquire
- * that throws owns, a renewal that throws keeps the tenure.
+ * that throws owns, a renewal that throws keeps the tenure. An answer other
+ * than true or false fails closed (see _smoothPreV1Refuse).
  * @param {any} rec
- * @param {() => any} call The coordinator's acquireOwner or renewOwner call
+ * @param {any} cluster
+ * @param {'acquireOwner' | 'renewOwner'} method
  * @param {string | null} renewing The tenure's epoch for a renewal, null for an acquisition
  */
-async function _smoothPreV1Grant(rec, call, renewing) {
+async function _smoothPreV1Grant(rec, cluster, method, renewing) {
 	let held;
-	try { held = await call(); } catch { held = true; }
-	if (held !== true) return null;
+	try { held = await cluster[method](rec.wireTopic); } catch { held = true; }
+	if (held !== true && held !== false) _smoothPreV1Refuse(cluster, method, held);
+	if (!held) return null;
 	const epoch = renewing ?? (rec.owned && rec.ownerEpoch !== null ? rec.ownerEpoch
 		: rec.lastSeenEpoch === null ? '1' : String(BigInt(rec.lastSeenEpoch) + 1n));
 	return { epoch, leaseMs: _SMOOTH_PRE_V1_LEASE_MS };
 }
 
 /**
+ * Refuse a pre-v1 lease answer that is not a boolean. An object usually
+ * comes from a v1 coordinator that does not declare ownershipVersion: 1;
+ * running it unfenced, or treating it as never owning, would both hide that.
+ * Printed once per coordinator and lease method, thrown on every such answer.
+ * @param {any} cluster
+ * @param {string} method
+ * @param {unknown} answer
+ * @returns {never}
+ */
+function _smoothPreV1Refuse(cluster, method, answer) {
+	const detail = ': ' + method + ' resolved ' + (answer === null ? 'null' : typeof answer);
+	let reported = _smoothPreV1Refused.get(cluster);
+	if (reported === undefined) _smoothPreV1Refused.set(cluster, reported = new Set());
+	if (!reported.has(method)) {
+		reported.add(method);
+		console.error(realtimeErrorMessage(REALTIME_ERROR_IDS.SMOOTH_LEASE_ANSWER, detail));
+	}
+	throw new LiveError(realtimeErrorCode(REALTIME_ERROR_IDS.SMOOTH_LEASE_ANSWER), realtimeErrorMessage(REALTIME_ERROR_IDS.SMOOTH_LEASE_ANSWER, detail));
+}
+
+/**
  * Accept a frame a pre-v1 coordinator relayed. It carries no epoch, so frames
  * are deduplicated per owner instance, as on the pre-v1 path: a new owner
- * starts a new sequence. The record's current epoch marks the frame as
- * received for delivery.
+ * starts a new sequence, and an owner continues its own across tenures. An
+ * owner never republishes relayed broadcasts, and without an epoch it cannot
+ * tell whether one comes from an owner it replaced, its own successor or a
+ * second owner during a coordinator outage, so it drops them before they move
+ * its watermark, also while a granted tenure loads its snapshot. The record's
+ * current epoch marks the frame as received for delivery.
  * @param {any} rec
- * @param {string | undefined} owner
- * @returns {string}
+ * @param {string | undefined} owner The relaying owner, undefined for acks and sync replies
+ * @returns {string | null}
  */
 function _smoothPreV1Received(rec, owner) {
+	if (owner !== undefined && (rec.owned || rec.ownerLoading)) return null;
 	if (rec.lastSeenEpoch === null) rec.lastSeenEpoch = '1';
 	if (owner !== undefined && owner !== rec.lastSeenOwner) {
 		rec.lastSeenOwner = owner;
@@ -1609,7 +1678,7 @@ function _smoothRenew(rec, cluster) {
 	const epoch = rec.ownerEpoch, generation = rec.ownerGeneration;
 	Promise.resolve().then(() => {
 		if (!_smoothOwnerValid(rec, epoch) || generation !== rec.ownerGeneration) return null;
-		if (cluster.ownershipVersion !== 1) return _smoothPreV1Grant(rec, () => cluster.renewOwner(rec.wireTopic), epoch);
+		if (cluster.ownershipVersion !== 1) return _smoothPreV1Grant(rec, cluster, 'renewOwner', epoch);
 		return cluster.renewOwner(rec.wireTopic, epoch);
 	}).then(grant => {
 		if (generation !== rec.ownerGeneration || _smoothTopics.get(rec.name) !== rec) return;
@@ -1629,8 +1698,13 @@ function _smoothAcquire(rec, cluster) {
 	let generation = rec.ownerGeneration;
 	const pending = (async () => {
 		let grant;
-		if (cluster.ownershipVersion !== 1) grant = await _smoothPreV1Grant(rec, () => cluster.acquireOwner(rec.wireTopic), null);
-		else {
+		if (cluster.ownershipVersion !== 1) {
+			try { grant = await _smoothPreV1Grant(rec, cluster, 'acquireOwner', null); } catch (err) {
+				// A refused answer ends a tenure as a false one does.
+				if (_smoothTopics.get(rec.name) === rec && rec.ownerGeneration === generation) _smoothDemote(rec);
+				throw err;
+			}
+		} else {
 			try { grant = await cluster.acquireOwner(rec.wireTopic); } catch { grant = null; }
 		}
 		if (_smoothTopics.get(rec.name) !== rec || rec.ownerGeneration !== generation) return false;
@@ -1656,13 +1730,20 @@ function _smoothAcquire(rec, cluster) {
 			}
 			_smoothClearSnapshotState(rec);
 			rec.ownerEpoch = grant.epoch;
-			rec.eventSeq = 0;
+			// A v1 receiver resets its watermark on the new epoch. A pre-v1 one sees
+			// only this instance again, so the counter has to continue.
+			if (cluster.ownershipVersion === 1) rec.eventSeq = 0;
 		}
 		rec.ownerDeadline = started + grant.leaseMs;
 		rec.ownerRenewMs = Math.min(_SMOOTH_RENEW_MS, grant.leaseMs / 3);
 		rec.lastRenew = started - _SMOOTH_RENEW_MS;
 		if (!_smoothAcceptEpoch(rec, grant.epoch, cluster.instanceId)) { _smoothDemote(rec); return false; }
-		if (rec.cfg.snapshot) await _smoothLoadSnapshot(rec, cluster);
+		if (rec.cfg.snapshot) {
+			// A new tenure is granted but not owned until its snapshot loads. A
+			// pre-v1 relay arriving meanwhile comes from an owner it replaced.
+			rec.ownerLoading = true;
+			try { await _smoothLoadSnapshot(rec, cluster); } finally { rec.ownerLoading = false; }
+		}
 		if (rec.ownerGeneration !== generation || _smoothTopics.get(rec.name) !== rec) return false;
 		if (monotonicNow() >= rec.ownerDeadline) { _smoothDemote(rec); return false; }
 		rec.owned = true;
@@ -2104,6 +2185,7 @@ function _smoothForget(rec) {
 	// A parked join still owns this record. Its finalizer reclaims an empty
 	// record after all concurrent joins have settled.
 	if (rec.syncPending > 0) return;
+	if (rec.eventSeq > _smoothSeqFloor) _smoothSeqFloor = rec.eventSeq;
 	// Settle every suspended sync so its awaiting handler resumes (and hits its
 	// CONNECTION_CLOSED liveness re-check) rather than hanging forever.
 	for (const p of rec.pendingSync.values()) {

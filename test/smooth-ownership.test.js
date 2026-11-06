@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as runtime from 'svelte-adapter-uws/plugins/smooth';
-import { live, handleRpc, close, __register, _setSmoothRuntime, _resetSmooth } from '../src/server.js';
+import { live, handleRpc, close, __register, _setSmoothRuntime, _resetSmooth, _prepareHmr, _restoreHmr } from '../src/server.js';
 import { _smoothTopics } from '../src/server/smooth.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -114,7 +114,180 @@ describe('a coordinator without ownershipVersion', () => {
 		platform.smooth.acquireOwner = vi.fn(async () => owner);
 		platform.smooth.renewOwner = vi.fn(async () => renew());
 	});
+	afterEach(() => { vi.restoreAllMocks(); });
 	const wire = () => '__smooth:' + topic;
+	const relayedSeqs = () => platform.smooth.relayBroadcast.mock.calls.map(call => call[4]);
+	const others = () => platform.published.filter(message => message.topic === wire() && message.event === 'update' && message.data.key === 'other').map(message => message.data.data.x);
+	const printed = (spy, text) => spy.mock.calls.filter(([message]) => String(message).includes(text)).length;
+
+	it('warns once for each coordinator object', async () => {
+		declare(); await rpc('sync'); await rpc('sync');
+		expect(printed(warn, 'pre-v1 boolean ownership path')).toBe(1);
+		platform.smooth = { ...platform.smooth };
+		expect((await rpc('sync')).ok).toBe(true);
+		expect(printed(warn, 'pre-v1 boolean ownership path')).toBe(2);
+	});
+
+	it('does not warn for a coordinator that declares ownershipVersion 1', async () => {
+		platform.smooth.ownershipVersion = 1;
+		platform.smooth.acquireOwner = vi.fn(async () => grant);
+		platform.smooth.renewOwner = vi.fn(async () => grant);
+		declare(); expect((await rpc('sync')).ok).toBe(true);
+		expect(printed(warn, 'pre-v1 boolean ownership path')).toBe(0);
+	});
+
+	it('continues its relay sequence across its own tenures and a recreated record', async () => {
+		declare(); await rpc('sync'); await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		const first = relayedSeqs().length;
+		expect(first).toBeGreaterThan(0);
+		renew = async () => false;
+		mono += 3000; fire(mono); await settle(); await settle();
+		expect(_smoothTopics.get(topic).owned).toBe(false);
+		renew = async () => true;
+		expect((await rpc('sync')).ok).toBe(true);
+		await rpc('command', [[{ id: 2, cmd: { dx: 2 } }]]); fire();
+		const second = relayedSeqs().length;
+		expect(second).toBeGreaterThan(first);
+		close(ws, { platform }); await settle();
+		expect(_smoothTopics.has(topic)).toBe(false);
+		ws = mockWs({ id: 'player' });
+		expect((await rpc('sync')).ok).toBe(true);
+		await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		const seqs = relayedSeqs();
+		expect(seqs.length).toBeGreaterThan(second);
+		for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+	});
+
+	it('continues its relay sequence across a hot reload', async () => {
+		declare(); await rpc('sync'); await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		const before = relayedSeqs().length;
+		expect(before).toBeGreaterThan(0);
+		_prepareHmr();
+		declare();
+		expect((await rpc('sync')).ok).toBe(true);
+		await rpc('command', [[{ id: 2, cmd: { dx: 2 } }]]); fire();
+		const seqs = relayedSeqs();
+		expect(seqs.length).toBeGreaterThan(before);
+		for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+	});
+
+	it('continues its relay sequence when a failed reload restores its records', async () => {
+		declare(); await rpc('sync'); await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		const first = relayedSeqs().length;
+		const snapshot = _prepareHmr();
+		declare();
+		expect((await rpc('sync')).ok).toBe(true);
+		await rpc('command', [[{ id: 2, cmd: { dx: 2 } }]]); fire();
+		const before = relayedSeqs().length;
+		expect(before).toBeGreaterThan(first);
+		_restoreHmr(snapshot);
+		await rpc('command', [[{ id: 3, cmd: { dx: 2 } }]]); fire();
+		const seqs = relayedSeqs();
+		expect(seqs.length).toBeGreaterThan(before);
+		for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+	});
+
+	it('leaves its receive watermark alone while it owns the topic', async () => {
+		declare(); await rpc('sync');
+		const rec = _smoothTopics.get(topic);
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 9, y: 0 } }, undefined, 9, 'next');
+		renew = async () => false;
+		fire(); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 3, y: 0 } }, undefined, 3, 'next');
+		expect(others()).toEqual([3]);
+	});
+
+	it('keeps its tenure and drops a relay that arrives while the new tenure loads its snapshot', async () => {
+		let release;
+		platform.smooth.readSnapshot = vi.fn(() => new Promise(resolve => { release = resolve; }));
+		declare({ snapshot: true });
+		const sync = rpc('sync');
+		for (let i = 0; i < 50 && !release; i++) await settle();
+		expect(release).toBeTypeOf('function');
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 5, y: 0 } }, undefined, 7, 'stale');
+		release([]);
+		expect((await sync).ok).toBe(true);
+		expect(others()).toEqual([]);
+		const rec = _smoothTopics.get(topic);
+		const epoch = rec.ownerEpoch;
+		expect(rec.owned).toBe(true);
+		expect((await rpc('sync')).ok).toBe(true);
+		expect(rec.owned).toBe(true);
+		expect(rec.ownerEpoch).toBe(epoch);
+		expect(platform.smooth.requestSync).not.toHaveBeenCalled();
+		// Once the tenure ends, relays from the next owner are delivered again.
+		renew = async () => false;
+		fire(); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 6, y: 0 } }, undefined, 0, 'next');
+		expect(others()).toEqual([6]);
+	});
+
+	it('ends a tenure on a refused answer and prints once per lease method', async () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		declare(); await rpc('sync');
+		const rec = _smoothTopics.get(topic);
+		expect(rec.owned).toBe(true);
+		owner = null;
+		for (let i = 0; i < 2; i++) {
+			const result = await rpc('sync');
+			expect(result.ok).toBe(false);
+			expect(result.code).toBe('INTERNAL');
+			expect(rec.owned).toBe(false);
+		}
+		expect(platform.smooth.acquireOwner).toHaveBeenCalledTimes(3);
+		expect(printed(error, 'acquireOwner resolved null')).toBe(1);
+		owner = true;
+		expect((await rpc('sync')).ok).toBe(true);
+		expect(rec.owned).toBe(true);
+		renew = async () => ({ epoch: rec.ownerEpoch, leaseMs: 100 });
+		fire(); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+		expect(printed(error, 'renewOwner resolved object')).toBe(1);
+		expect(printed(error, 'acquireOwner resolved null')).toBe(1);
+	});
+
+	it('ignores a replaced owner\'s late broadcast and keeps its tenure on the next sync', async () => {
+		declare(); await rpc('sync');
+		const rec = _smoothTopics.get(topic);
+		const epoch = rec.ownerEpoch;
+		handlers.onBroadcast(wire(), 'update', { key: 'other', data: { x: 5, y: 0 } }, undefined, 7, 'stale');
+		expect((await rpc('sync')).ok).toBe(true);
+		expect(rec.owned).toBe(true);
+		expect(rec.ownerEpoch).toBe(epoch);
+		expect(platform.smooth.requestSync).not.toHaveBeenCalled();
+		await rpc('command', [[{ id: 1, cmd: { dx: 2 } }]]); fire();
+		expect(applied).toBe(1);
+	});
+
+	it.each([
+		['an object', { epoch: '1', leaseMs: 100 }, 'object'], ['null', null, 'null'], ['a number', 1, 'number'], ['undefined', undefined, 'undefined']
+	])('fails closed when acquireOwner resolves %s, printing the stable error once', async (_name, answer, type) => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		platform.smooth.acquireOwner = vi.fn(async () => answer);
+		declare();
+		for (let i = 0; i < 2; i++) {
+			const result = await rpc('sync');
+			expect(result.ok).toBe(false);
+			expect(result.code).toBe('INTERNAL');
+			expect(result.error).toContain('acquireOwner resolved ' + type + ' [REALTIME-ERR-SMOOTH-LEASE-ANSWER]');
+		}
+		expect(_smoothTopics.get(topic)?.owned ?? false).toBe(false);
+		expect(platform.smooth.acquireOwner).toHaveBeenCalledTimes(2);
+		expect(platform.smooth.requestSync).not.toHaveBeenCalled();
+		expect(printed(error, 'acquireOwner resolved ' + type)).toBe(1);
+	});
+
+	it('stops ticking when renewOwner resolves neither true nor false', async () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		declare(); await rpc('sync');
+		const rec = _smoothTopics.get(topic);
+		renew = async () => ({ epoch: rec.ownerEpoch, leaseMs: 100 });
+		fire(); await settle(); await settle();
+		expect(rec.owned).toBe(false);
+		expect(printed(error, 'renewOwner resolved object [REALTIME-ERR-SMOOTH-LEASE-ANSWER]')).toBe(1);
+	});
 	const updates = () => platform.published.filter(message => message.topic === wire() && message.event === 'update').map(message => message.data.data.x);
 
 	it('runs on the pre-v1 boolean path with one warning per coordinator', async () => {
@@ -181,6 +354,20 @@ describe('a coordinator without ownershipVersion', () => {
 		expect(updates()).toEqual([1, 2, 3]);
 		handlers.onAck(wire(), 'player', { id: 4, state: { x: 4, y: 0 } });
 		expect(platform.sent.filter(message => message.event === 'ack').map(message => message.data.id)).toEqual([4]);
+	});
+
+	it('delivers cell relays without an epoch, deduplicated per owner instance, and follows the local entity', async () => {
+		owner = false;
+		declare({ interest: { radius: 100, cell: 100, cells: true, position: state => state } });
+		await answerSync(rpc('sync'), undefined);
+		const cell = '__smoothcell:' + topic + '#0,0';
+		handlers.onBroadcast(cell, 'update', { key: 'other', data: { x: 10, y: 0 } }, undefined, 0, 'first');
+		handlers.onBroadcast(cell, 'update', { key: 'other', data: { x: 90, y: 0 } }, undefined, 0, 'first');
+		handlers.onBroadcast(cell, 'update', { key: 'other', data: { x: 11, y: 0 } }, undefined, 0, 'second');
+		expect(platform.published.filter(message => message.event === 'update').map(message => message.data.data.x)).toEqual([10, 11]);
+		handlers.onBroadcast('__smoothcell:' + topic + '#20,0', 'update', { key: 'player', data: { x: 2000, y: 0 } }, undefined, 1, 'second');
+		expect(ws.getTopics().some(value => value.endsWith('#20,0'))).toBe(true);
+		expect(ws.getTopics().some(value => value.endsWith('#0,0'))).toBe(false);
 	});
 
 	it('completes a non-owner sync from a reply without an epoch', async () => {

@@ -82,7 +82,7 @@ import { _setBus, _getBus } from './server/bus.js';
 import { _getCtxHelpers, _buildCtx, _rerunCtx, installCtx } from './server/ctx.js';
 import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggregateState, _copyAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, _crdtCurrentConfigs, installCrdt } from './server/crdt.js';
-import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
+import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, _smoothDropForReload, _smoothRestoreForReload, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, _snapshotLazyQueue, installLazy, _setAfterLazyResolve } from './server/lazy.js';
 import { validateFunctionTimeout } from './shared/function-timeout.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
@@ -3893,7 +3893,7 @@ export function _prepareHmr() {
 	derivedRegistry.clear();
 	effectRegistry.clear();
 	aggregateRegistry.clear();
-	_smoothTopics.clear();
+	_smoothDropForReload();
 	// The document records (_crdtDecls) deliberately survive HMR (they hold
 	// unpersisted edits); only the per-load registration counter resets, so a
 	// re-imported declaration re-attaches without tripping the
@@ -4013,12 +4013,7 @@ export function _restoreHmr(snap) {
 
 	// Restore smooth topic records. Timers were cancelled in the snapshot
 	// pass; nulling the handle here lets the next enqueue re-arm the tick.
-	if (snap.smooth) {
-		for (const [k, v] of snap.smooth) {
-			v.timer = null;
-			_smoothTopics.set(k, v);
-		}
-	}
+	if (snap.smooth) _smoothRestoreForReload(snap.smooth);
 
 	// Reinstall the flag watchers. They bind to the value cells, which survive
 	// HMR, so a restored flag keeps following inbound sets.

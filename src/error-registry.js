@@ -24,7 +24,8 @@ export const REALTIME_ERROR_IDS = Object.freeze({
 	DOC_PERSIST: 'REALTIME-ERR-DOC-PERSIST',
 	LAZY_REGISTRATION: 'REALTIME-ERR-LAZY-REGISTRATION',
 	ADAPTER_VERSION_SKEW: 'REALTIME-ERR-ADAPTER-VERSION-SKEW',
-	SMOOTH_CUSTOM_SHOT_CONFIG: 'REALTIME-ERR-SMOOTH-CUSTOM-SHOT-CONFIG'
+	SMOOTH_CUSTOM_SHOT_CONFIG: 'REALTIME-ERR-SMOOTH-CUSTOM-SHOT-CONFIG',
+	SMOOTH_LEASE_ANSWER: 'REALTIME-ERR-SMOOTH-LEASE-ANSWER'
 });
 
 /** @type {ReadonlyArray<Readonly<RealtimeErrorDefinition>>} */
@@ -41,6 +42,19 @@ export const REALTIME_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/server/smooth.js']),
 		anchor: 'realtime-err-smooth-custom-shot-config',
 		help: 'docs/errors.md#realtime-err-smooth-custom-shot-config'
+	}),
+	Object.freeze({
+		id: REALTIME_ERROR_IDS.SMOOTH_LEASE_ANSWER,
+		code: 'INTERNAL',
+		event: 'smooth.cluster.lease-answer-invalid',
+		messagePrefix: '[svelte-realtime] live.smooth() cluster coordinator without ownershipVersion answered a lease call with neither true nor false',
+		cause: 'A `platform.smooth` coordinator that does not declare `ownershipVersion` resolved `acquireOwner` or `renewOwner` with a value other than `true` or `false`. The line names the method and the type of the answer. An object or `null` usually comes from a coordinator that implements the SmoothCluster contract but does not declare `ownershipVersion: 1`.',
+		consequence: 'The answer is not taken as ownership and ends a tenure as `false` does: a sync whose acquisition got it fails with INTERNAL, and an owner whose acquisition or renewal got it stops ticking the topic. The line is printed once per coordinator and lease method; later such answers fail the same way without printing.',
+		automaticRecovery: 'The next answer that is `true` or `false` is used as usual; until then every other answer fails the same way.',
+		nextAction: 'Declare `ownershipVersion: 1` on a coordinator that implements the SmoothCluster contract, or make a coordinator without it resolve exactly `true` or `false` from both lease calls.',
+		sources: Object.freeze(['src/server/smooth.js']),
+		anchor: 'realtime-err-smooth-lease-answer',
+		help: 'docs/errors.md#realtime-err-smooth-lease-answer'
 	}),
 	Object.freeze({
 		id: REALTIME_ERROR_IDS.INVALID_USER_ID,

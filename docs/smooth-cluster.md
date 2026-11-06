@@ -10,18 +10,28 @@ declares another version, or lacks `acquireOwner`, `renewOwner` or
 ## Pre-v1 coordinators
 
 A coordinator that does not declare `ownershipVersion` speaks the pre-v1
-contract: `acquireOwner(topic)` and `renewOwner(topic)` resolve to booleans, and
-relays carry no epoch. Realtime runs it on the pre-v1 path and logs one warning
-per coordinator:
+contract: `acquireOwner(topic)` and `renewOwner(topic)` resolve `true` or
+`false`, and relays carry no epoch. Realtime runs it on the pre-v1 path and logs
+one warning per coordinator:
 
-- A tenure starts when `acquireOwner` resolves `true` and lasts until a renewal
-  resolves `false`. A failed acquisition keeps a working local authority and a
-  failed renewal keeps the tenure, so entities keep moving through a coordinator
-  outage.
+- A tenure starts when `acquireOwner` resolves `true`. It ends when a renewal, or
+  the acquisition that every sync on the owner repeats, resolves `false`, when a
+  configured clock fence trips, when the instance forgets the topic (it releases
+  the lease), or after 2^31-1 ms (about 24.8 days) without a renewal. A failed
+  acquisition keeps a working local authority and a failed renewal keeps the
+  tenure, so entities keep moving through a coordinator outage.
+- A lease answer other than `true` or `false` fails closed with
+  [`REALTIME-ERR-SMOOTH-LEASE-ANSWER`](errors.md#realtime-err-smooth-lease-answer)
+  and ends a tenure as `false` does: the sync that acquired fails, and an owner
+  stops ticking. An object answer usually means a coordinator that implements
+  the v1 contract below without declaring `ownershipVersion: 1`.
 - Realtime numbers each local tenure itself, so a new tenure still starts with
   fresh command queues and simulation state.
 - Received broadcasts are deduplicated per owner instance: a new owner starts a
-  new sequence. Acknowledgements and sync replies are accepted as they arrive.
+  new sequence, and an instance continues its own sequence across its tenures.
+  This needs an `instanceId` that no other process uses, including a later one
+  after a restart. An owner ignores relayed broadcasts. Acknowledgements and
+  sync replies are accepted as they arrive.
 - Nothing fences a replaced owner. During a takeover, its late broadcasts can
   interleave with the new owner's until it learns it lost the lease.
 
