@@ -3,7 +3,7 @@ import { CANDIDATE, NOT_PUBLISHED, validateReleaseLedger } from '../scripts/chec
 import { describe, expect, it } from 'vitest';
 import { anchorsOf, slugify } from '../scripts/check-links.js';
 import {
-	governedBlocks, releaseBlocks, renderReleasePage, strayReleaseEntries, SUMMARY_BASELINE,
+	governedBlocks, rebaseSummaryLinks, releaseBlocks, renderReleasePage, strayReleaseEntries, SUMMARY_BASELINE,
 	validateBlockSummary, validateReleasePages, validateReleaseRouteLinks, validateReleaseSummaries
 } from '../scripts/check-release-notes.js';
 
@@ -29,12 +29,18 @@ const unreleased = (source) => releaseBlocks(source)[0];
 const history = `\n## [${SUMMARY_BASELINE}] - 2026-10-13\n\n### Fixed\n\n- ${'x'.repeat(2500)}\n`;
 
 describe('consumer release summary', () => {
-	it('governs the real Unreleased block and leaves published history alone', () => {
+	it('governs the newest summary of the real changelog and leaves published history alone', () => {
 		const governed = validateReleaseSummaries(CHANGELOG);
-		expect(governed.map(item => item.block.version)).toEqual(['Unreleased']);
-		expect(governed[0].entries.map(e => e.kind)).toEqual(expect.arrayContaining(['Added', 'Changed', 'Fixed']));
-		expect(governedBlocks(CHANGELOG.replace(/<!-- consumer-release-summary:start -->[\s\S]*?<!-- consumer-release-summary:end -->\n/, '')).length).toBe(1);
-		expect(() => validateReleaseSummaries(CHANGELOG.replace(/<!-- consumer-release-summary:start -->[\s\S]*?<!-- consumer-release-summary:end -->\n/, ''))).toThrow('Unreleased must contain one consumer summary marker pair');
+		const newest = governed[0];
+		expect(newest).toBeDefined();
+		expect(newest.entries.map(e => e.kind)).toEqual(expect.arrayContaining(['Added', 'Changed', 'Fixed']));
+		// An Unreleased block that gains engineering sections must carry its own
+		// summary, even right after a release is cut.
+		const pending = CHANGELOG.replace(/^## \[Unreleased\]\n\n(?:<!-- consumer-release-summary:start -->[\s\S]*?<!-- consumer-release-summary:end -->\n\n)?/m, '## [Unreleased]\n\n### Fixed\n\n- A fix waiting for its release.\n\n');
+		expect(() => validateReleaseSummaries(pending)).toThrow('Unreleased must contain one consumer summary marker pair');
+		const stripped = CHANGELOG.replace(/<!-- consumer-release-summary:start -->[\s\S]*?<!-- consumer-release-summary:end -->\n/, '');
+		expect(governedBlocks(stripped).length).toBe(governed.length);
+		expect(() => validateReleaseSummaries(stripped)).toThrow(newest.block.version + ' must contain one consumer summary marker pair');
 		// An oversized historical bullet at or before the baseline is not governed.
 		expect(validateReleaseSummaries(changelog({ older: history }))).toHaveLength(1);
 	});
@@ -97,6 +103,12 @@ describe('versioned release page', () => {
 		expect(() => validateReleasePages(dated, new Map([['0.6.0-next.92.md', '[d](../../CHANGELOG.md#fixed)']]))).toThrow('must pin');
 		expect(() => validateReleasePages(dated, new Map([['9.9.9.md', 'orphan']]))).toThrow('does not match any dated CHANGELOG release');
 	});
+	it('rebases summary links written from the repository root onto the page directory', () => {
+		expect(rebaseSummaryLinks('see [guide](docs/x.md), [here](./docs/y.md#a), [top](#z), [web](https://e.x/a), [abs](/r)'))
+			.toBe('see [guide](../../docs/x.md), [here](../../docs/y.md#a), [top](#z), [web](https://e.x/a), [abs](/r)');
+		const linked = changelog({ heading: '## [0.6.0-next.92] - 2026-11-02', older: history }).replace('**Action:** None.', '**Action:** Read [the guide](docs/guide.md).');
+		expect(renderReleasePage(releaseBlocks(linked)[1])).toContain('- **Action:** Read [the guide](../../docs/guide.md).');
+	});
 	it('requires README and MIGRATION to route the current page and refuses stray entries', () => {
 		const link = './docs/releases/0.6.0-next.92.md';
 		expect(validateReleaseRouteLinks('0.6.0-next.92', { 'README.md': link, 'MIGRATION.md': link })).toBe(link);
@@ -110,7 +122,11 @@ describe('release status marker', () => {
 	const manifest = readFileSync(new URL('../docs/release-manifest.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 	const summary = changelog().split('## [Unreleased]\n\n')[1].trimEnd();
 	const dated = (version, marker) => `## [${version}] - 2026-11-02\n\n${marker === undefined ? '' : marker + '\n\n'}${summary}\n\n`;
-	const insert = (...blocks) => CHANGELOG.replace(/^## \[0\.6\.0-next\.91\]/m, blocks.join('') + '$&');
+	// The real published history from the baseline down, under a synthetic
+	// Unreleased block, so these cases do not depend on what is cut above it.
+	const baseline = CHANGELOG.search(/^## \[0\.6\.0-next\.91\]/m);
+	const preamble = CHANGELOG.slice(0, CHANGELOG.indexOf('## [Unreleased]'));
+	const insert = (...blocks) => preamble + '## [Unreleased]\n\n' + summary + '\n\n' + blocks.join('') + CHANGELOG.slice(baseline);
 
 	it('accepts a candidate heading marker in both the ledger and the summary gate', () => {
 		const source = insert(dated('0.6.0-next.92', CANDIDATE));
@@ -127,7 +143,7 @@ describe('release status marker', () => {
 		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', CANDIDATE + '\n\nIntro first.')))).toThrow('first content');
 		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', CANDIDATE + '\n' + CANDIDATE)))).toThrow('first content');
 		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', 'Intro first.\n\n' + CANDIDATE)))).toThrow('first content');
-		const unreleased = CHANGELOG.replace('## [Unreleased]\n\n', '## [Unreleased]\n\n' + CANDIDATE + '\n\n');
+		const unreleased = insert().replace('## [Unreleased]\n\n', '## [Unreleased]\n\n' + CANDIDATE + '\n\n');
 		expect(() => validateReleaseSummaries(unreleased)).toThrow('Unreleased consumer summary must be the first content');
 	});
 	it('renders the candidate page without the marker and without claiming a release', () => {

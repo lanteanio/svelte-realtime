@@ -227,6 +227,18 @@ function releasePageTarget(version) {
 	return { relative: relativePath, target: pathToFileURL(targetPath) };
 }
 
+/**
+ * Summary links are written relative to the repository root, where
+ * CHANGELOG.md lives; the page sits two directories below it, so a relative
+ * file link is rebased onto it. Anchors, absolute paths and URLs are left as
+ * written; an anchor then points into the page itself, and check-links
+ * reports one that does not resolve there.
+ * @param {string} text
+ */
+export function rebaseSummaryLinks(text) {
+	return String(text).replace(/\]\((?![a-z][a-z0-9+.-]*:|#|\/)(?:\.\/)?([^)\s]+)\)/gi, '](../../$1)');
+}
+
 /** Render the consumer page for a dated release from its validated summary. */
 export function renderReleasePage(block) {
 	const entries = validateBlockSummary(block);
@@ -255,12 +267,12 @@ export function renderReleasePage(block) {
 		lines.push(
 			`### ${entry.kind}: ${entry.capability}`,
 			'',
-			entry.outcome,
+			rebaseSummaryLinks(entry.outcome),
 			'',
-			`- **Affects:** ${entry.Affects}`,
-			`- **Action:** ${entry.Action}`,
-			`- **Requires:** ${entry.Requires}`,
-			`- **Compatibility:** ${entry.Compatibility}`,
+			`- **Affects:** ${rebaseSummaryLinks(entry.Affects)}`,
+			`- **Action:** ${rebaseSummaryLinks(entry.Action)}`,
+			`- **Requires:** ${rebaseSummaryLinks(entry.Requires)}`,
+			`- **Compatibility:** ${rebaseSummaryLinks(entry.Compatibility)}`,
 			`- **Engineering detail:** [${entry.kind} for ${block.version} in the complete changelog](../../CHANGELOG.md#${anchor}).`,
 			''
 		);
