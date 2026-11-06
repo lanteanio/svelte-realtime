@@ -12869,7 +12869,7 @@ describe('auto-replay routing', () => {
 		expect(platform.published.length).toBe(1);
 	});
 
-	it('dynamic-topic stream: replay topic is registered at first-subscribe time', async () => {
+	it('dynamic-topic stream: a publish routes through replay before and after the first subscribe', async () => {
 		const platform = mockPlatform();
 		platform.replay = fakeReplay();
 		const stream = live.stream(
@@ -12879,8 +12879,8 @@ describe('auto-replay routing', () => {
 		);
 		__register('dyn/room', stream);
 
-		// BEFORE any subscribe: a publish to this topic does NOT auto-route
-		// (the dynamic topic hasn't been resolved yet).
+		// BEFORE any subscribe: the topic matches the factory's pattern, so a
+		// process without a local subscriber still writes the buffer.
 		const handler = live(async (ctx) => {
 			ctx.publish('rooms:42', 'created', { id: 1 });
 			return 'ok';
@@ -12889,14 +12889,16 @@ describe('auto-replay routing', () => {
 		const ws = mockWs();
 		handleRpc(ws, toArrayBuffer({ rpc: 'emit/dyn', id: 'r1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
-		expect(platform.replay.calls).toEqual([]);
+		expect(platform.replay.calls).toEqual([
+			{ topic: 'rooms:42', event: 'created', data: { id: 1 } }
+		]);
 
 		// First subscribe to the dynamic topic resolves it -> registers it.
 		platform.reset();
 		handleRpc(ws, toArrayBuffer({ rpc: 'dyn/room', id: 's1', args: [42], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		// Now subsequent publishes DO auto-route.
+		// Subsequent publishes still auto-route.
 		platform.replay.calls.length = 0;
 		platform.published.length = 0;
 		handleRpc(ws, toArrayBuffer({ rpc: 'emit/dyn', id: 'r2', args: [] }), platform);

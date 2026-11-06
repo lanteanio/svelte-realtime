@@ -68,7 +68,7 @@ import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, 
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _invalidateAggregateGeneration, _configureAggregateGeneration, _bootstrapAggregateGeneration } from './server/aggregate-generation.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
-import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
+import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _registerReplayPattern, _registerFactoryOwner, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, _rpcClosedSockets, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
 export { PRESSURE_REASONS } from './server/admission.js';
@@ -1421,6 +1421,19 @@ function _deriveCoalesceTopicPattern(factory, providedArgs) {
 	} catch { return '<dynamic>'; }
 }
 
+/**
+ * A topic factory's pattern with its literal prefix and a verifier, or null
+ * for a factory that reads its context, starts with an argument or returns a
+ * constant: those yield no safe pattern.
+ * @param {Function} factory
+ * @returns {{ pattern: string, prefix: string, verify: (topic: string) => boolean } | null}
+ */
+function _topicPatternOf(factory) {
+	const pattern = _deriveCoalesceTopicPattern(factory);
+	const compiled = _compileRedactPattern(pattern);
+	return compiled ? { pattern, prefix: compiled.prefix, verify: _coalesceTopicVerifier(factory, pattern) } : null;
+}
+
 function _coalesceTopicVerifier(factory, pattern) {
 	const positions = [];
 	const source = pattern.split(/(\{arg\d+\})/).map(part => {
@@ -1759,9 +1772,16 @@ live.stream = function stream(topic, initFn, options) {
 		// Auto-routing registry: static topics register at declaration time so
 		// any publisher (RPC handler, cron tick, derived watcher, etc.) gets
 		// auto-routed through `platform.replay.publish` on first publish.
-		// Dynamic topics (topic is a function) register at first-subscribe
-		// time inside `_executeStreamRpc` when the topic resolves.
+		// A topic factory registers its pattern, so a process with no local
+		// subscriber of a resolved topic still writes the buffer; a factory
+		// that yields no safe pattern registers each resolved topic at
+		// subscribe time inside `_executeStreamRpc`.
 		if (typeof topic === 'string') _registerReplayTopic(topic);
+		else if (typeof topic === 'function') _registerReplayPattern(String(topic), () => _topicPatternOf(topic));
+	} else if (typeof topic === 'function') {
+		// A factory stream without replay owns its topic shape too, so a replay
+		// pattern that also matches its topics does not claim them.
+		_registerFactoryOwner(String(topic), () => _topicPatternOf(topic));
 	}
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
 	if (classOfService) /** @type {any} */ (initFn).__classOfService = classOfService;
@@ -1911,6 +1931,7 @@ live.channel = function channel(topic, options) {
 	// explicit declaration, so a neighbouring piiRedact factory pattern must not
 	// claim it - the typing-indicator-beside-chat case is exactly this.
 	if (typeof topic === 'string') _declaredStreamTopic.add(topic);
+	else if (typeof topic === 'function') _registerFactoryOwner(String(topic), () => _topicPatternOf(topic));
 	return initFn;
 };
 

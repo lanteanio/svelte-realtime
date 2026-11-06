@@ -127,7 +127,57 @@ export const _tenantConfigRegistry = new Map();
  * @returns {string}
  */
 export function _tenantTopic(tenantId, topic) {
-	return tenantId ? _TENANT_TOPIC_NS + tenantId + '/' + topic : topic;
+	if (!tenantId) return topic;
+	const wire = _TENANT_TOPIC_NS + tenantId + '/' + topic;
+	if (typeof topic === 'string') {
+		const n = topic.length;
+		if (n > _OBSERVED_LENGTH_MAX || (_observedLengths[n] !== 0 && _observedFirstChars[n * 256 + (topic.charCodeAt(0) & 255)] !== 0)) _tenantWireObserver?.(wire, topic);
+	}
+	return wire;
+}
+
+/**
+ * Called with a wire topic `_tenantTopic` builds and its logical topic when
+ * the logical topic has an observed length. Replay routing registers the wire
+ * topic of a registered logical topic here, where the logical topic is in
+ * hand, so the publish path needs no tenant parsing. A setter rather than an
+ * import keeps this module free of a cycle.
+ * @type {((wire: string, logical: string) => void) | null}
+ */
+let _tenantWireObserver = null;
+
+/**
+ * Topic lengths, and first characters per length, the observer wants to see;
+ * longer topics always reach it. A topic that shares only its length with an
+ * observed one costs two array reads and no call.
+ */
+const _OBSERVED_LENGTH_MAX = 256;
+const _observedLengths = new Uint8Array(_OBSERVED_LENGTH_MAX + 1);
+const _observedFirstChars = new Uint8Array((_OBSERVED_LENGTH_MAX + 1) * 256);
+
+/** @param {((wire: string, logical: string) => void) | null} observer */
+export function _observeTenantWires(observer) {
+	_tenantWireObserver = observer;
+}
+
+/**
+ * Pass logical topics with the length and first character of `topic` to the
+ * observer. Entries are only added until the next reset, so such a topic is
+ * never missed. The first character is compared by its low byte, which can
+ * only let more topics through.
+ * @param {string} topic
+ */
+export function _observeTenantTopic(topic) {
+	const n = topic.length;
+	if (n === 0 || n > _OBSERVED_LENGTH_MAX) return;
+	_observedLengths[n] = 1;
+	_observedFirstChars[n * 256 + (topic.charCodeAt(0) & 255)] = 1;
+}
+
+/** Stop passing any length to the observer (test reset). @internal */
+export function _resetObservedTenantTopicLengths() {
+	_observedLengths.fill(0);
+	_observedFirstChars.fill(0);
 }
 
 /**

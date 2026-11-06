@@ -727,11 +727,15 @@ describe('piiRedact/replay registration is post-admission', () => {
 		return platform;
 	}
 
+	// Both cases use a topic that starts with its argument: it has no topic
+	// pattern, so only an admitted subscribe makes a resolved topic eligible.
+	// A factory with a literal namespace is eligible by its declared shape
+	// before any subscribe (replay-routing-scope.test.js).
 	it('a denied subscribe leaves no replay/redact registration and no replay eligibility', async () => {
 		const replayWrites = [];
 		const platform = replayPlatform(replayWrites);
 		__register('pii/deny-reg', live.stream(
-			(ctx, room) => 'room:' + room,
+			(ctx, room) => room + ':room',
 			async () => [],
 			{ merge: 'latest', replay: true, piiRedact: { fields: { ssn: 'omit' } }, filter: () => false }
 		));
@@ -748,7 +752,7 @@ describe('piiRedact/replay registration is post-admission', () => {
 		// ...and crucially no permanent registry entries...
 		expect(_declaredRedact.size).toBe(redactBefore);
 		// ...and the attacker-chosen topic is NOT replay-eligible (no buffer write).
-		expect(_maybeReplayPublish(platform, 'room:evil-0', 'update', { ssn: '123' })).toBe(false);
+		expect(_maybeReplayPublish(platform, 'evil-0:room', 'update', { ssn: '123' })).toBe(false);
 		expect(replayWrites).toEqual([]);
 	});
 
@@ -757,7 +761,7 @@ describe('piiRedact/replay registration is post-admission', () => {
 		const platform = replayPlatform(replayWrites);
 		let allow = false;
 		__register('pii/admit-reg', live.stream(
-			(ctx, room) => 'room:' + room,
+			(ctx, room) => room + ':room',
 			async () => [],
 			{ merge: 'latest', replay: true, piiRedact: { fields: { ssn: 'omit' } }, filter: () => allow }
 		));
@@ -768,15 +772,15 @@ describe('piiRedact/replay registration is post-admission', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'pii/admit-reg', id: 'a1', args: ['room-1'], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 20));
 		expect(_declaredRedact.size).toBe(redactBefore);
-		expect(_maybeReplayPublish(platform, 'room:room-1', 'update', { ssn: '123' })).toBe(false);
+		expect(_maybeReplayPublish(platform, 'room-1:room', 'update', { ssn: '123' })).toBe(false);
 
 		// Re-admission: the same topic is now admitted and must register fully.
 		allow = true;
 		handleRpc(ws, toArrayBuffer({ rpc: 'pii/admit-reg', id: 'a2', args: ['room-1'], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 20));
-		expect(ws.isSubscribed('room:room-1')).toBe(true);
+		expect(ws.isSubscribed('room-1:room')).toBe(true);
 		expect(_declaredRedact.size).toBe(redactBefore + 1);
-		expect(_maybeReplayPublish(platform, 'room:room-1', 'update', { ssn: '123' })).toBe(true);
-		expect(replayWrites).toEqual(['room:room-1']);
+		expect(_maybeReplayPublish(platform, 'room-1:room', 'update', { ssn: '123' })).toBe(true);
+		expect(replayWrites).toEqual(['room-1:room']);
 	});
 });
