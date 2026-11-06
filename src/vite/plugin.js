@@ -178,10 +178,19 @@ export default function svelteRealtime(options) {
 			// disclose the dev machine's absolute paths, so it must never
 			// resolve for the client graph - an anonymous HTTP client of a dev
 			// server could otherwise fetch it. Mirrors the transform gate below.
-			// The server re-export module is server-only for the same reason.
+			// The server re-export module is server-only too.
 			const ssr = serverGraph(this, resolveOptions);
 			if (id === REGISTRY_ID || id === REGISTRY_PUBLIC_ID) return ssr ? REGISTRY_ID : null;
-			if (id === SERVER_ID || id === SERVER_PUBLIC_ID) return ssr ? SERVER_ID : null;
+			if (id === SERVER_ID) return ssr ? SERVER_ID : null;
+			if (id === SERVER_PUBLIC_ID) {
+				if (ssr) return SERVER_ID;
+				// The development alias for bare `svelte-realtime` applies to every
+				// environment. A client-graph import of it, such as a live module in
+				// a jsdom test, gets the package's own server entry, as it did before
+				// the alias existed; that file is public package code, unlike the
+				// registry.
+				return this.resolve('svelte-realtime/server', importer, { ...resolveOptions, skipSelf: true });
+			}
 			if (id.startsWith('$live/')) {
 				const modulePath = id.slice(6); // strip '$live/'
 				// Shared helper modules (e.g. board.shared.js) are plain modules the app
